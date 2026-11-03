@@ -5,8 +5,8 @@
 //
 // ONE pass for both on purpose. SQLite stores a row as one record and rewrites
 // the whole record on any UPDATE, so at the live mailbox's ~330 KB average body
-// a single scalar UPDATE costs ~47 KB of WAL once SQLCipher has encrypted and
-// HMAC'd it — measured 2026-08-27. A 26k-row mailbox is therefore on the order
+// a single scalar UPDATE costs ~47 KB of WAL once the page cipher
+// (ChaCha20-Poly1305) has encrypted and authenticated it — measured 2026-08-27. A 26k-row mailbox is therefore on the order
 // of a gigabyte of WAL PER SWEEP. Running the length stamp and the relocation as
 // two passes would pay that twice for no benefit, since a row being moved has
 // its body in hand anyway and can compute its own lengths on the way past.

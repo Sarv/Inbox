@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
 vi.mock('electron', () => ({ safeStorage: h.safeStorage }));
 
 import {
+  KEYCHAIN_REFUSED_MESSAGE,
   SealError,
   electronKeychain,
   protectionOf,
@@ -56,6 +57,37 @@ describe('pgp secret seal', () => {
       expect.unreachable();
     } catch (error) {
       expect(error).toMatchObject({ code: 'keychain-unavailable' });
+    }
+  });
+
+  // Breaks: a keychain that exists but will not decrypt (macOS access denied,
+  // a locked or rotated Linux keyring, a copied profile) throws safeStorage's
+  // plain Error, which the reader and the send path show as a vague OpenPGP
+  // failure ("Try again") instead of the one thing the user can fix — or the
+  // platform's message (or the key) reaches the log.
+  it('turns a keychain that refuses to decrypt into keychain-unavailable, logging only the error class', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const sealed = sealWithKeychain(fakeKeychain(), 'SECRET-KEY');
+      const refusing: Keychain = {
+        ...fakeKeychain(),
+        decrypt: () => {
+          throw new Error('Error while decrypting the ciphertext provided to safeStorage.decryptString. SECRET-KEY');
+        },
+      };
+      let thrown: unknown;
+      try {
+        unseal(refusing, sealed);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(SealError);
+      expect(thrown).toMatchObject({ code: 'keychain-unavailable', message: KEYCHAIN_REFUSED_MESSAGE });
+      const logged = warn.mock.calls.map((call) => call.map(String).join(' '));
+      expect(logged).toEqual([expect.stringContaining('(Error)')]);
+      expect(logged.join('\n')).not.toMatch(/SECRET-KEY|safeStorage/);
+    } finally {
+      warn.mockRestore();
     }
   });
 

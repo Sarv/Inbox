@@ -1,5 +1,7 @@
+import { OutgoingMimeError } from '@sarvinbox/core';
 import {
   buildAutocryptHeader,
+  encryptOutgoingMime,
   generateKeyPair,
   inspectKey,
   protectPrivateKey,
@@ -8,7 +10,7 @@ import {
   type PgpPrefs,
 } from '@sarvinbox/core/pgp';
 import Database from 'better-sqlite3';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ safeStorage: {} }));
 vi.mock('../../../../electron/services/core-db', () => ({
@@ -25,7 +27,9 @@ import {
   PgpKeyring,
   PgpKeyringError,
 } from '../../../../electron/services/pgp-keyring';
-import type { Keychain } from '../../../../electron/services/pgp-secret-seal';
+import { pgpOutgoingTransform } from '../../../../electron/services/pgp-outgoing';
+import { PgpReader } from '../../../../electron/services/pgp-reader';
+import { KEYCHAIN_REFUSED_MESSAGE, type Keychain } from '../../../../electron/services/pgp-secret-seal';
 
 /**
  * The keyring's decisions. What this protects: a private key stored in the
@@ -355,5 +359,61 @@ describe('recipients', () => {
     await keyring.importContactKeys(bob.armoredPublicKey);
     expect((await keyring.openingKeys('bob@example.org')).verificationKeys).toHaveLength(1);
     expect((await keyring.openingKeys(null)).verificationKeys).toHaveLength(0);
+  });
+});
+
+// A keychain that EXISTS (canOpen is true) but will not decrypt this key:
+// macOS Keychain access denied, a locked or re-created Linux keyring, a profile
+// copied from another machine. Through the real keyring, so the error the user
+// reads is the one the seal throws, not a stand-in.
+describe('a keychain that is there but refuses to decrypt', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** A key generated and sealed normally, then reopened by a keyring whose keychain refuses. */
+  const refusingKeyring = async () => {
+    const first = setup();
+    await first.keyring.generateOwnKey({ name: 'Me', email: 'me@example.org' });
+    const keychain: Keychain = {
+      ...fakeKeychain(),
+      decrypt: () => {
+        throw new Error('Error while decrypting the ciphertext provided to safeStorage.decryptString.');
+      },
+    };
+    // A fresh keyring: the first one still holds the key it just generated, opened.
+    return { keyring: new PgpKeyring({ ...first.deps, keychain }), own: (await first.keyring.ownPublicKeyFor('me@example.org'))! };
+  };
+  const warnLines = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls.map((call) => call.map(String).join(' '));
+
+  // Breaks: an encrypted message reads "The message could not be opened. Try
+  // again." — retrying never helps; unlocking or allowing the keychain does.
+  it('the reader shows the keychain message, and the log names only the error class', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { keyring, own } = await refusingKeyring();
+    const raw = Buffer.concat([
+      Buffer.from('From: Bob <bob@example.org>\r\nTo: me@example.org\r\nSubject: hi\r\n'),
+      await encryptOutgoingMime(Buffer.from('Content-Type: text/plain\r\n\r\nsecret\r\n'), { encryptionKeys: [own] }),
+    ]).toString('latin1');
+    const reader = new PgpReader({ keyring: () => keyring, source: async () => ({ raw, fromAddress: 'bob@example.org' }) });
+
+    expect(await reader.open('e1')).toEqual({ ok: false, code: 'unavailable', error: KEYCHAIN_REFUSED_MESSAGE });
+    expect(warnLines(warn)).toEqual([expect.stringContaining('(Error)')]);
+    expect(warnLines(warn).join('\n')).not.toContain('safeStorage');
+  });
+
+  // Breaks: a signed send fails with "Could not sign the message: the OpenPGP
+  // operation failed", hiding the keychain as the cause — or, worse, is retried
+  // as transient and goes out unsigned.
+  it('a signed send fails permanently with the keychain message', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { keyring } = await refusingKeyring();
+    const transform = pgpOutgoingTransform(keyring, { request: { encrypt: false, sign: true }, preferEncrypt: false });
+
+    const error = await transform(Buffer.from('From: me@example.org\r\nSubject: hi\r\n\r\nhello\r\n'), {
+      fromHeader: 'Me <me@example.org>',
+      recipients: ['bob@example.org'],
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(OutgoingMimeError);
+    expect(error).toMatchObject({ transient: false, message: `Could not sign the message: ${KEYCHAIN_REFUSED_MESSAGE}` });
   });
 });

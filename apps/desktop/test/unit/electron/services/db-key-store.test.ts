@@ -7,7 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { asPlatform } from '../../../helpers/as-platform';
 
 /**
- * The SQLCipher key store. Losing/regenerating this key makes every encrypted DB
+ * The database-key store. Losing/regenerating this key makes every encrypted DB
  * unreadable, so the invariants are: mint ONCE, cache for the process lifetime,
  * write atomically (tmp + rename), and never silently "recover" an unreadable
  * key file by minting a new one — it throws instead.

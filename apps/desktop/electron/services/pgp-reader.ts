@@ -22,6 +22,7 @@ import {
   type PgpSignatureStatus,
 } from '@sarvinbox/core/pgp';
 
+import { pgpUserMessage } from './pgp-failure';
 import { normalizeEmail } from './pgp-key-store';
 import type { PgpKeyring } from './pgp-keyring';
 
@@ -29,6 +30,13 @@ const logger = createLogger('pgp-reader');
 
 /** How many opened messages stay in memory. Small: plaintext is kept only for the one being read. */
 export const OPENED_CACHE_SIZE = 8;
+
+/**
+ * What the reader says when opening fails for a reason that is not one of our
+ * own (the keychain's or the library's error). The reason is logged; the user
+ * reads this, whatever it was (CASA 4.1.4).
+ */
+export const PGP_OPEN_FAILED_MESSAGE = 'The message could not be opened. Try again.';
 
 export interface PgpSignatureView {
   status: PgpSignatureStatus;
@@ -109,6 +117,8 @@ export class PgpReader {
     try {
       const keys = await this.deps.keyring().openingKeys(source.fromAddress);
       const result = await openStoredPgp(Buffer.from(source.raw, 'latin1'), keys);
+      // The verdict is all the renderer gets; why it failed stays in the local log.
+      if (result.signature.detail) logger.warn(`OpenPGP signature on ${emailId} did not verify: ${result.signature.detail}`);
       const content = await readOpenedContent(result.content);
       this.remember(cacheKey(emailId, accountId), content);
       const from = source.fromAddress ? normalizeEmail(source.fromAddress) : null;
@@ -127,9 +137,8 @@ export class PgpReader {
         attachments: content.attachments.map(({ name, contentType, size }, index) => ({ index, name, contentType, size })),
       };
     } catch (error) {
-      if (error instanceof PgpOpenError) return { ok: false, code: error.code, error: error.message };
-      logger.warn(`Could not open OpenPGP message ${emailId}: ${(error as Error)?.message ?? String(error)}`);
-      return { ok: false, code: 'unavailable', error: (error as Error)?.message ?? String(error) };
+      const message = pgpUserMessage(error, PGP_OPEN_FAILED_MESSAGE, logger, `Could not open OpenPGP message ${emailId}`);
+      return { ok: false, code: error instanceof PgpOpenError ? error.code : 'unavailable', error: message };
     }
   }
 

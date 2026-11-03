@@ -37,6 +37,13 @@ All values are optional and are read once at startup by `initializeOAuth()`.
 In dev, put them in the gitignored `.env` at the repo root (see
 [`.env.example`](./.env.example)).
 
+They are **dev-build only.** A release build (`vite build`, i.e. every shipped
+app) ignores all five and uses the built-in production client and endpoints,
+whatever its environment says: a shipped app's environment belongs to whoever
+launched it, and these decide where the sign-in and the Sarv token go. It logs
+`[OAuth] Release build — ignoring <names> …` once, naming each ignored
+variable but never its value.
+
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `SARVINBOX_SARV_CLIENT_ID` | OAuth client id to use instead of the built-in one | built-in production client |
@@ -57,7 +64,11 @@ The main process logs which source it used —
 
 The defaults and the endpoint paths live in `buildSarvProvider()` in
 [`packages/core/src/oauth/providers.ts`](packages/core/src/oauth/providers.ts);
-don't hard-code your own credentials there — use the environment variables.
+for a dev build, don't hard-code your own credentials there — use the
+environment variables. A fork that ships its own release builds has to change
+them there (`SARV_PRODUCTION_CLIENT_ID`, and the defaults in
+`buildSarvProvider()` for another Sarv environment), because a release build
+reads none of them from the environment.
 
 ## Registering your own client
 
@@ -71,12 +82,15 @@ the consent screen, your own redirect-URI allowlist and rate limits), contact
 - the scopes you need (see "Scopes").
 
 Then set `SARVINBOX_SARV_CLIENT_ID` (and `SARVINBOX_SARV_CLIENT_SECRET`, if the
-registration you were given is a confidential client) as shown above.
+registration you were given is a confidential client) as shown above for a dev
+build, or `SARV_PRODUCTION_CLIENT_ID` for the release builds you distribute.
 
 ### Redirect URI
 
-Sarv Inbox follows RFC 8252 (OAuth 2.0 for Native Apps): it starts a loopback
-HTTP server on a random port for each sign-in and uses
+Sarv Inbox follows RFC 8252 (OAuth 2.0 for Native Apps): for each sign-in it
+opens a loopback HTTP listener on 127.0.0.1 — the first free of 51823, 51824 and
+51825, or a random port if all three are taken — closes it once the sign-in
+ends, and uses
 
 ```
 http://127.0.0.1:<port>/cb

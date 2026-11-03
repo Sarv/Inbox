@@ -21,14 +21,14 @@ same set; we neither create nor control those.
 
 | # | Item | Type | What it is | Action |
 |---|---|---|---|---|
-| 1 | `sarvinbox-<hash>.db` (per account) | file | An account's encrypted mail DB (SQLCipher). Filename = `sha256(accountId)[:32]`, one per account. | KEEP |
+| 1 | `sarvinbox-<hash>.db` (per account) | file | An account's encrypted mail DB (SQLite3 Multiple Ciphers, ChaCha20-Poly1305 — not SQLCipher). Filename = `sha256(accountId)[:32]`, one per account. | KEEP |
 | 2 | `sarvinbox-<hash>.db-shm` | file | SQLite shared-memory sidecar for #1. | KEEP |
 | 3 | `sarvinbox-<hash>.db-wal` | file | SQLite write-ahead-log sidecar for #1. | KEEP |
 | 4 | `sarvinbox-core.db` | file | **Shared core DB** — OAuth tokens, credential vault, the `account_registry` table, image-allowlist, pipeline state, **and** `agent-config` / `ai-secrets` / `pipeline-ai-config` (migrated from loose JSON). | KEEP |
 | 5 | `sarvinbox-core.db-shm` | file | SQLite shared-memory sidecar for #4. | KEEP |
 | 6 | `sarvinbox-core.db-wal` | file | SQLite write-ahead-log sidecar for #4. | KEEP |
 | 7 | `sarvinbox-core.db.bak` | file | Automatic backup of the core DB. | SAFE (backup) |
-| 8 | `db-key.bin` | file | **SQLCipher key** that decrypts every `sarvinbox-*.db`. | NEVER |
+| 8 | `db-key.bin` | file | **Database key** (the passphrase each file's ChaCha20-Poly1305 page key is derived from) that decrypts every `sarvinbox-*.db`. | NEVER |
 | 9 | `attachment-cache/` | dir | Downloaded attachment files, cached per email. | SAFE (re-downloads) |
 
 ## B. Sarv Inbox — logs & subsystems (ours)

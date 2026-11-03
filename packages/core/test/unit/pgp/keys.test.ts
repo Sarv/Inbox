@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   generateKeyPair,
   inspectKey,
+  PGP_UNREADABLE_KEY_MESSAGE,
   PgpKeyError,
   pickEncryptionKey,
   protectPrivateKey,
@@ -83,6 +84,30 @@ describe('reading keys', () => {
     await expect(readAnyKey('not a key')).rejects.toBeInstanceOf(PgpKeyError);
     await expect(readAnyKey(new Uint8Array([1, 2, 3]))).rejects.toMatchObject({ code: 'bad-key' });
     await expect(readAllKeys('junk')).rejects.toMatchObject({ code: 'bad-key' });
+  });
+
+  // Breaks (CASA 4.1.4): the import dialog shows the library's reason, so the
+  // text differs with how the key file is broken — the user-facing message of
+  // a crypto failure must be one sentence, the reason kept only for the log.
+  it('gives every unreadable key the same message and keeps the library reason as detail', async () => {
+    const a = await generateKeyPair({ name: 'A', email: 'a@x.com' });
+    const failures: PgpKeyError[] = await Promise.all([
+      readAnyKey('not a key').catch((error) => error),
+      readAnyKey(new Uint8Array([1, 2, 3])).catch((error) => error),
+      readAllKeys(`${a.armoredPublicKey}\n-----BEGIN PGP PUBLIC KEY BLOCK-----\njunk`).catch((error) => error),
+    ]);
+    failures.forEach((failure) => expect(failure).toMatchObject({ code: 'bad-key', message: PGP_UNREADABLE_KEY_MESSAGE }));
+    failures.forEach((failure) => expect(failure.detail).toEqual(expect.any(String)));
+    // Different library reasons — proof these are different failures, every one kept for the log.
+    expect(new Set(failures.map((failure) => failure.detail)).size).toBeGreaterThan(1);
+  });
+
+  // Breaks: a wrong passphrase loses the library's reason (a damaged key reads the same), so the log cannot tell them apart.
+  it('keeps the library reason for a passphrase that does not unlock the key', async () => {
+    const locked = await generateKeyPair({ name: 'A', email: 'a@x.com', passphrase: 'right' });
+    const failure: PgpKeyError = await unlockPrivateKey(locked.armoredPrivateKey, 'wrong').catch((error) => error);
+    expect(failure).toMatchObject({ code: 'bad-passphrase', message: 'Wrong passphrase for this key' });
+    expect(failure.detail).toEqual(expect.any(String));
   });
 
   // Breaks: WKD/Autocrypt deliver BINARY keys; those must read the same as armored ones.

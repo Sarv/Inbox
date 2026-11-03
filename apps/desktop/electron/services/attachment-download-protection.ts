@@ -5,6 +5,8 @@ import path from 'node:path';
 
 import { waitForAbortableOperation, type ExtensionManager } from '@sarvinbox/core';
 
+import { markDownloadedFromInternet } from './mark-downloaded';
+
 export type AttachmentDownloadPhase = 'downloading' | 'uploading' | 'scanning' | 'saving';
 
 /** Bytes observed for this stage; absent totals stay indeterminate. */
@@ -448,6 +450,10 @@ export async function writeProtectedAttachment(
   const temporary = path.join(path.dirname(destination), `.inbox-download-${randomUUID()}.partial`);
   try {
     await fs.writeFile(temporary, content, { mode: 0o600, flag: 'wx', signal });
+    // Marked BEFORE the commit, so the file never appears under its real name
+    // unmarked. The mark lives on the file itself (macOS xattr on the inode,
+    // NTFS stream on the file record), so the rename or hard link keeps it.
+    await markDownloadedFromInternet(temporary);
     await beforeCommit();
     signal.throwIfAborted();
     if (exclusive) await fs.link(temporary, destination); // Atomic no-overwrite commit for automatic Downloads.

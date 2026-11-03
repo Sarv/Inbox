@@ -60,7 +60,7 @@ describe('legacy mail-key recovery against a real encrypted database', () => {
       expect(readdirSync(h.directory).sort()).toEqual(['db-key.bin', 'fixture.db']);
 
       // Simulate a later app launch: read the protected key afresh, then prove
-      // the old SQLCipher database and its message still open with that key.
+      // the old encrypted database and its message still open with that key.
       vi.resetModules();
       const next = await import('../../../../electron/services/db-key-store');
       const recoveredKey = next.getDbEncryptionKey();

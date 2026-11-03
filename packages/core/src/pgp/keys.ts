@@ -4,17 +4,28 @@
 
 import * as openpgp from 'openpgp';
 
+import { pgpFailureDetail } from './types';
 import type { PgpKeyInfo, PgpUserId } from './types';
 
 export class PgpKeyError extends Error {
   constructor(
+    /** Safe to show: our own wording, never the library's. */
     message: string,
     readonly code: 'bad-key' | 'bad-passphrase' | 'not-private' | 'no-usable-key',
+    /** The library's reason, when it had one — for the local log only. */
+    readonly detail?: string,
   ) {
     super(message);
     this.name = 'PgpKeyError';
   }
 }
+
+/**
+ * One sentence for every key that will not parse — a bad checksum, an unknown
+ * packet, a truncated file (CASA 4.1.4: the user-facing text of a crypto
+ * failure does not vary with its cause). The library's reason is `detail`.
+ */
+export const PGP_UNREADABLE_KEY_MESSAGE = 'Not a readable OpenPGP key';
 
 export interface GenerateKeyInput {
   name: string;
@@ -58,7 +69,7 @@ export async function readAnyKey(source: string | Uint8Array): Promise<openpgp.K
       ? await openpgp.readKey({ armoredKey: source })
       : await openpgp.readKey({ binaryKey: source });
   } catch (error) {
-    throw new PgpKeyError(`Not a readable OpenPGP key: ${(error as Error).message}`, 'bad-key');
+    throw new PgpKeyError(PGP_UNREADABLE_KEY_MESSAGE, 'bad-key', pgpFailureDetail(error));
   }
 }
 
@@ -82,7 +93,7 @@ export async function readAllKeys(source: string | Uint8Array): Promise<openpgp.
     const perBlock = await Promise.all(armorBlocks(source).map((block) => openpgp.readKeys({ armoredKeys: block })));
     return perBlock.flat();
   } catch (error) {
-    throw new PgpKeyError(`Not a readable OpenPGP key: ${(error as Error).message}`, 'bad-key');
+    throw new PgpKeyError(PGP_UNREADABLE_KEY_MESSAGE, 'bad-key', pgpFailureDetail(error));
   }
 }
 
@@ -140,8 +151,8 @@ export async function unlockPrivateKey(armored: string, passphrase: string): Pro
   try {
     const unlocked = await openpgp.decryptKey({ privateKey: key, passphrase });
     return unlocked.armor();
-  } catch {
-    throw new PgpKeyError('Wrong passphrase for this key', 'bad-passphrase');
+  } catch (error) {
+    throw new PgpKeyError('Wrong passphrase for this key', 'bad-passphrase', pgpFailureDetail(error));
   }
 }
 

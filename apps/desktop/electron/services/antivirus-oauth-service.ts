@@ -2,6 +2,8 @@ import http from 'node:http';
 
 import { generatePkcePair, generateState, type AntivirusSetupStatus } from '@sarvinbox/core';
 
+import { setLoopbackCallbackHeaders } from '../utils/loopback-callback-headers';
+
 import type { AntivirusScanService } from './antivirus-scan-service';
 import { hasControlCharacters, object } from './antivirus-transport';
 
@@ -32,10 +34,8 @@ export function runScannerLoopbackFlow(
     let settled = false;
     let redirectUri = '';
     const server = http.createServer((request, response) => {
-      response.setHeader('Cache-Control', 'no-store');
-      response.setHeader('Referrer-Policy', 'no-referrer');
+      setLoopbackCallbackHeaders(response);
       response.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      response.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
       let callback: URL;
       try { callback = new URL(request.url || '/', redirectUri); }
       catch { response.writeHead(400).end('Invalid callback.'); return; }

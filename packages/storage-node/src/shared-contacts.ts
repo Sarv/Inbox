@@ -241,8 +241,9 @@ export function attachSharedContacts(
   // brand-new file looks plaintext too.
   const legacyPlaintext = !!key && isExistingPlaintextDb(path);
 
-  // `ATTACH … KEY …` is the SQLCipher-compatible form implemented by
-  // sqlite3mc (the cipher build this project uses); the key is bound, never
+  // `ATTACH … KEY …` is sqlite3mc's syntax for attaching an encrypted file
+  // (SQLite3 Multiple Ciphers, the cipher build this project uses — the file is
+  // ChaCha20-Poly1305 like the mailbox, not SQLCipher); the key is bound, never
   // interpolated, so it cannot terminate the string. ATTACH creates the file
   // when it does not exist yet, so the first account to open is also the one
   // that brings the directory into being.

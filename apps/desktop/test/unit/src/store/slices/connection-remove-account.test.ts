@@ -184,6 +184,139 @@ describe('removeAccountById', () => {
     expect(api.ai.setProviderConfigured).toHaveBeenCalledWith(false);
   });
 
+  // CASA 6.6.1. An older build's plaintext secrets in localStorage outlive the
+  // vault (migrateCredentialsToVault leaves them when a vault write fails).
+  describe('legacy plaintext secrets in localStorage', () => {
+    const LEGACY_IMAP = 'sarvinbox-credentials';
+    const LEGACY_SMTP = 'sarvinbox-smtp-credentials';
+    const withLogin = (id: string) => account(id, {
+      imapConfig: { host: `imap.${id}.com`, username: `${id}@example.com` },
+      smtpConfig: { host: `smtp.${id}.com`, port: 465, secure: true, username: `${id}@example.com` },
+    });
+    const seedLegacyFor = (id: string) => {
+      localStorage.setItem(LEGACY_IMAP, JSON.stringify({ host: `imap.${id}.com`, username: `${id}@example.com`, password: `${id}-imap-pw` }));
+      localStorage.setItem(LEGACY_SMTP, JSON.stringify({ host: `smtp.${id}.com`, username: `${id}@example.com`, password: `${id}-smtp-pw` }));
+    };
+    const plaintextOnDisk = () => [LEGACY_IMAP, LEGACY_SMTP, 'sarvinbox-accounts'].map((k) => localStorage.getItem(k) ?? '').join('\n');
+
+    // Breaks: removing a background account leaves its IMAP/SMTP passwords on
+    // disk in the legacy keys (and its row's, in the accounts list).
+    it("deletes the removed account's entries while another account remains", async () => {
+      const { state } = await loadSlice({ accounts: [withLogin('a'), withLogin('b')], activeAccountId: 'a' }, baseElectronAPI());
+      seedLegacyFor('b');
+      localStorage.setItem('sarvinbox-accounts', JSON.stringify([withLogin('a'), { ...withLogin('b'), imapConfig: { ...withLogin('b').imapConfig, password: 'b-row-pw' } }]));
+
+      await state.removeAccountById('b');
+
+      expect(localStorage.getItem(LEGACY_IMAP)).toBeNull();
+      expect(localStorage.getItem(LEGACY_SMTP)).toBeNull();
+      expect(plaintextOnDisk()).not.toMatch(/b-(imap|smtp|row)-pw/);
+    });
+
+    // Breaks (credential loss, multi-account): removing B deletes A's legacy
+    // entries — after a failed vault migration, A's only copy of its password.
+    it("keeps a remaining account's entries", async () => {
+      const { state } = await loadSlice({ accounts: [withLogin('a'), withLogin('b')], activeAccountId: 'a' }, baseElectronAPI());
+      seedLegacyFor('a');
+
+      await state.removeAccountById('b');
+
+      expect(localStorage.getItem(LEGACY_IMAP)).toContain('a-imap-pw');
+      expect(localStorage.getItem(LEGACY_SMTP)).toContain('a-smtp-pw');
+    });
+
+    // Breaks: the last account goes but its legacy keys stay — and the next
+    // launch resurrects them as "Account 1". It used to be cleared only when
+    // the removed account was also the ACTIVE one.
+    it.each([['active', 'a'], ['not active', null]] as const)('clears every legacy entry when the last account (%s) is removed', async (_label, active) => {
+      const { state } = await loadSlice({ accounts: [withLogin('a')], activeAccountId: active }, baseElectronAPI());
+      seedLegacyFor('a');
+
+      await state.removeAccountById('a');
+
+      expect(localStorage.getItem(LEGACY_IMAP)).toBeNull();
+      expect(localStorage.getItem(LEGACY_SMTP)).toBeNull();
+      expect(plaintextOnDisk()).not.toContain('-pw');
+    });
+
+    // Breaks: a removal that FAILED (the account stays) already threw away
+    // its legacy plaintext — possibly its only copy of the password.
+    it('keeps them when the durable wipe failed', async () => {
+      const api = baseElectronAPI({ accounts: { remove: vi.fn().mockResolvedValue({ success: false, error: 'disk busy' }) } });
+      const { state } = await loadSlice({ accounts: [withLogin('a'), withLogin('b')], activeAccountId: 'a' }, api);
+      seedLegacyFor('b');
+
+      await expect(state.removeAccountById('b')).rejects.toThrow('disk busy');
+
+      expect(localStorage.getItem(LEGACY_IMAP)).toContain('b-imap-pw');
+      expect(localStorage.getItem(LEGACY_SMTP)).toContain('b-smtp-pw');
+    });
+  });
+
+  // The accounts list in localStorage. Before, it was rewritten (through the
+  // secret-stripping saveAccounts) BEFORE the main-process removal ran.
+  describe('the stored accounts list', () => {
+    const ACCOUNTS_KEY = 'sarvinbox-accounts';
+    // As a failed vault migration leaves them: each row still carries its password.
+    const storedRow = (id: string) => account(id, { imapConfig: { host: `imap.${id}.com`, username: `${id}@example.com`, password: `${id}-row-pw` } });
+    const seedStoredRows = (...ids: string[]) => {
+      const raw = JSON.stringify(ids.map(storedRow));
+      localStorage.setItem(ACCOUNTS_KEY, raw);
+      return raw;
+    };
+    const failing = () => baseElectronAPI({ accounts: { remove: vi.fn().mockResolvedValue({ success: false, error: 'disk busy' }) } });
+
+    // Breaks: a removal that FAILED (the account stays, to be retried) has
+    // already dropped its row and stripped every other row's password —
+    // after a failed vault migration, their only copy.
+    it.each([['a background account', 'b'], ['the active account', 'a']] as const)('is untouched when removing %s fails', async (_label, id) => {
+      const { state } = await loadSlice({ accounts: [account('a'), account('b')], activeAccountId: 'a' }, failing());
+      const before = seedStoredRows('a', 'b');
+
+      await expect(state.removeAccountById(id)).rejects.toThrow('disk busy');
+
+      expect(localStorage.getItem(ACCOUNTS_KEY)).toBe(before);
+      expect(state.accounts.map((a: any) => a.id)).toEqual(['a', 'b']);
+      expect(state.activeAccountId).toBe('a');
+    });
+
+    // Breaks: the same, when the main process rejects instead of reporting failure.
+    it('is untouched when the removal call itself rejects', async () => {
+      const api = baseElectronAPI({ accounts: { remove: vi.fn().mockRejectedValue(new Error('IPC gone')) } });
+      const { state } = await loadSlice({ accounts: [account('a'), account('b')], activeAccountId: 'a' }, api);
+      const before = seedStoredRows('a', 'b');
+
+      await expect(state.removeAccountById('b')).rejects.toThrow('IPC gone');
+
+      expect(localStorage.getItem(ACCOUNTS_KEY)).toBe(before);
+    });
+
+    // Breaks: a successful removal is not persisted (the account comes back at
+    // the next launch), or it rewrites the OTHER rows — stripping the password
+    // a failed vault migration left in them.
+    it.each([['a background account', 'b', 'a'], ['the active account', 'a', 'b']] as const)('drops only the removed row when removing %s succeeds', async (_label, removed, kept) => {
+      const { state } = await loadSlice({ accounts: [account('a'), account('b')], activeAccountId: 'a' }, baseElectronAPI());
+      seedStoredRows('a', 'b');
+
+      await state.removeAccountById(removed);
+
+      expect(JSON.parse(localStorage.getItem(ACCOUNTS_KEY)!)).toEqual([storedRow(kept)]);
+      expect(state.accounts.map((a: any) => a.id)).toEqual([kept]);
+      if (removed === 'a') expect(state.selectAccount).toHaveBeenCalledWith('b');
+    });
+
+    // Breaks: removing the last account leaves its row (with its password) on disk.
+    it('is emptied when the last account is removed', async () => {
+      const { state } = await loadSlice({ accounts: [account('a')], activeAccountId: 'a' }, baseElectronAPI());
+      seedStoredRows('a');
+
+      await state.removeAccountById('a');
+
+      expect(JSON.parse(localStorage.getItem(ACCOUNTS_KEY)!)).toEqual([]);
+      expect(state.activeAccountId).toBeNull();
+    });
+  });
+
   it('leaves AI providers untouched when the removed account did not back one', async () => {
     const api = baseElectronAPI();
     const { state } = await loadSlice(

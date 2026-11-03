@@ -76,7 +76,7 @@ export interface CompactionThresholds {
 /**
  * Whether a rebuild would earn its keep.
  *
- * A VACUUM is minutes of full-file rewrite through SQLCipher and an exclusive
+ * A VACUUM is minutes of full-file rewrite through the page cipher and an exclusive
  * lock for the duration, so a few free pages are never worth it — SQLite will
  * reuse those itself on the next writes. Both conditions must hold: the ratio
  * alone would flag a 20 MB database, and the absolute size alone would flag a

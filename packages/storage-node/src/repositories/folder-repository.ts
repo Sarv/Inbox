@@ -19,6 +19,27 @@ import {
 const logger = createLogger('FolderRepository');
 
 /**
+ * The ONLY fields {@link FolderRepository.update} may write — the keys become
+ * SQL column names (CASA 3.1.4; see `buildUpdateClauses`). Every FolderRecord
+ * field that IS a column, minus `id`, plus the two server-count watermarks the
+ * folder syncer and the poller write through an `as any` (they are columns but
+ * not FolderRecord fields). `serverMessageCount` and `ownedCount` are absent on
+ * purpose: they are read-side names (`last_known_message_count`, a recount)
+ * with no column of their own.
+ */
+export const FOLDER_UPDATE_FIELDS: ReadonlySet<string> = new Set<
+  keyof FolderRecord | 'lastKnownMessageCount' | 'lastKnownUidnext'
+>([
+  'name', 'path', 'parentId',
+  'uidValidity', 'lastSyncUid', 'lastSyncTime', 'highestModseq',
+  'totalCount', 'unreadCount',
+  'backfillOldestUid', 'backfillComplete',
+  'specialUse', 'subscribed', 'syncEnabled', 'syncMode', 'keepDays',
+  'createdAt', 'updatedAt',
+  'lastKnownMessageCount', 'lastKnownUidnext',
+]);
+
+/**
  * Repository for folder operations
  */
 export class FolderRepository extends BaseRepository {
@@ -142,6 +163,7 @@ export class FolderRepository extends BaseRepository {
    */
   async update(id: string, updates: Partial<FolderRecord>): Promise<void> {
     const { setClauses, params } = this.buildUpdateClauses(updates, {
+      allowedFields: FOLDER_UPDATE_FIELDS,
       boolFields: ['subscribed', 'backfillComplete', 'syncEnabled'],
     });
 

@@ -13,14 +13,26 @@
  * marked plaintext blob when the keychain is missing; a private key must not,
  * because whoever copies the profile directory would then read the user's mail.
  */
+import { createLogger, errorClassName } from '@sarvinbox/core';
 import { safeStorage } from 'electron';
 
 import { isOsBackedEncryption } from './os-encryption';
 import type { OwnKeyProtection } from './pgp-key-store';
 import { encryptProtectedString } from './safe-storage-envelope';
 
+const logger = createLogger('pgp-secret-seal');
+
 const MAGIC_KEYCHAIN = 'ENC1:';
 const MAGIC_PASSPHRASE = 'LOCK1:';
+
+/**
+ * What opening a keychain-sealed key says when the keychain is there but will
+ * not decrypt it: macOS Keychain access denied, a locked or re-created Linux
+ * keyring, a profile copied from another machine or user. The user can act on
+ * this; the platform's own error text is neither actionable nor theirs to read.
+ */
+export const KEYCHAIN_REFUSED_MESSAGE =
+  'This key is sealed by the OS keychain, which would not open it. Unlock the keychain or allow Sarv Inbox to use it, then try again.';
 
 /** The keychain operations sealing needs — injectable so tests run without Electron. */
 export interface Keychain {
@@ -94,5 +106,17 @@ export function unseal(keychain: Keychain, sealed: Buffer): SealedSecret {
   if (!(keychain.canOpen ? keychain.canOpen() : keychain.isAvailable())) {
     throw new SealError('This key is sealed by the OS keychain, which is not available', 'keychain-unavailable');
   }
-  return { protection: 'keychain', armoredPrivateKey: keychain.decrypt(sealed.subarray(MAGIC_KEYCHAIN.length)) };
+  // `canOpen` only says a keychain exists; whether it will decrypt THIS key is
+  // known only by asking. A refusal is the same fact as a missing keychain —
+  // the key is there and cannot be read — so it throws the same typed error,
+  // whose sentence reaches the user (pgpUserMessage keeps our own wording).
+  let armoredPrivateKey: string;
+  try {
+    armoredPrivateKey = keychain.decrypt(sealed.subarray(MAGIC_KEYCHAIN.length));
+  } catch (error) {
+    // The class only: safeStorage's message is the platform's, and nothing of a key is ever logged.
+    logger.warn(`The OS keychain would not open an OpenPGP private key (${errorClassName(error)})`);
+    throw new SealError(KEYCHAIN_REFUSED_MESSAGE, 'keychain-unavailable');
+  }
+  return { protection: 'keychain', armoredPrivateKey };
 }

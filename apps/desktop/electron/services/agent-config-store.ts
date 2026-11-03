@@ -14,7 +14,7 @@
  * Storage moved from a standalone `agent-config.json` file INTO the core DB
  * (`core_blobs` row, key `agent-config`) so all main-process settings live in one
  * place. Plain JSON in the blob — these are feature toggles, not secrets, and the
- * core DB itself is SQLCipher-encrypted at rest. The legacy file is migrated on
+ * core DB itself is encrypted at rest (ChaCha20-Poly1305). The legacy file is migrated on
  * first read (write-to-DB FIRST) and removed later by the startup cleanup.
  */
 

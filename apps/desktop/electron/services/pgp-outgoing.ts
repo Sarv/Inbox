@@ -23,11 +23,19 @@ import {
   type OutgoingMimeTransform,
   type SendPgpRequest,
 } from '@sarvinbox/core';
-import { buildAutocryptHeader, encryptOutgoingMime, signOutgoingMime, withHeader } from '@sarvinbox/core/pgp';
+import { buildAutocryptHeader, encryptOutgoingMime, pgpFailureDetail, signOutgoingMime, withHeader } from '@sarvinbox/core/pgp';
 
+import { pgpUserMessage } from './pgp-failure';
 import type { PgpKeyring } from './pgp-keyring';
 
 const logger = createLogger('pgp-outgoing');
+
+/**
+ * The reason a send or a draft shows when OpenPGP itself failed (not one of our
+ * own refusals, which say what they mean). The library's reason is logged
+ * (CASA 4.1.4).
+ */
+export const PGP_OPERATION_FAILED_REASON = 'the OpenPGP operation failed';
 
 export type OutgoingKeyring = Pick<PgpKeyring, 'ownPublicKeyFor' | 'signingKeyFor' | 'encryptionKeysFor'>;
 
@@ -37,8 +45,6 @@ export interface OutgoingPgpOptions {
   /** Autocrypt `prefer-encrypt=mutual`: the user encrypts whenever they can. */
   preferEncrypt: boolean;
 }
-
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 async function withAutocrypt(keyring: OutgoingKeyring, raw: Buffer, from: string, preferEncrypt: boolean): Promise<Buffer> {
   try {
@@ -51,7 +57,7 @@ async function withAutocrypt(keyring: OutgoingKeyring, raw: Buffer, from: string
     });
     return withHeader(raw, 'Autocrypt', header);
   } catch (error) {
-    logger.warn(`Autocrypt header skipped: ${errorMessage(error)}`);
+    logger.warn(`Autocrypt header skipped: ${pgpFailureDetail(error)}`);
     return raw;
   }
 }
@@ -81,7 +87,9 @@ export function pgpOutgoingTransform(keyring: OutgoingKeyring, options: Outgoing
       if (error instanceof OutgoingMimeError) throw error;
       // A locked key, an unreadable keyring, an openpgp failure: none of them
       // clears up by retrying, so none of them may be retried into plaintext.
-      throw new OutgoingMimeError(`Could not ${encrypt ? 'encrypt' : 'sign'} the message: ${errorMessage(error)}`, false);
+      const verb = encrypt ? 'encrypt' : 'sign';
+      const reason = pgpUserMessage(error, PGP_OPERATION_FAILED_REASON, logger, `Could not ${verb} an outgoing message`);
+      throw new OutgoingMimeError(`Could not ${verb} the message: ${reason}`, false);
     }
   };
 }
@@ -96,5 +104,9 @@ export function pgpOutgoingTransform(keyring: OutgoingKeyring, options: Outgoing
 export async function encryptDraftMime(raw: Buffer, from: string, keyring: Pick<PgpKeyring, 'ownPublicKeyFor'>): Promise<Buffer> {
   const own = from ? await keyring.ownPublicKeyFor(from) : null;
   if (!own) throw new Error(`No OpenPGP key for ${from || 'this account'} to encrypt the draft with`);
-  return encryptOutgoingMime(raw, { encryptionKeys: [own] });
+  try {
+    return await encryptOutgoingMime(raw, { encryptionKeys: [own] });
+  } catch (error) {
+    throw new Error(pgpUserMessage(error, PGP_OPERATION_FAILED_REASON, logger, 'Could not encrypt a draft'));
+  }
 }

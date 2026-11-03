@@ -10,6 +10,7 @@ import renderer from 'vite-plugin-electron-renderer';
 
 import { injectCspMeta } from './vite/app-csp';
 import { browserSafeBuiltinsPlugin } from './vite/browser-safe-builtins';
+import { buildDefines as buildDefinesFor } from './vite/build-defines';
 import { forbidNodeOnlyInRenderer } from './vite/forbid-node-only-renderer';
 import {
   linkedCjsDepsToPrebundle,
@@ -27,28 +28,10 @@ const APP_VERSION: string = JSON.parse(
 // renderer SDK config and in the source-map upload below.
 const SENTRY_RELEASE = `sarvinbox@${APP_VERSION}`;
 
-// Build-time string replacements shared by the main and renderer bundles.
-//  - Google / Microsoft OAuth creds: inlined so a shipped app (which carries no
-//    .env) still has Gmail and Outlook sign-in. Non-confidential per both
-//    providers' installed-app docs (Microsoft's is a public client: no secret).
-//  - Sentry DSN: public by design (safe to embed in a client). ALWAYS defined
-//    (empty when unset) so renderer code can read process.env.* without a
-//    ReferenceError in the browser, and Sentry stays inert without a DSN.
-//  - App version: exposed so the renderer can tag the Sentry release.
-// NOT inlined: the Sarv URLs/client, which dev.sh toggles to localhost at
-// runtime and which already have hardcoded production defaults for distribution.
+// Build-time string replacements shared by the main and renderer bundles; what
+// each one is and why lives in vite/build-defines.ts.
 function buildDefines(mode: string): Record<string, string> {
-  const env = loadEnv(mode, resolve(__dirname, '../..'), 'SARVINBOX');
-  const defines: Record<string, string> = {};
-  for (const key of ['SARVINBOX_GOOGLE_CLIENT_ID', 'SARVINBOX_GOOGLE_CLIENT_SECRET', 'SARVINBOX_MICROSOFT_CLIENT_ID']) {
-    if (env[key]) defines[`process.env.${key}`] = JSON.stringify(env[key]);
-  }
-  defines['process.env.SARVINBOX_SENTRY_DSN'] = JSON.stringify(env.SARVINBOX_SENTRY_DSN ?? '');
-  // The build mode itself, so a release bundle knows it is one whatever its
-  // environment says (dev-mode.ts isReleaseBundle — CASA L-3).
-  defines['process.env.SARVINBOX_BUILD_MODE'] = JSON.stringify(mode);
-  defines['process.env.SARVINBOX_APP_VERSION'] = JSON.stringify(APP_VERSION);
-  return defines;
+  return buildDefinesFor(mode, loadEnv(mode, resolve(__dirname, '../..'), 'SARVINBOX'), APP_VERSION);
 }
 
 // Upload renderer source maps to Sentry so minified stack traces symbolicate.

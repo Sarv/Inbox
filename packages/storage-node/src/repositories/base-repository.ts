@@ -184,21 +184,47 @@ export abstract class BaseRepository {
   /**
    * Build dynamic UPDATE SET clauses
    * Returns [setClauses, params] for use in prepared statements
+   *
+   * The KEYS of `updates` become SQL text — the column name and the named
+   * parameter — because neither can be bound. For contacts those keys arrive
+   * straight from the renderer (`contacts:update`), so a key such as
+   * `"name = 'x', email"` would otherwise be written into the statement
+   * verbatim. Every key with a value must therefore be in the repository's own
+   * `allowedFields` (camelCase, as written in code — never derived from the
+   * input), and anything else THROWS before a clause is built.
+   *
+   * Throw, not drop: a dropped key is a write that silently did not happen —
+   * in a mail client a flag that flips back, a sync watermark that never
+   * advances — noticed days later if ever. A throw fails the hostile call
+   * closed AND makes a caller's typo, or a new column nobody allowed, fail on
+   * its first test run. An `undefined` value is skipped before the check
+   * because it is never interpolated (and partial patches routinely carry
+   * them).
+   *
+   * Column names are double-quoted: some are SQLite keywords (`references`
+   * was a syntax error unquoted), and an allow-listed name needs no further
+   * escaping.
    */
   protected buildUpdateClauses(
     updates: Record<string, any>,
     options: {
+      allowedFields: ReadonlySet<string>;
       jsonFields?: string[];
       boolFields?: string[];
-    } = {}
+    },
   ): { setClauses: string[]; params: Record<string, any> } {
     const setClauses: string[] = [];
     const params: Record<string, any> = {};
 
     for (const [key, value] of Object.entries(updates)) {
       if (value !== undefined) {
+        if (!options.allowedFields.has(key)) {
+          // Bounded and JSON-quoted: the key may be hostile, and this message
+          // reaches the log and the renderer.
+          throw new Error(`Refusing to update unknown field ${JSON.stringify(key.slice(0, 80))}`);
+        }
         const snakeKey = this.camelToSnake(key);
-        setClauses.push(`${snakeKey} = @${key}`);
+        setClauses.push(`"${snakeKey}" = @${key}`);
 
         if (options.jsonFields?.includes(key)) {
           params[key] = JSON.stringify(value);

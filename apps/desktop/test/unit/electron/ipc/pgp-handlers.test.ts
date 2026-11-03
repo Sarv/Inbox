@@ -1,4 +1,5 @@
-import { PgpKeyError } from '@sarvinbox/core/pgp';
+import { PGP_UNREADABLE_KEY_MESSAGE, PgpKeyError, readAllKeys } from '@sarvinbox/core/pgp';
+import * as openpgp from 'openpgp';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
@@ -25,10 +26,20 @@ const h = vi.hoisted(() => ({
   window: null as unknown,
 }));
 
-import { createPgpHandlers, getPgpReader, registerPgpHandlers, safeDefaultName, storedSourceFor, type PgpHandlerDeps } from '../../../../electron/ipc/pgp-handlers';
+import {
+  createPgpHandlers,
+  getPgpReader,
+  PGP_FILE_WRITE_FAILED_MESSAGE,
+  PGP_REQUEST_FAILED_MESSAGE,
+  registerPgpHandlers,
+  safeDefaultName,
+  storedSourceFor,
+  type PgpHandlerDeps,
+} from '../../../../electron/ipc/pgp-handlers';
 import { AttachmentOperationProtection, setAttachmentOperationProtection } from '../../../../electron/services/attachment-download-protection';
 import { PgpKeyringError, type PgpKeyring } from '../../../../electron/services/pgp-keyring';
 import type { PgpReader } from '../../../../electron/services/pgp-reader';
+import { KEYCHAIN_REFUSED_MESSAGE, SealError } from '../../../../electron/services/pgp-secret-seal';
 
 /**
  * OpenPGP IPC. What this protects: a private-key backup or a decrypted
@@ -72,10 +83,11 @@ const setup = (options: { keyring?: PgpKeyring; savePath?: string | null; attach
   };
   const chooseSavePath = vi.fn(async () => (options.savePath === undefined ? '/chosen/file' : options.savePath));
   const writeFile = vi.fn(async () => undefined);
+  const markDownloaded = vi.fn(async (_file: string) => undefined);
   const scanRequired = vi.fn(() => options.scanRequired ?? false);
   const handlers = createPgpHandlers({ keyring: () => keyring, reader, autoEncrypt: () => true, chooseSavePath, writeFile, attachmentScanRequired: scanRequired,
-    protectAttachmentSave: options.protectAttachmentSave, writeProtectedAttachment: options.writeProtectedAttachment });
-  return { handlers, keyring, reader, chooseSavePath, writeFile, scanRequired };
+    protectAttachmentSave: options.protectAttachmentSave, writeProtectedAttachment: options.writeProtectedAttachment, markDownloaded });
+  return { handlers, keyring, reader, chooseSavePath, writeFile, scanRequired, markDownloaded };
 };
 
 describe('key management', () => {
@@ -116,9 +128,90 @@ describe('key management', () => {
       code: 'passphrase-required',
     });
     expect(await handlers['pgp:unlock']('FP', 'nope')).toMatchObject({ success: false, code: 'bad-passphrase' });
-    expect(await handlers['pgp:listOwnKeys']()).toEqual({ success: false, error: 'db closed' });
+    // Changed deliberately (CASA 4.1.4): an error that is not one of ours no longer reaches the renderer in its own words.
+    expect(await handlers['pgp:listOwnKeys']()).toEqual({ success: false, error: PGP_REQUEST_FAILED_MESSAGE });
     expect(await handlers['pgp:unlock']('FP', '')).toMatchObject({ success: false, error: 'A passphrase is required' });
     expect(await handlers['pgp:importOwnKey']('')).toMatchObject({ success: false, error: 'A key is required' });
+  });
+
+  // Breaks (CASA 4.1.4): importing a broken key file shows openpgp.js's own
+  // reason, which varies with how the file is broken — the dialog must show
+  // one sentence, and the reason must still reach the local log.
+  it('answers an unreadable key import in our words and logs the library reason', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const keyring = keyringStub({ importContactKeys: vi.fn((armored: string) => readAllKeys(armored)) });
+      const { handlers } = setup({ keyring });
+      expect(await handlers['pgp:importContactKeys']('-----BEGIN PGP PUBLIC KEY BLOCK-----\njunk')).toEqual({
+        success: false,
+        error: PGP_UNREADABLE_KEY_MESSAGE,
+        code: 'bad-key',
+      });
+      expect(warn.mock.calls.map((call) => call.join(' '))).toEqual([expect.stringMatching(/OpenPGP request failed: .+/)]);
+      // A refusal of our own with no library reason writes nothing.
+      warn.mockClear();
+      const refusing = setup({ keyring: keyringStub({ unlockOwnKey: vi.fn(async () => { throw new PgpKeyError('Wrong passphrase', 'bad-passphrase'); }) }) });
+      await refusing.handlers['pgp:unlock']('FP', 'nope');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Breaks (CASA 4.1.4): openpgp.js's own text — which differs with how a
+  // user-supplied key, a generation or a backup re-protection failed — reaches
+  // the settings dialog. The renderer reads one sentence; the log the reason.
+  it.each([
+    ['pgp:importOwnKey', ['-----BEGIN PGP PRIVATE KEY BLOCK-----'], 'importOwnKey'],
+    ['pgp:generateKey', [{ name: 'Rita', email: 'rita@example.com' }], 'generateOwnKey'],
+    ['pgp:exportOwnKey', ['F'.repeat(40), 'backup pass'], 'exportOwnKey'],
+  ] as const)('%s answers a library failure with one sentence and logs the library reason', async (channel, args, method) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // A real openpgp.js error, as a broken key file produces it.
+      const libraryError = await openpgp.readPrivateKey({ armoredKey: 'junk' }).catch((error: Error) => error);
+      expect(libraryError).toBeInstanceOf(Error);
+      const f = setup({ keyring: keyringStub({ [method]: vi.fn(async () => { throw libraryError; }) }) });
+
+      expect(await (f.handlers[channel] as (...a: unknown[]) => Promise<unknown>)(...args)).toEqual({
+        success: false,
+        error: PGP_REQUEST_FAILED_MESSAGE,
+      });
+      expect(f.writeFile).not.toHaveBeenCalled();
+      expect(warn.mock.calls.map((call) => call.join(' '))).toEqual([
+        expect.stringContaining(`OpenPGP request failed: ${(libraryError as Error).message}`),
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Breaks: "unlock the keychain" — the one failure the user can fix — is
+  // flattened into the vague OpenPGP sentence when a backup or an import
+  // reaches a key the OS keychain will not open.
+  it('keeps a keychain refusal in its own words', async () => {
+    const refusal = new SealError(KEYCHAIN_REFUSED_MESSAGE, 'keychain-unavailable');
+    const f = setup({ keyring: keyringStub({ exportOwnKey: vi.fn(async () => { throw refusal; }), unlockOwnKey: vi.fn(async () => { throw refusal; }) }) });
+    expect(await f.handlers['pgp:exportOwnKey']('F'.repeat(40), 'backup pass')).toEqual({ success: false, error: KEYCHAIN_REFUSED_MESSAGE });
+    expect(await f.handlers['pgp:unlock']('FP', 'pass')).toEqual({ success: false, error: KEYCHAIN_REFUSED_MESSAGE });
+  });
+
+  // Breaks: a backup to a folder the user cannot write to reads as an OpenPGP
+  // failure (nothing they can act on), or the log line carries the chosen path.
+  it('says a key file could not be saved, and logs only the error code', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const f = setup({ savePath: '/Volumes/Private Backup/me-secret.asc' });
+      f.writeFile.mockRejectedValueOnce(Object.assign(new Error("EACCES: permission denied, open '/Volumes/Private Backup/me-secret.asc'"), { code: 'EACCES' }));
+      expect(await f.handlers['pgp:exportOwnKey']('F'.repeat(40), 'backup pass')).toEqual({ success: false, error: PGP_FILE_WRITE_FAILED_MESSAGE });
+      f.writeFile.mockRejectedValueOnce('not an Error');
+      expect(await f.handlers['pgp:exportPublicKey']('F'.repeat(40))).toEqual({ success: false, error: PGP_FILE_WRITE_FAILED_MESSAGE });
+      const lines = warn.mock.calls.map((call) => call.join(' '));
+      expect(lines).toEqual([expect.stringContaining('(EACCES)'), expect.stringContaining('(error)')]);
+      expect(lines.join('\n')).not.toContain('Private Backup');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   // Breaks: an empty passphrase sent from a blank field locks the import to "" instead of none.
@@ -232,6 +325,19 @@ describe('reading', () => {
     expect(await handlers['pgp:saveAttachment']('e1', 'acct', 0)).toMatchObject({ success: true, data: { saved: true } });
     expect(chooseSavePath).toHaveBeenCalledWith('plan.pdf');
     expect(writeFile).toHaveBeenCalledWith('/chosen/file', Buffer.from('pdf'));
+  });
+
+  // Breaks (CASA 5.2.1): a decrypted attachment saved through the plain-write
+  // path opens with no "downloaded from the internet" warning — while the
+  // user's OWN key backups, which are not mail, must not be marked.
+  it('marks a saved attachment as downloaded, but never a key export', async () => {
+    const f = setup({ attachment: { name: 'plan.pdf', content: Buffer.from('pdf') } });
+    await f.handlers['pgp:saveAttachment']('e1', 'acct', 0);
+    expect(f.markDownloaded).toHaveBeenCalledExactlyOnceWith('/chosen/file');
+    expect(f.markDownloaded.mock.invocationCallOrder[0]).toBeGreaterThan(f.writeFile.mock.invocationCallOrder[0]);
+    await f.handlers['pgp:exportOwnKey']('F'.repeat(40), 'passphrase');
+    await f.handlers['pgp:exportPublicKey']('F'.repeat(40));
+    expect(f.markDownloaded).toHaveBeenCalledOnce();
   });
 
   // Breaks: encrypted-message saves bypass AV or upload private plaintext without reviewed consent.
@@ -421,6 +527,8 @@ describe('optional setup for decrypted attachment saves', () => {
       protectAttachmentSave: (target, consume) => operations.run(target.emailId, target.accountId ?? 'current-account', target.filename, consume) });
     expect(await f.handlers['pgp:saveAttachment']('e1', 'account-b', 0)).toEqual({ success: true, data: { saved: true, filePath: '/chosen/file' } });
     expect(f.writeFile).toHaveBeenCalledWith('/chosen/file', Buffer.from('synthetic'));
+    // Breaks (CASA 5.2.1): the protected-operation fallback writer saves unmarked.
+    expect(f.markDownloaded).toHaveBeenCalledExactlyOnceWith('/chosen/file');
   });
 });
 

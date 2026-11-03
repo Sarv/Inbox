@@ -20,7 +20,7 @@ import Database from 'better-sqlite3';
 
 export interface CompactWorkerInput {
   dbPath: string;
-  /** SQLCipher passphrase. Same value the app opens this file with. */
+  /** Database passphrase (ChaCha20-Poly1305 page key source). Same value the app opens this file with. */
   key: string;
 }
 

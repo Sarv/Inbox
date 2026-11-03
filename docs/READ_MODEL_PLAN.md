@@ -28,8 +28,8 @@ state is stored, the normal folder list and the sectioned inbox collapse into
 **one keyset query shape** that differs only by its `WHERE` predicates, and both
 become `O(log N + K)` with `K = 50`.
 
-Scope: everything is **per-account SQLite DB** (SQLCipher, synchronous
-better-sqlite3). Cross-account ("All Inboxes") stays a main-process k-way merge —
+Scope: everything is **per-account SQLite DB** (encrypted by SQLite3 Multiple
+Ciphers' ChaCha20-Poly1305, synchronous better-sqlite3). Cross-account ("All Inboxes") stays a main-process k-way merge —
 you cannot `JOIN` across separate DB files, and `ATTACH` is avoided (cross-file
 locking). All DDL is additive and idempotent (`IF NOT EXISTS`).
 

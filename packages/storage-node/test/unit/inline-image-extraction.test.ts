@@ -582,7 +582,7 @@ describe('inline images — the extraction backfill', () => {
   // 30) in this one statement, against 0.3% for the transaction doing the real
   // work. The cause was `LENGTH(raw_body)` in the select list: the partial index
   // carries `email_id` alone, so asking for anything else makes SQLite fetch each
-  // candidate's row and decrypt a multi-megabyte body through SQLCipher — ~240 MB
+  // candidate's row and decrypt a multi-megabyte body through the page cipher — ~240 MB
   // read to authorize 2 MB of work. Measured on plain SQLite with 200 KB bodies:
   // 7.11 ms with the length, 0.02 ms without. A 355x tax for a number the
   // transaction below already gets free from the body it reads anyway.

@@ -1,15 +1,17 @@
 import {
   encryptOutgoingMime,
   generateKeyPair,
+  PGP_DECRYPT_FAILED_MESSAGE,
   readAnyKey,
   readUnlockedPrivateKey,
   signOutgoingMime,
   type PgpOpenKeys,
 } from '@sarvinbox/core/pgp';
-import type * as openpgp from 'openpgp';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import * as openpgp from 'openpgp';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { OPENED_CACHE_SIZE, PgpReader, type StoredSource } from '../../../../electron/services/pgp-reader';
+import { OPENED_CACHE_SIZE, PGP_OPEN_FAILED_MESSAGE, PgpReader, type StoredSource } from '../../../../electron/services/pgp-reader';
+import { SealError } from '../../../../electron/services/pgp-secret-seal';
 
 /**
  * Decrypt-on-view. What this protects: an encrypted message that will not
@@ -56,6 +58,8 @@ beforeAll(async () => {
   ).toString('latin1');
   signedRaw = withOuterHeaders(await signOutgoingMime(inner, [gee])).toString('latin1');
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 const readerWith = (
   source: StoredSource | null | (() => Promise<StoredSource | null>),
@@ -121,12 +125,78 @@ describe('PgpReader.open', () => {
     expect(await thrown.reader.open('e1')).toMatchObject({ ok: false, code: 'unavailable', error: expect.stringContaining('connection reset') });
   });
 
-  // Breaks: an unexpected failure (keyring unreadable) escapes as a rejected IPC call.
-  it('maps an unexpected failure to unavailable', async () => {
+  // Breaks: an unexpected failure (keyring unreadable) escapes as a rejected IPC call —
+  // or (CASA 4.1.4) shows the library's / platform's own text instead of ours.
+  it('maps an unexpected failure to unavailable, with its reason in the log only', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { reader } = readerWith({ raw: encryptedRaw, fromAddress: 'gee@example.org' }, () => {
       throw new Error('keyring unreadable');
     });
-    expect(await reader.open('e1')).toMatchObject({ ok: false, code: 'unavailable', error: 'keyring unreadable' });
+    expect(await reader.open('e1')).toEqual({ ok: false, code: 'unavailable', error: PGP_OPEN_FAILED_MESSAGE });
+    expect(warnLines(warn)).toEqual([expect.stringContaining('keyring unreadable')]);
+  });
+
+  // Breaks: "the keychain is not available" — decided before any decryption,
+  // and the one thing the user can act on — is flattened into the vague message.
+  it('keeps our own keychain refusal in its own words', async () => {
+    const { reader } = readerWith({ raw: encryptedRaw, fromAddress: 'gee@example.org' }, () => {
+      throw new SealError('This key is sealed by the OS keychain, which is not available', 'keychain-unavailable');
+    });
+    expect(await reader.open('e1')).toEqual({
+      ok: false,
+      code: 'unavailable',
+      error: 'This key is sealed by the OS keychain, which is not available',
+    });
+  });
+});
+
+const warnLines = (warn: { mock: { calls: unknown[][] } }): string[] => warn.mock.calls.map((call) => call.map(String).join(' '));
+
+describe('PgpReader decryption failures (CASA 4.1.4)', () => {
+  /** The encrypted fixture with one bit of its binary ciphertext flipped at `offset` (negative: from the end). */
+  const tampered = async (offset: number): Promise<string> => {
+    const armor = encryptedRaw.match(/-----BEGIN PGP MESSAGE-----[\s\S]*-----END PGP MESSAGE-----/)![0];
+    const bytes = new Uint8Array((await openpgp.unarmor(armor)).data as Uint8Array);
+    bytes[offset < 0 ? bytes.length + offset : offset] ^= 0x01;
+    const rearmored = openpgp.armor(openpgp.enums.armor.message, bytes).trim().replace(/\r?\n/g, '\r\n');
+    return encryptedRaw.replace(armor, rearmored);
+  };
+
+  // Breaks: the reader shows "Key Data Integrity failed" for one tampered
+  // message and "Modification detected" for another — a decryption oracle for
+  // whoever sent them. The renderer must get one sentence; the log the reason.
+  it('shows the same text for a bad session key and a failed integrity check, and logs each reason', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const views = [];
+    for (const raw of [await tampered(40), await tampered(-5)]) {
+      views.push(await readerWith({ raw, fromAddress: 'gee@example.org' }).reader.open('e1'));
+    }
+    views.forEach((view) => expect(view).toEqual({ ok: false, code: 'bad-data', error: PGP_DECRYPT_FAILED_MESSAGE }));
+    const lines = warnLines(warn);
+    expect(lines).toEqual([
+      expect.stringContaining('Key Data Integrity failed'),
+      expect.stringContaining('Modification detected'),
+    ]);
+    // The log line names the message, never its content.
+    lines.forEach((line) => expect(line).not.toContain('the secret plan'));
+  });
+
+  // Breaks: a refusal decided before decrypting ("no key") starts writing log noise for every message the user cannot open.
+  it('logs nothing for a refusal that carries no library reason', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { reader } = readerWith({ raw: encryptedRaw, fromAddress: 'gee@example.org' }, () => ({ decryptionKeys: [], verificationKeys: [] }));
+    expect(await reader.open('e1')).toMatchObject({ ok: false, code: 'no-key' });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // Breaks: why a signature failed ("Signed digest did not match") reaches the renderer, or is lost from the log.
+  it('logs why a signature did not verify and sends the renderer only the verdict', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const forged = signedRaw.replace('the secret plan', 'the forged plan');
+    const view = await readerWith({ raw: forged, fromAddress: 'gee@example.org' }).reader.open('e1');
+    expect(view).toMatchObject({ ok: true, signature: { status: 'invalid' } });
+    expect(JSON.stringify(view)).not.toMatch(/digest|could not be verified/i);
+    expect(warnLines(warn)).toEqual([expect.stringMatching(/signature on e1 did not verify: .+/)]);
   });
 });
 

@@ -16,6 +16,7 @@ import {
   withHeader,
 } from '../../../src/pgp/pgp-mime';
 import type { PgpOpenKeys } from '../../../src/pgp/pgp-mime';
+import { PGP_DECRYPT_FAILED_MESSAGE, PGP_SIGNATURE_FAILED_MESSAGE, PgpOpenError } from '../../../src/pgp/types';
 
 const fixture = (name: string) => readFileSync(join(__dirname, 'fixtures', name));
 
@@ -155,6 +156,58 @@ describe('encryptOutgoingMime', () => {
   });
 });
 
+describe('decryption failures (CASA 4.1.4)', () => {
+  /** An encrypted message for bob, and a way to swap its armored ciphertext for another. */
+  const tamperable = async () => {
+    const encrypted = (await encryptOutgoingMime(raw, { encryptionKeys: [bob.pub] })).toString('latin1');
+    const armor = encrypted.match(/-----BEGIN PGP MESSAGE-----[\s\S]*-----END PGP MESSAGE-----/)![0];
+    const binary = (await openpgp.unarmor(armor)).data as Uint8Array;
+    const withBinary = (bytes: Uint8Array) =>
+      openpgp.armor(openpgp.enums.armor.message, bytes).trim().replace(/\r?\n/g, '\r\n');
+    const flipped = (offset: number) => {
+      const bytes = new Uint8Array(binary);
+      bytes[offset] ^= 0x01;
+      return withBinary(bytes);
+    };
+    const into = (armored: string) => Buffer.from(encrypted.replace(armor, armored), 'latin1');
+    return { binary, flipped, into };
+  };
+
+  // Breaks: the reader's text tells whoever crafted a ciphertext which check
+  // failed — the wrapped session key, the integrity check, or the packet
+  // parser — a decryption oracle. Every one must read as the same sentence,
+  // with the library's reason kept as `detail` for the local log.
+  it('gives one message for a bad session key, a failed integrity check and unparseable ciphertext', async () => {
+    const { binary, flipped, into } = await tamperable();
+    const messages = {
+      // Inside the PKESK packet's wrapped session key (the key IS held, so this is past the no-key check).
+      sessionKey: into(flipped(40)),
+      // Inside the encrypted data, behind the session key: the MDC / tag check.
+      integrity: into(flipped(binary.length - 5)),
+      unparseable: into('-----BEGIN PGP MESSAGE-----\r\n\r\nnonsense\r\n-----END PGP MESSAGE-----'),
+    };
+    const failures: PgpOpenError[] = await Promise.all(
+      Object.values(messages).map((message) => openPgpMime(message, keysFor(bob)).catch((error) => error)),
+    );
+    failures.forEach((failure) => {
+      expect(failure).toBeInstanceOf(PgpOpenError);
+      expect(failure).toMatchObject({ code: 'bad-data', message: PGP_DECRYPT_FAILED_MESSAGE });
+    });
+    const details = failures.map((failure) => failure.detail);
+    // Three different library reasons — proof these are three different failures, each kept for the log.
+    expect(new Set(details).size).toBe(3);
+    details.forEach((detail) => expect(detail).not.toBe(PGP_DECRYPT_FAILED_MESSAGE));
+  });
+
+  // Breaks: inline ("traditional") PGP, which has its own call path, still shows the library's reason.
+  it('gives inline-encrypted text the same message', async () => {
+    const { binary, flipped } = await tamperable();
+    const failure: PgpOpenError = await openInlinePgp(`Hello\n${flipped(binary.length - 5)}`, keysFor(bob)).catch((error) => error);
+    expect(failure).toMatchObject({ code: 'bad-data', message: PGP_DECRYPT_FAILED_MESSAGE });
+    expect(failure.detail).toEqual(expect.any(String));
+  });
+});
+
 describe('signOutgoingMime', () => {
   // Breaks: our signed mail would fail verification at the recipient.
   it('produces a multipart/signed message that verifies', async () => {
@@ -172,6 +225,17 @@ describe('signOutgoingMime', () => {
     const signed = await signOutgoingMime(raw, [ann.priv]);
     const tampered = Buffer.from(signed.toString('latin1').replace('second line', 'SECOND LINE'), 'latin1');
     expect((await openPgpMime(tampered, keysFor(bob, ann))).signature.status).toBe('invalid');
+  });
+
+  // Breaks: the library's reason for a bad signature ("Signed digest did not
+  // match", a parse error) rides in the result where a renderer could show it.
+  it('reports a bad or unreadable signature in our words, the library reason only as detail', async () => {
+    const signed = await signOutgoingMime(raw, [ann.priv]);
+    const tampered = Buffer.from(signed.toString('latin1').replace('second line', 'SECOND LINE'), 'latin1');
+    const garbled = Buffer.from(signed.toString().replace(/-----BEGIN PGP SIGNATURE-----[\s\S]*-----END PGP SIGNATURE-----/, '-----BEGIN PGP SIGNATURE-----\r\nzz\r\n-----END PGP SIGNATURE-----'));
+    const verdicts = await Promise.all([tampered, garbled].map(async (message) => (await openPgpMime(message, keysFor(bob, ann))).signature));
+    verdicts.forEach((verdict) => expect(verdict).toMatchObject({ status: 'invalid', error: PGP_SIGNATURE_FAILED_MESSAGE }));
+    expect(new Set(verdicts.map((verdict) => verdict.detail)).size).toBe(2);
   });
 
   // Breaks: a server that rewrites CRLF to LF (some do) would make every good signature read as forged.
@@ -280,6 +344,14 @@ describe('openInlinePgp failure paths', () => {
     await expect(
       openInlinePgp('-----BEGIN PGP SIGNED MESSAGE-----\nzz\n-----END PGP SIGNATURE-----', keysFor(bob)),
     ).rejects.toMatchObject({ code: 'bad-data' });
+  });
+
+  // Breaks: a clearsigned block that will not parse shows the library's reason to the user.
+  it('reports unreadable signed text in our words, the library reason only as detail', async () => {
+    const failure: PgpOpenError = await openInlinePgp('-----BEGIN PGP SIGNED MESSAGE-----\nzz\n-----END PGP SIGNATURE-----', keysFor(bob))
+      .catch((error) => error);
+    expect(failure).toMatchObject({ code: 'bad-data', message: PGP_SIGNATURE_FAILED_MESSAGE });
+    expect(failure.detail).toEqual(expect.any(String));
   });
 });
 

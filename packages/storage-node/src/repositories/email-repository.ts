@@ -60,6 +60,36 @@ import {
 const log = createLogger('EmailRepo');
 
 /**
+ * The ONLY fields {@link EmailRepository.update} hands to the generic SET
+ * builder — the keys become SQL column names (CASA 3.1.4; see
+ * `buildUpdateClauses`). Every EmailRecord field that IS an `emails` column,
+ * minus `id`. Absent on purpose:
+ * - `cleanBody` / `rawBody`: `update` routes them to `email_bodies` itself; the
+ *   builder must never write a body inline (that is the write amplification
+ *   migration 73 removed).
+ * - the read-side fields with no column (`accountId`, `hasBody`, `flags`,
+ *   `labels`, `isImportant`, `isStarred`, `thread*`): writing one was already
+ *   an SQL error, now it is a named one.
+ * - the pipeline columns (`agent_status`, `priority_tier`, …): their own
+ *   repositories write them with fixed SQL, never through this patch path.
+ */
+export const EMAIL_UPDATE_FIELDS: ReadonlySet<string> = new Set<keyof EmailRecord>([
+  'messageId', 'threadId', 'folderId', 'uid', 'tags',
+  'serverCategories', 'manualCategories', 'gmailCategoriesPending', 'gmailImportant', 'manualImportant',
+  'subject', 'fromAddress', 'fromName', 'toAddress', 'toNames',
+  'ccAddress', 'ccNames', 'bccAddress', 'bccNames', 'replyTo',
+  'date', 'receivedDate', 'contentType', 'contentHash', 'inReplyTo', 'references', 'priority',
+  'hasAttachments', 'attachmentCount', 'attachmentNames', 'attachmentSizes',
+  'calendarIcs', 'calendarAdded', 'hasEmbedding', 'embeddingLastGenerated',
+  'importanceScore', 'importanceSource', 'authStatus',
+  'spamScore', 'spamReasons', 'originIp', 'listUnsubscribe', 'listUnsubscribePost',
+  'pgpStatus', 'spamUserVerdict',
+  'aiProcessedAt', 'aiConfidence', 'aiReasoning', 'priorityScore',
+  'snoozeUntil', 'snoozeOriginalTags',
+  'createdAt', 'updatedAt',
+]);
+
+/**
  * One thread row with only what the conversation-membership predicate reads —
  * no bodies. The input to core's `conversationMembers` and friends.
  */
@@ -648,6 +678,7 @@ export class EmailRepository extends BaseRepository {
     // move removed.
     const { cleanBody, rawBody, ...headerPatch } = patch;
     const { setClauses, params } = this.buildUpdateClauses(headerPatch, {
+      allowedFields: EMAIL_UPDATE_FIELDS,
       boolFields: ['hasAttachments', 'hasEmbedding', 'calendarAdded', 'gmailCategoriesPending'],
     });
     if (cleanBody !== undefined) {

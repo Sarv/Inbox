@@ -33,7 +33,10 @@ class Probe extends BaseRepository {
     return this.snakeToCamelObject<T>(row);
   }
 
-  updateClauses(updates: Record<string, unknown>, options?: { jsonFields?: string[]; boolFields?: string[] }) {
+  updateClauses(
+    updates: Record<string, unknown>,
+    options: { allowedFields: ReadonlySet<string>; jsonFields?: string[]; boolFields?: string[] },
+  ) {
     return this.buildUpdateClauses(updates, options);
   }
 
@@ -213,6 +216,7 @@ describe('snakeToCamelObject', () => {
 
 describe('buildUpdateClauses', () => {
   const probe = new Probe(() => undefined as unknown as Database.Database);
+  const allowedFields = new Set(['name', 'priority', 'description', 'matchType', 'conditions', 'enabled', 'stopProcessing', 'flags', 'a', 'b']);
 
   // The dynamic-UPDATE builder. Including an omitted (undefined) field would
   // overwrite stored data with NULL — silent data loss on every partial update.
@@ -221,8 +225,8 @@ describe('buildUpdateClauses', () => {
       name: 'Rule',
       priority: undefined,
       description: null,
-    });
-    expect(setClauses).toEqual(['name = @name', 'description = @description']);
+    }, { allowedFields });
+    expect(setClauses).toEqual(['"name" = @name', '"description" = @description']);
     expect(params).toEqual({ name: 'Rule', description: null });
     expect('priority' in params).toBe(false);
   });
@@ -230,13 +234,13 @@ describe('buildUpdateClauses', () => {
   it('stringifies jsonFields and coerces boolFields to 0/1 (SQLite has no boolean)', () => {
     const { setClauses, params } = probe.updateClauses(
       { matchType: 'any', conditions: [{ field: 'from' }], enabled: false, stopProcessing: true },
-      { jsonFields: ['conditions'], boolFields: ['enabled', 'stopProcessing'] },
+      { allowedFields, jsonFields: ['conditions'], boolFields: ['enabled', 'stopProcessing'] },
     );
     expect(setClauses).toEqual([
-      'match_type = @matchType',
-      'conditions = @conditions',
-      'enabled = @enabled',
-      'stop_processing = @stopProcessing',
+      '"match_type" = @matchType',
+      '"conditions" = @conditions',
+      '"enabled" = @enabled',
+      '"stop_processing" = @stopProcessing',
     ]);
     expect(params.conditions).toBe('[{"field":"from"}]');
     expect(params.enabled).toBe(0);      // false must persist as 0, not be dropped
@@ -245,14 +249,79 @@ describe('buildUpdateClauses', () => {
   });
 
   it('treats a field listed as BOTH json and bool as json (jsonFields wins)', () => {
-    const { params } = probe.updateClauses({ flags: [1, 2] }, { jsonFields: ['flags'], boolFields: ['flags'] });
+    const { params } = probe.updateClauses(
+      { flags: [1, 2] },
+      { allowedFields, jsonFields: ['flags'], boolFields: ['flags'] },
+    );
     expect(params.flags).toBe('[1,2]');
   });
 
   it('returns nothing to update for an all-undefined patch (caller must not run an empty SET)', () => {
-    const { setClauses, params } = probe.updateClauses({ a: undefined, b: undefined });
+    const { setClauses, params } = probe.updateClauses({ a: undefined, b: undefined }, { allowedFields });
     expect(setClauses).toEqual([]);
     expect(params).toEqual({});
+  });
+
+  // CASA 3.1.4. The keys become SQL TEXT (column name and @parameter), and
+  // `contacts:update` takes them from the renderer. Without the allow-list a key
+  // like this one is written into the UPDATE verbatim: SQL injection.
+  it('throws on a key outside the allow-list instead of interpolating it', () => {
+    for (const hostile of [
+      "name = 'x', email",
+      'x --',
+      'name = @name; DROP TABLE emails; --',
+      'unknownColumn',
+      '__proto__',
+    ]) {
+      expect(() => probe.updateClauses({ name: 'ok', [hostile]: 'v' }, { allowedFields }))
+        .toThrow(/Refusing to update unknown field/);
+    }
+  });
+
+  // Fail closed means NOTHING comes back for the caller to run, even for the
+  // allowed keys that preceded the bad one in the patch.
+  it('rejects the whole patch, not just the bad key', () => {
+    let result: unknown;
+    expect(() => { result = probe.updateClauses({ name: 'ok', 'x --': 1 }, { allowedFields }); }).toThrow();
+    expect(result).toBeUndefined();
+  });
+
+  // The message reaches app.log and the renderer: a hostile megabyte-long key
+  // must not flood either, and control characters must stay visible.
+  it('quotes and bounds the rejected key in the error message', () => {
+    const long = `${'k'.repeat(500)}\n`;
+    try {
+      probe.updateClauses({ [long]: 1 }, { allowedFields });
+      expect.unreachable();
+    } catch (error) {
+      expect((error as Error).message).toBe(`Refusing to update unknown field "${'k'.repeat(80)}"`);
+    }
+    expect(() => probe.updateClauses({ 'a\nb': 1 }, { allowedFields })).toThrow('"a\\nb"');
+  });
+
+  // An undefined value is never interpolated, so an unknown key carrying one is
+  // not a vector — and partial patches spread from wider objects carry them.
+  it('ignores an unknown key whose value is undefined', () => {
+    expect(probe.updateClauses({ name: 'n', notAColumn: undefined }, { allowedFields }).setClauses)
+      .toEqual(['"name" = @name']);
+  });
+
+  // An empty allow-list allows nothing: a repository that forgets to list its
+  // fields cannot write anything, rather than everything.
+  it('an empty allow-list rejects every defined field', () => {
+    expect(() => probe.updateClauses({ name: 'n' }, { allowedFields: new Set() })).toThrow(/unknown field "name"/);
+  });
+
+  // Some columns are SQLite keywords. Unquoted, `references = @references` is a
+  // syntax error, so a header repair that wrote References always failed.
+  it('double-quotes the column so a keyword column can be written', () => {
+    const db = openTestDb();
+    db.exec('CREATE TABLE t (id TEXT PRIMARY KEY, "references" TEXT)');
+    db.exec("INSERT INTO t VALUES ('r1', NULL)");
+    const { setClauses, params } = probe.updateClauses({ references: '<a@b>' }, { allowedFields: new Set(['references']) });
+    db.prepare(`UPDATE t SET ${setClauses.join(', ')} WHERE id = @id`).run({ ...params, id: 'r1' });
+    expect(db.prepare('SELECT "references" AS r FROM t').get()).toEqual({ r: '<a@b>' });
+    db.close();
   });
 });
 

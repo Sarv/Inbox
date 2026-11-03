@@ -7,7 +7,7 @@
  * SQLite stores a row as ONE record and rewrites that whole record on any
  * UPDATE. `clean_body`/`raw_body` average ~330 KB on the live mailbox, so
  * flipping `agent_status` from 'pending' to 'done' — four bytes of string —
- * rewrote a third of a megabyte, which SQLCipher then encrypted and HMAC'd:
+ * rewrote a third of a megabyte, which the page cipher then encrypted and authenticated:
  * measured ~47 KB of WAL per status flip. The AI pipeline does that twice per
  * email, sync does it again for every flag change, and a 26k-row drain moved
  * over a gigabyte of WAL to write a few kilobytes of actual state.

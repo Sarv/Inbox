@@ -258,7 +258,8 @@ does everything the privacy policy describes.
 
 In the app: **Settings → Accounts → Sign in with Gmail**.
 
-- Sarv Inbox listens on `http://127.0.0.1:<port>/cb` (the first free of 51823–51825).
+- Sarv Inbox listens on `http://127.0.0.1:<port>/cb` (the first free of 51823–51825),
+  only until the sign-in completes, fails or is cancelled.
 - Your default browser opens the Google consent screen.
 - After approval the browser redirects back to the loopback server.
 - The `authorization_code` is exchanged for access + refresh tokens.

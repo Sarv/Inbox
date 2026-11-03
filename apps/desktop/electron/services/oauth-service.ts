@@ -2,7 +2,8 @@
  * OAuth service (main process).
  *
  * Runs the full PKCE "authorization code" flow for Gmail/Microsoft/Yahoo:
- *   1. Spin up a loopback HTTP server on an ephemeral port.
+ *   1. Open the loopback HTTP listener on 127.0.0.1 (the first free preferred
+ *      port) — only while a sign-in is pending; it closes when the last settles.
  *   2. Open the provider's consent page in the user's default browser.
  *   3. Receive the redirect (/cb?code=...&state=...) on the loopback server.
  *   4. Exchange the code + PKCE verifier for access + refresh tokens.
@@ -49,8 +50,11 @@ import {
 import { shell } from 'electron';
 
 import { getSystemSuspended } from '../shared';
+import { isReleaseBundle } from '../utils/dev-mode';
+import { loopbackCallbackCsp, setLoopbackCallbackHeaders } from '../utils/loopback-callback-headers';
 
 import { waitForNetworkReady } from './network-readiness';
+import { OAUTH_CALLBACK_PORTS } from './oauth-callback-ports';
 import { getAccount, removeAccount, saveAccount, listAccounts } from './oauth-token-store';
 import { getReauthRequirement } from './reauth-registry';
 const logger = createLogger('oauth-service');
@@ -97,10 +101,11 @@ export function initializeOAuth(): void {
 
   // Sarv: each base URL is independently dev-switchable — the OAuth server,
   // the catalog API and the edge LLM gateway can each point at a different
-  // host. See SARV_OAUTH_SETUP.md.
-  const sarvOauthBase = process.env.SARVINBOX_SARV_OAUTH_BASE_URL;
-  const sarvApiBase = process.env.SARVINBOX_SARV_API_BASE_URL;
-  const sarvEdgeBase = process.env.SARVINBOX_SARV_EDGE_BASE_URL;
+  // host. See SARV_OAUTH_SETUP.md. A release build takes none of them.
+  const sarv = sarvEnvOverrides();
+  const sarvOauthBase = sarv.SARVINBOX_SARV_OAUTH_BASE_URL;
+  const sarvApiBase = sarv.SARVINBOX_SARV_API_BASE_URL;
+  const sarvEdgeBase = sarv.SARVINBOX_SARV_EDGE_BASE_URL;
   if (sarvOauthBase || sarvApiBase || sarvEdgeBase) {
     setSarvBaseUrl({
       oauthBase: sarvOauthBase,
@@ -118,18 +123,56 @@ export function initializeOAuth(): void {
   // and imported here rather than re-declared, so rotating it in core rotates
   // it everywhere. The constant ensures a distributed build can sign in against
   // oauth.sarv.com without the end user editing anything.
-  const sarvId = process.env.SARVINBOX_SARV_CLIENT_ID || SARV_PRODUCTION_CLIENT_ID;
+  const sarvId = sarv.SARVINBOX_SARV_CLIENT_ID || SARV_PRODUCTION_CLIENT_ID;
   setOAuthClientId('sarv', sarvId);
   logger.info(
-    process.env.SARVINBOX_SARV_CLIENT_ID
+    sarv.SARVINBOX_SARV_CLIENT_ID
       ? '[OAuth] Sarv client_id loaded from env'
       : '[OAuth] Sarv client_id using production default',
   );
-  const sarvSecret = process.env.SARVINBOX_SARV_CLIENT_SECRET;
+  const sarvSecret = sarv.SARVINBOX_SARV_CLIENT_SECRET;
   if (sarvSecret) {
     setOAuthClientSecret('sarv', sarvSecret);
     logger.info('[OAuth] Sarv client_secret loaded from env');
   }
+}
+
+/**
+ * The environment variables that re-point the Sarv sign-in. Every one of them
+ * decides where a Sarv credential goes: the server that hosts the consent page
+ * and receives the authorization code, the API and gateway the bearer is sent
+ * to (`isSarvAIEndpointAllowed` trusts whatever these name), and the client
+ * registration the tokens are issued to.
+ */
+const SARV_ENV_OVERRIDES = [
+  'SARVINBOX_SARV_OAUTH_BASE_URL',
+  'SARVINBOX_SARV_API_BASE_URL',
+  'SARVINBOX_SARV_EDGE_BASE_URL',
+  'SARVINBOX_SARV_CLIENT_ID',
+  'SARVINBOX_SARV_CLIENT_SECRET',
+] as const;
+type SarvEnvOverride = (typeof SARV_ENV_OVERRIDES)[number];
+
+/**
+ * The Sarv overrides this build honours: every non-empty one in a dev build,
+ * none in a release bundle. A shipped app's environment belongs to whoever
+ * launched it — a shell profile, a launch agent, a wrapper script — so letting
+ * it choose the OAuth server would let any of them collect a sign-in. Same rule,
+ * and the same build-time signal, as the `.env` file and VITE_DEV_SERVER_URL
+ * (`isReleaseBundle`, CASA L-3). An ignored override is named once, never its
+ * value: a client secret must not reach the log.
+ */
+function sarvEnvOverrides(): Partial<Record<SarvEnvOverride, string>> {
+  const present = SARV_ENV_OVERRIDES.filter((name) => process.env[name]);
+  if (!isReleaseBundle()) {
+    return Object.fromEntries(present.map((name) => [name, process.env[name]]));
+  }
+  if (present.length > 0) {
+    logger.warn(
+      `[OAuth] Release build — ignoring ${present.join(', ')} from the environment; using the built-in Sarv endpoints and client`,
+    );
+  }
+  return {};
 }
 
 /**
@@ -619,18 +662,8 @@ export function attachOAuthBearer<
 
 // ---------- Internal helpers ----------
 
-/**
- * Preferred loopback ports for the OAuth callback. Tried in order until one
- * binds. They must all be registered as allowed redirect_uris on the provider
- * (Sarv does strict exact-match; Google accepts any).
- *   http://127.0.0.1:51823/cb
- *   http://127.0.0.1:51824/cb
- *   http://127.0.0.1:51825/cb
- * If all three are held by another process we fall back to ephemeral port 0;
- * a strict server then answers redirect_uri_mismatch and the user has to free
- * one of the preferred ports.
- */
-const PREFERRED_PORTS = [51823, 51824, 51825];
+/** How long a sign-in waits for its redirect before giving up. */
+const FLOW_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * A sign-in waiting for its redirect, keyed by the `state` we issued for it.
@@ -654,21 +687,59 @@ const pendingFlows = new Map<string, PendingFlow>();
  */
 let activeFlowState: string | null = null;
 
+interface CallbackListener {
+  server: http.Server;
+  port: number;
+  /**
+   * Each response written on this listener that has not yet reached the OS,
+   * settling when it has (or its connection is gone) — what a close waits for
+   * before dropping connections. See `closeCallbackListener`.
+   */
+  answering: Map<http.ServerResponse, Promise<void>>;
+}
+
 /**
- * The loopback listener, bound ONCE and kept for the life of the process.
+ * The loopback listener — open ONLY while a sign-in is waiting for its redirect
+ * (CASA 3.2.2: no local port listens when nothing needs it).
  *
- * It deliberately outlives the flow that started it. A server owned by a single
- * flow is closed by every cancel — Back in the modal, a superseding click, the
- * five-minute timeout — and the next flow then races the OS to rebind: it gets
- * EADDRINUSE on the just-closed socket, moves to the next preferred port, and
- * the consent page still in the user's browser redirects to the port it was
- * issued, where nothing is listening. That is ERR_CONNECTION_REFUSED on
- * 127.0.0.1:51823 after a successful sign-in. One long-lived listener removes
- * the whole class: the port never moves, and a redirect that arrives late gets
- * an explanatory page instead of a refused connection.
+ * Every flow HOLDS the listener from the moment it starts until it settles
+ * (success, provider error, bad callback, timeout, cancel, browser failure);
+ * the last hold released closes it, and the next sign-in opens it again on the
+ * first free preferred port — the same port as last time unless another process
+ * has taken it since, so the registered redirect_uri stays the same.
+ *
+ * What this must keep from the listener that used to live for the whole
+ * process: the port never moves under a PENDING sign-in. A server owned by
+ * a single flow was closed by every cancel — Back in the modal, a superseding
+ * click, the timeout — and the next flow then rebound, sometimes on the next
+ * preferred port, while the consent page still in the browser redirected to
+ * the old one: ERR_CONNECTION_REFUSED on 127.0.0.1:51823 after a successful
+ * sign-in. So a new sign-in takes its hold BEFORE it supersedes the pending
+ * one; the count never reaches zero in between and the socket stays put.
+ *
+ * The cost: a redirect that arrives after EVERY sign-in has settled (the user
+ * pressed Back, then finished consent in the browser anyway) now meets a
+ * refused connection instead of the "expired" page. While any sign-in is
+ * pending it still gets that page.
  */
-let callbackServer: { server: http.Server; port: number } | null = null;
-let callbackServerPending: Promise<{ server: http.Server; port: number }> | null = null;
+let callbackServer: CallbackListener | null = null;
+let callbackServerPending: Promise<CallbackListener> | null = null;
+/** Sign-ins currently holding the listener open — see `acquireCallbackServer`. */
+let callbackServerHolds = 0;
+
+/**
+ * Bumped by every cancel: the user's Back (`cancelOAuthFlow`) and teardown
+ * (`closeOAuthCallbackServer`). Both reach a sign-in through `pendingFlows`,
+ * but one still waiting for its listener to bind is not there yet; it compares
+ * the epoch it started under once the bind returns and gives up, instead of
+ * opening the browser and holding the port until the five-minute timeout.
+ * Superseding a pending flow is not a cancel and does not bump it — the later
+ * of two sign-ins started together must still win.
+ */
+let flowCancelEpoch = 0;
+
+/** How long a closing listener waits for a response it is still sending before dropping the connection anyway. */
+export const RESPONSE_FLUSH_GRACE_MS = 2_000;
 
 /** Listen on one port, resolving on success and rejecting on the bind error. */
 const listenOnce = (server: http.Server, port: number): Promise<void> =>
@@ -688,7 +759,7 @@ const listenOnce = (server: http.Server, port: number): Promise<void> =>
 
 /** Bind the first free preferred port, falling back to an ephemeral one. */
 const bindCallbackServer = async (server: http.Server): Promise<number> => {
-  for (const port of PREFERRED_PORTS) {
+  for (const port of OAUTH_CALLBACK_PORTS) {
     try {
       await listenOnce(server, port);
       return (server.address() as AddressInfo).port;
@@ -699,7 +770,7 @@ const bindCallbackServer = async (server: http.Server): Promise<number> => {
   }
   logger.warn(
     '[OAuth] All preferred loopback ports are in use — falling back to an ephemeral port. ' +
-      'A strict provider (Sarv) will answer redirect_uri_mismatch; free 51823-51825 and retry.',
+      `A strict provider (Sarv) will answer redirect_uri_mismatch; free ${OAUTH_CALLBACK_PORTS.join(', ')} and retry.`,
   );
   await listenOnce(server, 0);
   return (server.address() as AddressInfo).port;
@@ -711,6 +782,14 @@ const bindCallbackServer = async (server: http.Server): Promise<number> => {
  * the callback finds nothing to complete.
  */
 const handleCallbackRequest = (req: http.IncomingMessage, res: http.ServerResponse): void => {
+  // A redirect is a top-level GET. Anything else is refused before the state is
+  // even read, so it can neither complete nor fail a sign-in.
+  if (req.method !== 'GET') {
+    res.writeHead(405, { Allow: 'GET' });
+    res.end();
+    return;
+  }
+
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   if (url.pathname !== '/cb') {
     res.writeHead(404);
@@ -750,12 +829,23 @@ const handleCallbackRequest = (req: http.IncomingMessage, res: http.ServerRespon
   pending.done(code);
 };
 
-/** The loopback listener, started on first use and reused after that. */
-const ensureCallbackServer = (): Promise<{ server: http.Server; port: number }> => {
+/** Bind a new loopback listener, or join the bind already in progress. */
+const ensureCallbackServer = (): Promise<CallbackListener> => {
   if (callbackServer) return Promise.resolve(callbackServer);
   if (!callbackServerPending) {
     const server = http.createServer();
+    const answering: CallbackListener['answering'] = new Map();
     server.on('request', (req, res) => {
+      answering.set(res, new Promise<void>((resolve) => {
+        const answered = () => {
+          answering.delete(res);
+          resolve();
+        };
+        res.once('finish', answered);
+        res.once('close', answered);
+      }));
+      // Before any branch can write a status, so every answer carries them.
+      setLoopbackCallbackHeaders(res, CALLBACK_PAGE_CSP);
       try {
         handleCallbackRequest(req, res);
       } catch (err) {
@@ -763,15 +853,15 @@ const ensureCallbackServer = (): Promise<{ server: http.Server; port: number }> 
         if (!res.headersSent) respondHtml(res, 'error', 'callback_failed');
       }
     });
-    // A closed socket must not be handed to the next flow as if it were live.
-    server.on('close', () => {
-      callbackServer = null;
-    });
+    // No 'close' handler clears `callbackServer`: the only thing that closes a
+    // listener is `releaseCallbackServer`, which forgets it first. One that did
+    // would fire late — after the next sign-in had bound a new listener — and
+    // orphan that one, open, for the life of the process.
     callbackServerPending = bindCallbackServer(server)
       .then((port) => {
         // Never hold the app (or a test run) open on an idle listener.
         server.unref();
-        callbackServer = { server, port };
+        callbackServer = { server, port, answering };
         logger.info(`[OAuth] Loopback callback server listening on http://127.0.0.1:${port}/cb`);
         return callbackServer;
       })
@@ -783,28 +873,91 @@ const ensureCallbackServer = (): Promise<{ server: http.Server; port: number }> 
 };
 
 /**
- * Stop the loopback listener and reject anything still waiting on it. Only
- * needed to release the port deterministically (tests, shutdown) — normal
- * cancellation leaves the listener up on purpose.
+ * Take a hold on the listener, opening it if nothing holds it yet. The count
+ * goes up synchronously, before the first await, so a sign-in that starts while
+ * another is settling can never see it at zero. Every successful acquire is
+ * paired with exactly one `releaseCallbackServer()` — the flow's `settle`.
  */
-export function closeOAuthCallbackServer(): void {
-  cancelOAuthFlow();
+const acquireCallbackServer = async (): Promise<CallbackListener> => {
+  callbackServerHolds += 1;
+  try {
+    return await ensureCallbackServer();
+  } catch (err) {
+    releaseCallbackServer();
+    throw err;
+  }
+};
+
+/** Drop one hold; the last one closes the listener and frees its port. */
+const releaseCallbackServer = (): void => {
+  callbackServerHolds -= 1;
+  if (callbackServerHolds > 0) return;
   const current = callbackServer;
   callbackServer = null;
-  try {
-    current?.server.close();
-  } catch {
-    /* already closing */
+  if (current) closeCallbackListener(current);
+};
+
+/**
+ * Free the port at once; drop every connection still open on it once each
+ * response already written has reached the OS.
+ *
+ * `server.close()` stops accepting and drops idle connections (a browser's
+ * speculative preconnect), but leaves one whose request is being answered.
+ * Whatever it leaves — that response, or a request whose headers never
+ * finished — would keep the old listener and its handler alive with no port
+ * behind it, so `closeAllConnections()` follows. Not straight away: a
+ * successful sign-in releases the listener from INSIDE the request handler,
+ * right after `res.end()`. On POSIX the page is already in the kernel then (the
+ * write is synchronous); on Windows it is overlapped I/O, and closing the
+ * socket under it can cancel the write — the browser would show a reset instead
+ * of "Signed in". So the drop waits for every answer in flight to finish (or
+ * its connection to go), and an unref'd timer bounds the wait for a client that
+ * stops reading.
+ */
+const closeCallbackListener = ({ server, port, answering }: CallbackListener): void => {
+  server.close();
+  logger.info(`[OAuth] Loopback callback server on port ${port} closed — no sign-in pending`);
+  const inFlight = [...answering.values()];
+  if (inFlight.length === 0) {
+    server.closeAllConnections();
+    return;
+  }
+  const backstop = setTimeout(() => server.closeAllConnections(), RESPONSE_FLUSH_GRACE_MS);
+  backstop.unref();
+  void Promise.all(inFlight).then(() => {
+    clearTimeout(backstop);
+    server.closeAllConnections();
+  });
+};
+
+/** FLOW_CANCELLED, for the live sign-in if there is one. Not a cancel of its own — see `flowCancelEpoch`. */
+const failActiveFlow = (): void => {
+  const state = activeFlowState;
+  if (!state) return;
+  pendingFlows.get(state)?.fail(new OAuthError('OAuth sign-in cancelled', 'FLOW_CANCELLED'));
+};
+
+/**
+ * Cancel every sign-in — pending, or still waiting for its listener to bind —
+ * which closes the listener. For tests and shutdown, where a pending flow must
+ * not outlive its caller; the user-facing cancel is `cancelOAuthFlow()`.
+ */
+export function closeOAuthCallbackServer(): void {
+  flowCancelEpoch += 1;
+  for (const pending of [...pendingFlows.values()]) {
+    pending.fail(new OAuthError('OAuth sign-in cancelled', 'FLOW_CANCELLED'));
   }
 }
 
 /** Abort the in-flight interactive OAuth flow, if any. No-op when idle.
- *  Rejects the pending sign-in with FLOW_CANCELLED; the loopback port stays
- *  bound, so the next attempt reuses the same registered redirect_uri. */
+ *  Rejects the pending sign-in with FLOW_CANCELLED — or, when it is still
+ *  waiting for the listener to bind, stops it before it opens the browser —
+ *  which closes the loopback listener unless another sign-in still holds it;
+ *  the next attempt reopens it on the same preferred port, so the registered
+ *  redirect_uri does not change. */
 export function cancelOAuthFlow(): void {
-  const state = activeFlowState;
-  if (!state) return;
-  pendingFlows.get(state)?.fail(new OAuthError('OAuth sign-in cancelled', 'FLOW_CANCELLED'));
+  flowCancelEpoch += 1;
+  failActiveFlow();
 }
 
 async function runLoopbackFlow(
@@ -812,25 +965,40 @@ async function runLoopbackFlow(
   codeChallenge: string,
   expectedState: string,
 ): Promise<{ code: string; redirectUri: string }> {
-  // A previous flow still pending (e.g. the user hit Back then clicked again)
-  // is superseded, not left to answer over the top of this one.
-  cancelOAuthFlow();
-
-  const { port } = await ensureCallbackServer();
+  // Hold the listener FIRST: superseding the pending flow below releases its
+  // hold, and without ours already counted that would close the socket under
+  // the consent page it opened.
+  const startedUnder = flowCancelEpoch;
+  const { port } = await acquireCallbackServer();
+  // Cancelled (Back, teardown) while the bind was in progress: this flow was
+  // in no list a cancel could reach, so it checks for itself — before it
+  // registers, opens the browser, and holds the port for five minutes.
+  if (flowCancelEpoch !== startedUnder) {
+    releaseCallbackServer();
+    throw new OAuthError('OAuth sign-in cancelled', 'FLOW_CANCELLED');
+  }
   const redirectUri = `http://127.0.0.1:${port}/cb`;
+
+  // A previous flow still pending (e.g. the user hit Back then clicked again)
+  // is superseded, not left to answer over the top of this one. Only after the
+  // await: two sign-ins started together both wait for the same bind, and the
+  // later one must still find — and cancel — the earlier.
+  failActiveFlow();
 
   return new Promise((resolve, reject) => {
     let settled = false;
 
-    // Single exit point: clear the timeout, deregister the flow, and
-    // resolve/reject exactly once (a late redirect racing a cancel or the
-    // timeout finds nothing registered and gets the "expired" page).
+    // Single exit point: clear the timeout, deregister the flow, release its
+    // hold on the listener, and resolve/reject exactly once (a late redirect
+    // racing a cancel or the timeout finds nothing registered and gets the
+    // "expired" page — or, with nothing else pending, a closed port).
     const settle = (run: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       pendingFlows.delete(expectedState);
       if (activeFlowState === expectedState) activeFlowState = null;
+      releaseCallbackServer();
       run();
     };
     const done = (code: string) => settle(() => resolve({ code, redirectUri }));
@@ -838,7 +1006,7 @@ async function runLoopbackFlow(
 
     const timeout = setTimeout(
       () => fail(new OAuthError('OAuth flow timed out (5 minutes)', 'FLOW_TIMEOUT')),
-      5 * 60 * 1000,
+      FLOW_TIMEOUT_MS,
     );
     // The timer must not keep the app alive for five minutes after a quit.
     timeout.unref?.();
@@ -846,8 +1014,15 @@ async function runLoopbackFlow(
     pendingFlows.set(expectedState, { redirectUri, done, fail });
     activeFlowState = expectedState;
 
-    const authUrl = buildAuthUrl(provider, redirectUri, codeChallenge, expectedState);
-    shell.openExternal(authUrl).catch((err) => fail(err));
+    // A launcher that throws instead of rejecting must still settle the flow,
+    // or it would hold the port open until the timeout.
+    try {
+      shell
+        .openExternal(buildAuthUrl(provider, redirectUri, codeChallenge, expectedState))
+        .catch((err) => fail(err));
+    } catch (err) {
+      fail(err);
+    }
   });
 }
 
@@ -888,10 +1063,17 @@ async function fetchUserInfo(
 }
 
 /**
+ * The callback page's only styling. Its CSP admits exactly this text by hash,
+ * so it lives in one constant that both the page and the policy are built from.
+ */
+const CALLBACK_PAGE_STYLE = `body{font-family:-apple-system,system-ui,sans-serif;max-width:480px;margin:80px auto;padding:24px;text-align:center;color:#1f2937}
+h1{font-size:22px;margin:0 0 12px}p{color:#4b5563}`;
+const CALLBACK_PAGE_CSP = loopbackCallbackCsp({ inlineStyle: CALLBACK_PAGE_STYLE });
+
+/**
  * Answer the browser. `expired` is the page for a redirect that no longer has a
  * sign-in to complete (cancelled, timed out, already done, or a state we never
- * issued) — the case that used to show ERR_CONNECTION_REFUSED because the
- * listener had been torn down with its flow.
+ * issued) while another sign-in keeps the listener open.
  */
 function respondHtml(
   res: http.ServerResponse,
@@ -907,8 +1089,7 @@ function respondHtml(
         ? 'This sign-in was cancelled or took too long. Close this tab, return to Sarv Inbox and start the sign-in again.'
         : `Sign-in failed: ${escapeHtml(detail)}. Close this tab and try again.`;
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
-<style>body{font-family:-apple-system,system-ui,sans-serif;max-width:480px;margin:80px auto;padding:24px;text-align:center;color:#1f2937}
-h1{font-size:22px;margin:0 0 12px}p{color:#4b5563}</style></head>
+<style>${CALLBACK_PAGE_STYLE}</style></head>
 <body><h1>${title}</h1><p>${body}</p></body></html>`;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);

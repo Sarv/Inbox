@@ -91,6 +91,42 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The job above runs on Linux, so code that only does something on Windows
+  # was never exercised: the Mark-of-the-Web NTFS stream (and its surviving the
+  # rename / hard-link commit a save makes), and the OAuth loopback listeners'
+  # close-and-rebind on one port, where Windows' sockets differ (overlapped
+  # writes, port reuse). This runs just those suites, on Windows, with the
+  # normal install. None of them opens SQLite, so no native-ABI step is needed.
+  # windows-signing-workflows.test.ts checks every listed file exists, so a
+  # rename cannot quietly drop a suite from here.
+  windows-unit-tests:
+    name: Windows-specific unit tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-workspace
+
+      # The desktop suites import @sarvinbox/core and storage-node from dist —
+      # the same `^build` the test task runs, through turbo's cache.
+      - name: Build the libraries the desktop tests import
+        shell: bash
+        run: pnpm exec turbo run build --filter='@sarvinbox/desktop^...'
+
+      # --testTimeout: a connection to a closed localhost port is refused only
+      # after Windows retries the SYN (about two seconds), and the loopback
+      # suite checks that ports are closed many times over.
+      - name: Run the Windows-relevant suites
+        shell: bash
+        working-directory: apps/desktop
+        run: >-
+          pnpm exec vitest run --testTimeout=60000
+          test/unit/electron/services/mark-downloaded.test.ts
+          test/unit/electron/services/attachment-save-marks-downloaded.test.ts
+          test/unit/electron/services/oauth-loopback.test.ts
+          test/unit/electron/utils/loopback-callback-headers.test.ts
+          test/unit/electron/services/antivirus-oauth-service.test.ts
+
   # The release signs Windows binaries with an HSM key that only a pushed v*
   # tag can reach, so without this the signing code would run for the first
   # time on the very release that switches signing on. This runs the SAME

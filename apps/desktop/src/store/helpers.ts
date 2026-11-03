@@ -762,6 +762,63 @@ export const clearSmtpCredentials = () => {
   }
 };
 
+/** Same login (username) on the same server, case-insensitively. */
+const sameLogin = (
+  a: { username?: unknown; host?: unknown } | null | undefined,
+  b: { username?: unknown; host?: unknown } | null | undefined,
+): boolean =>
+  typeof a?.username === 'string' && a.username !== '' && typeof b?.username === 'string' &&
+  a.username.toLowerCase() === b.username.toLowerCase() &&
+  String(a.host ?? '').toLowerCase() === String(b.host ?? '').toLowerCase();
+
+/** Whether the legacy single-account IMAP entry is this account's (by id, either id scheme, or login). */
+const legacyImapBelongsTo = (imap: { username?: string; host?: string }, account: StoredAccount): boolean =>
+  !!imap.username && (
+    account.id === accountIdFor(imap.username, imap.host) ||
+    account.id === accountIdFor(imap.username) ||
+    sameLogin(imap, account.imapConfig)
+  );
+
+/**
+ * Forget the plaintext secrets older builds left in localStorage for a REMOVED
+ * account (CASA 6.6.1).
+ *
+ * `migrateCredentialsToVault` deliberately leaves them in place when the vault
+ * write fails — they are then the only copy — so removal is the moment they
+ * must go, and only theirs:
+ * - the legacy single-account keys (`sarvinbox-credentials` /
+ *   `-smtp-credentials`) are removed when they are this account's and no
+ *   remaining account's. A remaining account's entry is never touched: after a
+ *   failed vault migration it is that account's only copy of its password.
+ *   (The two keys are a pair — the legacy account's IMAP and SMTP — so SMTP
+ *   goes with a matching IMAP entry, or on its own SMTP login.)
+ * - when no account remains, both keys go regardless of whose they look like.
+ *   Left behind, `migrateAccounts` would resurrect them as "Account 1" at the
+ *   next launch — and a later account could inherit a stale sending config.
+ * The account's own `sarvinbox-accounts` row is dropped by `removeAccount`,
+ * which leaves every remaining row as it is stored.
+ */
+export const forgetLegacySecretsFor = (removed: StoredAccount | undefined, remaining: StoredAccount[]): void => {
+  if (remaining.length === 0) {
+    clearCredentials();
+    clearSmtpCredentials();
+    return;
+  }
+  if (!removed) return;
+  const imap = loadSavedCredentials();
+  const imapWasRemoved = !!imap?.username && legacyImapBelongsTo(imap, removed) &&
+    !remaining.some((a) => legacyImapBelongsTo(imap, a));
+  if (imapWasRemoved) clearCredentials();
+  const smtp = loadSavedSmtpCredentials();
+  if (
+    smtp?.username &&
+    (imapWasRemoved || sameLogin(smtp, removed.smtpConfig)) &&
+    !remaining.some((a) => sameLogin(smtp, a.smtpConfig))
+  ) {
+    clearSmtpCredentials();
+  }
+};
+
 /**
  * Best-effort SMTP defaults derived from the IMAP config — used to PREFILL the
  * SMTP setup form (the user reviews/edits + verifies before it's used). Known
@@ -845,15 +902,18 @@ export const loadAccounts = (): StoredAccount[] => {
   } catch { return []; }
 };
 
+/** An account row as it may be persisted: its IMAP/SMTP secrets removed. */
+const withoutSecrets = (a: StoredAccount): StoredAccount => ({
+  ...a,
+  imapConfig: stripSecrets(a.imapConfig),
+  smtpConfig: stripSecrets(a.smtpConfig as any),
+});
+
 export const saveAccounts = (accounts: StoredAccount[]) => {
   try {
     // Persist only non-secret metadata — each account's IMAP/SMTP secrets are
     // kept in the encrypted vault (keyed by account id), never in localStorage.
-    const safe = accounts.map((a) => ({
-      ...a,
-      imapConfig: stripSecrets(a.imapConfig),
-      smtpConfig: stripSecrets(a.smtpConfig as any),
-    }));
+    const safe = accounts.map(withoutSecrets);
     localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(safe));
     // Mirror the (stripped) snapshot into the durable DB registry — the source
     // of truth that survives a localStorage wipe. Fire-and-forget: the DB does
@@ -864,10 +924,11 @@ export const saveAccounts = (accounts: StoredAccount[]) => {
 };
 
 /**
- * Persist the registry WITHOUT stripping secrets. Used ONLY by the module-load
- * `migrateAccounts` normalize/backfill, which runs before the vault migration —
- * stripping there would drop the secrets from disk before they're safely in the
- * vault. Every other write goes through `saveAccounts` (which strips).
+ * Persist the registry WITHOUT stripping secrets. Used ONLY where stripping
+ * could drop a secret from disk before it is safely in the vault: the
+ * module-load `migrateAccounts` normalize/backfill, which runs before the vault
+ * migration, and `removeAccount`, which writes the REMAINING rows back as they
+ * were stored. Every other write goes through `saveAccounts` (which strips).
  */
 const saveAccountsRaw = (accounts: StoredAccount[]) => {
   try { localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts)); } catch { /* ignore */ }
@@ -1088,10 +1149,23 @@ export const upsertAccount = (accounts: StoredAccount[], account: StoredAccount)
   return next;
 };
 
-/** Remove an account from the registry and persist. */
+/**
+ * Remove an account from the registry and persist. Call it only once the
+ * account's removal has SUCCEEDED: the row it drops is the account's record,
+ * and after a failed vault migration possibly its only copy of its password.
+ *
+ * Every remaining row already on disk is written back exactly as stored — not
+ * through `saveAccounts`, which would strip its secrets: after a failed vault
+ * migration (`migrateCredentialsToVault` leaves the plaintext for the next
+ * launch's retry) they are that account's only copy. A remaining account with
+ * no stored row yet is written as `saveAccounts` would write it. The DB
+ * registry is not mirrored: `accounts:remove` drops the row there itself, and
+ * the mirror is upsert-only.
+ */
 export const removeAccount = (accounts: StoredAccount[], id: string): StoredAccount[] => {
   const next = accounts.filter((a) => a.id !== id);
-  saveAccounts(next);
+  const stored = new Map(loadAccounts().map((row) => [row?.id, row]));
+  saveAccountsRaw(next.map((a) => stored.get(a.id) ?? withoutSecrets(a)));
   return next;
 };
 

@@ -4,6 +4,7 @@ import type { AntivirusSetupStatus } from '@sarvinbox/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AntivirusOAuthService, runScannerLoopbackFlow, SARV_SCANNER_EXTENSION_ID, SARV_SCANNER_ORIGIN } from '../../../../electron/services/antivirus-oauth-service';
+import { LOOPBACK_CALLBACK_CSP } from '../../../../electron/utils/loopback-callback-headers';
 
 const EMPTY: AntivirusSetupStatus = { configured: false, enabled: false, endpoint: '', allowedAccountIds: [], allowBody: false,
   accounts: [{ id: 'account-a', email: 'a@example.test', name: 'Account A' }, { id: 'account-b', email: 'b@example.test', name: 'Account B' }] };
@@ -262,6 +263,32 @@ describe('exact scanner loopback callback', () => {
     expect(statuses).toEqual([404, 400, 400, 404]);
     expect(result.code).toBe('synthetic-code');
     expect(result.redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/);
+  });
+
+  // Regression: a scanner callback page (whose URL carries the authorization code) could be cached, leak that URL
+  // as a Referer, run or load anything, or be framed — the shared loopback headers must be on every answer.
+  it('sends the shared loopback callback headers on every response', async () => {
+    const controller = new AbortController(); const replies: Array<[number, Headers]> = [];
+    let browsing: Promise<void> = Promise.resolve();
+    await runScannerLoopbackFlow(redirectUri => 'https://oauth.sarv.com/auth?redirect_uri=' + encodeURIComponent(redirectUri), 'synthetic-state', controller.signal, {
+      port: 0, openExternal: url => (browsing = (async () => {
+        const redirect = new URL(url).searchParams.get('redirect_uri')!;
+        for (const path of ['/wrong', '/auth/callback?state=wrong&code=bad', '/auth/callback?state=synthetic-state&code=synthetic-code']) {
+          const reply = await fetch(new URL(path, redirect)); await reply.text(); replies.push([reply.status, reply.headers]);
+        }
+      })()),
+    });
+    await browsing; // the flow settles on the last callback, before its reply has been read
+    expect(replies.map(([status]) => status)).toEqual([404, 400, 200]);
+    for (const [, headers] of replies) {
+      expect(headers.get('cache-control')).toBe('no-store');
+      expect(headers.get('referrer-policy')).toBe('no-referrer');
+      expect(headers.get('x-content-type-options')).toBe('nosniff');
+      expect(headers.get('content-type')).toBe('text/plain; charset=utf-8');
+      expect(headers.get('content-security-policy')).toBe(LOOPBACK_CALLBACK_CSP);
+      expect(headers.get('content-security-policy')).toContain("default-src 'none'");
+      expect(headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    }
   });
 
   // Regression: declined/incomplete callbacks and browser failures could leave a listener or endless spinner.

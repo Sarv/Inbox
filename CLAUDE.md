@@ -242,6 +242,23 @@ Established shared helpers (extend this list as you add more):
   plain Node https with a guarded `lookup`). Use these for any new
   stranger-named fetch instead of `chromiumFetch`, which cannot check the
   address it connects to.
+- `setLoopbackCallbackHeaders(res, csp?)` / `loopbackCallbackCsp({ inlineStyle })` —
+  `apps/desktop/electron/utils/loopback-callback-headers.ts`. The headers every
+  OAuth loopback callback response carries (no-store, no-referrer, deny-all CSP
+  with an inline style admitted only by hash, nosniff, `Connection: close`).
+  Used by the mail/Sarv and antivirus sign-in listeners; use it for any new one.
+- `markDownloadedFromInternet(filePath)` —
+  `apps/desktop/electron/services/mark-downloaded.ts`. Gives a file the app
+  wrote from mail the OS "downloaded from the internet" mark (Windows
+  `Zone.Identifier` stream, macOS `com.apple.quarantine`; a no-op on Linux), so
+  Gatekeeper, SmartScreen and Office Protected View warn before it opens. Never
+  throws, bounded wait, logs no file name. `writeProtectedAttachment` already
+  calls it before its commit; call it for any other path that writes or hands
+  an attachment to another app — never for the user's own files (key exports).
+- `errorClassName(error)` — `packages/core/src/utils/error-class-name.ts`. The
+  class of a thrown value and nothing else, for a log line or error about a
+  failure whose message may quote secret data (a decrypted payload, a
+  keychain's refusal). Use it instead of `error.message` there.
 
 ## Prefer a mature library over hand-rolled / regex logic
 

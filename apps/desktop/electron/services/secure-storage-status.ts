@@ -165,7 +165,7 @@ export function getSecureStorageStatus(): SecureStorageStatus {
   for (const store of STORES) {
     status.stores.push(storeStatus(store.id, store.label,
       db ? blobEnvelope(db, store.blob) : { envelope: databaseExists ? 'unknown' : 'missing', version: '' }, protectedByDatabase));
-    // A plaintext legacy copy outside SQLCipher remains exposed after its
+    // A plaintext legacy copy outside the encrypted database remains exposed after its
     // migrated database copy is protected. Include existing recovery copies.
     for (const [index, suffix] of ['', '.premigrated', '.bak'].entries()) {
       const inspection = fileEnvelope(join(directory, store.legacy + suffix));

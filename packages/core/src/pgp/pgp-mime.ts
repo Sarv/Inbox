@@ -17,7 +17,7 @@ import {
   splitMultipartBody,
 } from './mime-structure';
 import type { MimeEntity } from './mime-structure';
-import { PgpOpenError } from './types';
+import { PGP_DECRYPT_FAILED_MESSAGE, PGP_SIGNATURE_FAILED_MESSAGE, PgpOpenError, pgpFailureDetail } from './types';
 import type { PgpOpenResult, PgpSignatureResult } from './types';
 
 export interface PgpOpenKeys {
@@ -77,7 +77,9 @@ async function readPgpMessage(ciphertext: Buffer): Promise<openpgp.Message<Uint8
       ? ((await openpgp.readMessage({ armoredMessage: text })) as openpgp.Message<Uint8Array>)
       : await openpgp.readMessage({ binaryMessage: new Uint8Array(ciphertext) });
   } catch (error) {
-    throw new PgpOpenError(`Unreadable encrypted data: ${(error as Error).message}`, 'bad-data');
+    // Reading the packets is part of decrypting: an armor or packet error must
+    // read exactly like a failed integrity check (CASA 4.1.4).
+    throw new PgpOpenError(PGP_DECRYPT_FAILED_MESSAGE, 'bad-data', pgpFailureDetail(error));
   }
 }
 
@@ -103,7 +105,9 @@ async function decryptMessage(
     });
     return { data: result.data as Uint8Array, signatures: result.signatures };
   } catch (error) {
-    throw new PgpOpenError(`Could not decrypt: ${(error as Error).message}`, 'bad-data');
+    // "Session key decryption failed", "Modification detected", an unsupported
+    // cipher: one message to the user, the library's reason to the log only.
+    throw new PgpOpenError(PGP_DECRYPT_FAILED_MESSAGE, 'bad-data', pgpFailureDetail(error));
   }
 }
 
@@ -125,7 +129,7 @@ async function verifyDetached(
     const result = await openpgp.verify({ message, signature, verificationKeys });
     return { signedBytes, signature: await evaluateSignatures(result.signatures, verificationKeys) };
   } catch (error) {
-    return { signedBytes, signature: { status: 'invalid', error: (error as Error).message } };
+    return { signedBytes, signature: invalidSignature(error) };
   }
 }
 
@@ -144,7 +148,7 @@ export async function openInlinePgp(text: string, keys: PgpOpenKeys): Promise<Pg
         signature: await evaluateSignatures(result.signatures, keys.verificationKeys),
       };
     } catch (error) {
-      throw new PgpOpenError(`Unreadable signed text: ${(error as Error).message}`, 'bad-data');
+      throw new PgpOpenError(PGP_SIGNATURE_FAILED_MESSAGE, 'bad-data', pgpFailureDetail(error));
     }
   }
   if (kind === 'inline-encrypted') {
@@ -205,9 +209,16 @@ async function evaluateOne(
     const packet = (await verification.signature).packets[0];
     return { status: 'valid', ...identity, signedAt: packet?.created?.toISOString() };
   } catch (error) {
-    return { status: 'invalid', ...identity, error: (error as Error).message };
+    return { ...invalidSignature(error), ...identity };
   }
 }
+
+/** A signature that does not verify: our wording for anyone who shows it, the library's for the log. */
+const invalidSignature = (error: unknown): PgpSignatureResult => ({
+  status: 'invalid',
+  error: PGP_SIGNATURE_FAILED_MESSAGE,
+  detail: pgpFailureDetail(error),
+});
 
 // ── Wrapping outgoing mail ──────────────────────────────────────────────────
 
