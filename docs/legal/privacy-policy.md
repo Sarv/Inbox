@@ -29,7 +29,7 @@ compare the policy against the app, and a mismatch fails verification.
 
 # Sarv Inbox Privacy Policy
 
-**Effective date:** 2 October 2026
+**Effective date:** 12 October 2026
 
 Sarv Inbox ("the app") is a desktop email client for macOS, Windows and Linux,
 published by Sarv Webs Private Limited ("Sarv", "we", "us"), IT-10, EPIP RIICO
@@ -132,14 +132,19 @@ mail is sent to any AI provider until you connect one.**
   - for reply drafts, the message and the rest of its conversation;
   - your search query, for AI search;
   - a contact's name, address and signature details, for contact details.
-- **When:** sorting, conversation extraction, signature detection, contact
-  details and reply drafts run automatically on new mail while AI is on. AI
-  search runs when you search.
+- **When:** connecting a provider turns AI sorting on: from then on, new mail
+  is sent to that provider as it arrives, for every connected account.
+  Sorting, conversation extraction, signature detection, contact details and
+  reply drafts run automatically on new mail while AI is on. AI search runs
+  when you search.
 - **Sarv AI:** requests are processed by Sarv's AI gateway and models that run
   on servers Sarv operates in India. Sarv does not keep prompts or responses
   after answering them, and does not use them to train models.
 - **Your own provider:** requests go directly from your device to that provider
-  under your own agreement with them. Their privacy policy applies.
+  under your own agreement with them. Their privacy policy applies. A custom
+  provider's address must use HTTPS, unless the server runs on your own
+  computer (a local model server), so your mail never crosses a network
+  unencrypted.
 - **Your choices:** remove the AI provider in Settings → AI → Providers to stop
   all AI processing. You can also turn features off one by one in Settings → AI:
   sorting (AI Assist) and reply drafts (Draft replies automatically) under Email
@@ -337,9 +342,12 @@ Your mail stays on your device for as long as the account is connected in the
 app.
 
 - **Remove an account:** Settings → Accounts removes it, deletes that
-  account's local mail database and its sign-in tokens, and, for Google
-  accounts, revokes the app's access at Google. Microsoft has no way for an app
-  to revoke its own access, so for Outlook accounts also use the link below.
+  account's local mail database and its sign-in tokens (or its saved
+  password), and, for Google and Sarv accounts, revokes the app's access at
+  that provider. If the provider cannot be reached, the app says so; for
+  Google you can revoke access with the link below. Microsoft has no way for an
+  app to revoke its own access, so for Outlook accounts also use the link below.
+  Removing a Sarv account also stops Sarv AI if it uses that same sign-in.
 - **Revoke access:** you can revoke the app's access at any time, whether or not
   it is installed:
   - Google: <https://myaccount.google.com/permissions>
@@ -357,8 +365,13 @@ We keep crash reports for up to 30 days.
 
 Your mail database is encrypted at rest on your device (section 2 describes the
 attachment cache and log file). All connections to email providers,
-AI providers and our services use TLS. Sign-in uses OAuth with PKCE, so no
-password is stored for OAuth accounts. To report a security issue, email
+AI providers and our services use TLS, apart from two you can choose yourself:
+an AI model server running on your own computer, which you may reach over
+plain HTTP because that connection never leaves your device, and a
+password-based mail account whose connection security you set to None (not
+recommended), whose mail and password then cross the network unencrypted.
+Accounts you sign in to (Google, Microsoft, Sarv) always use TLS. Sign-in uses
+OAuth with PKCE, so no password is stored for OAuth accounts. To report a security issue, email
 support@sarv.com with the subject "[Sarv Inbox] Security".
 
 ## 8. Children

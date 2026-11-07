@@ -30,7 +30,7 @@ export interface RegistryRow {
   updated_at: number;
 }
 
-type FailPoint = 'select' | 'insert' | 'delete' | 'transaction' | 'settings';
+type FailPoint = 'select' | 'insert' | 'delete' | 'transaction' | 'settings' | 'blob-read';
 
 interface FakeState {
   rows: Map<string, RegistryRow>;
@@ -195,8 +195,17 @@ export function deleteAppSetting(key: string): void {
   state.settings.delete(key);
 }
 
-export function getBlob(key: string): Buffer | null {
+export function readBlob(key: string): Buffer | null {
+  if (state.fail.has('blob-read')) boom('blob-read');
   return state.blobs.get(key) ?? null;
+}
+
+export function getBlob(key: string): Buffer | null {
+  try {
+    return readBlob(key);
+  } catch {
+    return null;
+  }
 }
 
 export function setBlob(key: string, data: Buffer): void {

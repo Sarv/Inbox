@@ -8,8 +8,9 @@
  * tell you it runs. v1.2.2 was signed, verified, uploaded and dead on launch.
  *
  * The app cooperates: SARV_SMOKE_TEST=1 makes it boot, prove the native SQLite
- * module loads, print a marker, and exit 0 without touching a database (see
- * apps/desktop/electron/services/smoke-test.ts).
+ * module loads, print a marker naming the Electron it runs, and exit 0 without
+ * touching a database (see apps/desktop/electron/services/smoke-test.ts). That
+ * Electron must be the exact version apps/desktop/package.json pins.
  *
  * Usage:
  *   node scripts/smoke-launch.mjs <path-to-app-binary> [--timeout=120]
@@ -23,11 +24,11 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { SMOKE_TEST_OK_MARKER, evaluateSmokeRun, smokeLaunchArgs } from './lib/smoke-run.mjs';
+import { SMOKE_TEST_OK_MARKER, evaluateSmokeRun, expectedElectronVersion, smokeLaunchArgs } from './lib/smoke-run.mjs';
 
 /** Long enough for a cold first start on a loaded runner, short enough to fail a hang. */
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -52,6 +53,20 @@ function parseArgs(args) {
 }
 
 /**
+ * What the app wrote to its marker file, or null when it wrote none.
+ *
+ * @param {string} file
+ * @returns {string | null}
+ */
+function readMarker(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * @param {string} binary
  * @param {number} timeoutMs
  * @returns {Promise<number>} Process exit code.
@@ -59,6 +74,16 @@ function parseArgs(args) {
 async function run(binary, timeoutMs) {
   if (!existsSync(binary)) {
     console.error(`FAIL: no packaged app at ${binary} — nothing was started.`);
+    return 1;
+  }
+
+  let expectedElectron;
+  try {
+    expectedElectron = expectedElectronVersion(
+      JSON.parse(readFileSync(new URL('../apps/desktop/package.json', import.meta.url), 'utf8')),
+    );
+  } catch (error) {
+    console.error(`FAIL: ${error.message}`);
     return 1;
   }
 
@@ -88,17 +113,17 @@ async function run(binary, timeoutMs) {
 
       const timer = setTimeout(() => {
         child.kill('SIGKILL');
-        resolve({ code: null, signal: 'SIGKILL', timedOut: true, output, markerFileFound: existsSync(markerFile), timeoutMs });
+        resolve({ code: null, signal: 'SIGKILL', timedOut: true, output, markerText: readMarker(markerFile), timeoutMs, expectedElectron });
       }, timeoutMs);
       timer.unref?.();
 
       child.on('error', (error) => {
         clearTimeout(timer);
-        resolve({ code: 1, signal: null, timedOut: false, output: `${output}\n${error.message}`, markerFileFound: false, timeoutMs });
+        resolve({ code: 1, signal: null, timedOut: false, output: `${output}\n${error.message}`, markerText: null, timeoutMs, expectedElectron });
       });
       child.on('close', (code, signal) => {
         clearTimeout(timer);
-        resolve({ code, signal, timedOut: false, output, markerFileFound: existsSync(markerFile), timeoutMs });
+        resolve({ code, signal, timedOut: false, output, markerText: readMarker(markerFile), timeoutMs, expectedElectron });
       });
     });
 

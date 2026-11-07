@@ -12,6 +12,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
+    },
+    "./db-encryption": {
+      "types": "./dist/db-encryption.d.ts",
+      "import": "./dist/db-encryption.mjs",
+      "require": "./dist/db-encryption.js"
     }
   },
   "scripts": {

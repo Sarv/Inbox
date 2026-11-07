@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, AI_DEFAULT_BASE_URLS, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail, formatSenderBehaviorFacts, SENDER_BEHAVIOR_UNAVAILABLE } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail, formatSenderBehaviorFacts, SENDER_BEHAVIOR_UNAVAILABLE } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext, SenderSignals } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -918,7 +918,14 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
   private async callOpenAICompatibleAPI(systemPrompt: string, userMessage: string, run: CategorizationRun): Promise<string> {
     this.assertRun(run);
     const config = run.config;
-    const baseUrl = config.baseUrl || AI_DEFAULT_BASE_URLS[config.type] || AI_DEFAULT_BASE_URLS.openai;
+    // The provider's own address, else its type's default — and nothing else:
+    // a Custom provider with no address must fail here, never fall through to
+    // OpenAI with the user's mail.
+    const baseUrl = effectiveAIBaseUrl(config);
+    if (!baseUrl) {
+      // Status 400: terminal — retrying cannot supply an address.
+      throw Object.assign(new Error(`No address is configured for the ${config.type} AI provider. Set one in Settings → AI.`), { status: 400 });
+    }
     const endpoint = `${baseUrl}/chat/completions`;
     // One HTTP attempt with a resolved bearer. `forceRefresh` forces a fresh
     // OAuth token (used on the 401 retry below). Other providers use apiKey.
@@ -945,6 +952,8 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
           // Keep background requests consistent with onboarding model tests.
           ...buildAIChatRequestOptions(config),
         }),
+        // A redirect would carry the bearer and the mail to an unchecked address.
+        redirect: 'error',
         signal: run.controller.signal,
       });
     };
@@ -1006,6 +1015,8 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
           thinkingConfig: { thinkingBudget: 0 },
         },
       }),
+      // Same as above: the key and the mail stay on this address.
+      redirect: 'error',
       signal: run.controller.signal,
     });
 

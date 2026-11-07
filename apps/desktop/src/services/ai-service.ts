@@ -1,6 +1,6 @@
 // AI Service - Handles AI provider configuration and API calls
 
-import { aiApiKeyHeaders, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl } from '@sarvinbox/core/ai-provider-auth';
+import { aiApiKeyHeaders, buildAIAuthHeaders, buildAIChatRequestOptions, checkAIEndpoint, effectiveAIBaseUrl } from '@sarvinbox/core/ai-provider-auth';
 
 // Canonical AI feature defaults live in settings/types (a types+consts
 // leaf module — safe to import here, no component code, no cycle).
@@ -244,13 +244,14 @@ export interface AIProvider {
   baseUrl?: string;
   isDefault: boolean;
   /**
-   * When set, requests authenticate via a refreshable OAuth bearer fetched
-   * from the main process rather than `apiKey`. Used by the Sarv provider.
+   * When set, requests authenticate with the OAuth account's bearer, which
+   * main attaches (`aiProviderFetch`) — the renderer never holds it. Used by
+   * the Sarv provider.
    */
   authMethod?: 'apiKey' | 'oauth';
   /** OAuth provider id (for auth_method === 'oauth'). */
   oauthProvider?: 'sarv';
-  /** OAuth account email — lets main-process fetch the right refresh token. */
+  /** OAuth account email — names the account whose token main attaches. */
   oauthEmail?: string;
   /** Sarv catalog identities retained for explicit settings edits. */
   sarvZoneCode?: string;
@@ -426,9 +427,13 @@ export function getDefaultProvider(): AIProvider | null {
  * configured but nothing gets categorized" until a lucky sync or restart.
  */
 export async function syncAIProviderToMain(): Promise<void> {
+  try { await (window as any).electronAPI?.ai?.setProviderConfigured?.(!!getDefaultProvider()); } catch { /* ignore */ }
+  // Read after that await: a provider removed during it must not be pushed back.
   const prov = getDefaultProvider();
-  try { await (window as any).electronAPI?.ai?.setProviderConfigured?.(!!prov); } catch { /* ignore */ }
-  if (!prov) return;
+  if (!prov) {
+    try { await (window as any).electronAPI?.agent?.clearAIConfig?.(); } catch { /* best effort */ }
+    return;
+  }
   try {
     await (window as any).electronAPI?.agent?.setAIConfig?.({
       type: prov.type,
@@ -619,16 +624,24 @@ export function removeProvider(id: string): void {
  * default reassignment stay identical to a manual removal.
  */
 export function removeOAuthProvidersForAccount(oauthProvider: string, oauthEmail: string): number {
+  const doomed = aiProvidersUsingSignIn(oauthProvider, oauthEmail);
+  doomed.forEach((p) => removeProvider(p.id));
+  return doomed.length;
+}
+
+/**
+ * The AI providers that run on this OAuth sign-in (Sarv is both mailbox AND LLM).
+ * Removing the account ends the sign-in, so these stop working with it.
+ */
+export function aiProvidersUsingSignIn(oauthProvider: string, oauthEmail: string): AIProvider[] {
   const targetEmail = (oauthEmail ?? '').trim().toLowerCase();
-  if (!oauthProvider || !targetEmail) return 0;
-  const doomed = loadAISettings().providers.filter(
+  if (!oauthProvider || !targetEmail) return [];
+  return loadAISettings().providers.filter(
     (p) =>
       p.authMethod === 'oauth' &&
       p.oauthProvider === oauthProvider &&
       (p.oauthEmail ?? '').trim().toLowerCase() === targetEmail,
   );
-  doomed.forEach((p) => removeProvider(p.id));
-  return doomed.length;
 }
 
 /**
@@ -716,12 +729,15 @@ export function aiFailureReason(status: number): string {
 }
 
 /**
- * The one way the renderer calls an AI provider. A request that needs a SAVED
- * key goes through main (`aiProxy.fetch`), which attaches the key for the
- * endpoint it was saved for — the renderer never holds it. Everything else is a
- * direct fetch with its own auth: a Sarv OAuth bearer, a key the user has just
- * typed (onboarding / Settings test), or no auth for a keyless Custom service.
- * Returns a standard Response either way, so callers treat both alike.
+ * The one way the renderer calls an AI provider. A request that needs a
+ * credential the renderer must not hold goes through main (`aiProxy.fetch`),
+ * which attaches it: a SAVED key, for the endpoint it was saved for (CASA H-1),
+ * or a Sarv sign-in's bearer, for Sarv AI endpoints only (CASA I-2 — that token
+ * is also the Sarv mailbox's credential). The renderer names the provider or
+ * the account, never carries the credential. Everything else is a direct fetch
+ * with its own auth: a key the user has just typed (onboarding / Settings
+ * test), or no auth for a keyless Custom service. Returns a standard Response
+ * either way, so callers treat both alike.
  */
 export async function aiProviderFetch(
   provider: Pick<AIProvider, 'id' | 'type' | 'name' | 'apiKey' | 'hasStoredKey' | 'authMethod' | 'oauthProvider' | 'oauthEmail'>,
@@ -729,13 +745,15 @@ export async function aiProviderFetch(
   init: { method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
 ): Promise<Response> {
   const method = init.method ?? 'POST';
-  const usesSavedKey = provider.authMethod !== 'oauth' && !provider.apiKey && !!provider.hasStoredKey;
-  if (!usesSavedKey) {
-    const auth = provider.authMethod === 'oauth'
-      ? buildAIAuthHeaders(provider, await resolveBearerToken(provider as AIProvider))
-      : provider.apiKey
-        ? aiApiKeyHeaders(provider.type, provider.apiKey)
-        : buildAIAuthHeaders(provider, ''); // keyless Custom, or a clear "key missing" error
+  const usesOAuth = provider.authMethod === 'oauth';
+  if (usesOAuth && (!provider.oauthProvider || !provider.oauthEmail)) {
+    throw new Error(`${provider.name}: authMethod=oauth but oauthProvider/oauthEmail missing`);
+  }
+  const usesSavedKey = !usesOAuth && !provider.apiKey && !!provider.hasStoredKey;
+  if (!usesOAuth && !usesSavedKey) {
+    const auth = provider.apiKey
+      ? aiApiKeyHeaders(provider.type, provider.apiKey)
+      : buildAIAuthHeaders(provider, ''); // keyless Custom, or a clear "key missing" error
     return fetch(url, { method, headers: { ...init.headers, ...auth }, body: init.body, signal: init.signal, redirect: 'error' });
   }
 
@@ -746,17 +764,21 @@ export async function aiProviderFetch(
   try {
     const res = await window.electronAPI.aiProxy.fetch({
       requestId, providerId: provider.id, type: provider.type, url, method, headers: init.headers, body: init.body,
+      ...(usesOAuth ? { oauth: { provider: provider.oauthProvider!, email: provider.oauthEmail! } } : {}),
     });
     if (res.ok) {
       // Null-body statuses can't carry a body in a Response.
       const body = [101, 204, 205, 304].includes(res.status) ? null : res.body;
-      return new Response(body, {
-        status: res.status,
-        statusText: res.statusText,
-        headers: res.contentType ? { 'content-type': res.contentType } : undefined,
-      });
+      // Main forwards retry-after (the 429 back-off below reads it) and
+      // x-request-id alongside the content type.
+      const headers = new Headers(res.headers ?? {});
+      if (res.contentType) headers.set('content-type', res.contentType);
+      return new Response(body, { status: res.status, statusText: res.statusText, headers });
     }
-    // Mirror fetch's own failure shapes so callers' retry/abort logic still applies.
+    // Mirror fetch's own failure shapes so callers' retry/abort logic still
+    // applies. Anything else — a refused key or sign-in, a Sarv session that
+    // needs signing in again, a token that could not be refreshed right now —
+    // is an Error carrying main's message, as these always were.
     if (res.reason === 'aborted') throw new DOMException(res.error, 'AbortError');
     if (res.reason === 'network') throw new TypeError(res.error);
     throw new Error(res.error);
@@ -765,14 +787,31 @@ export async function aiProviderFetch(
   }
 }
 
+/**
+ * The base URL a request to `provider` goes to, held to the shared transport
+ * rule (`checkAIEndpoint`: HTTPS, or plain HTTP only to this computer). Saved
+ * providers come back from localStorage unchecked, and a Sarv bearer or a
+ * keyless Custom request leaves the renderer directly — this is what keeps
+ * those off plain HTTP to another computer. (Saved keys go through main, which
+ * applies the same rule.)
+ */
+export function providerBaseUrl(provider: Pick<AIProvider, 'type' | 'baseUrl'>): string {
+  const baseUrl = provider.baseUrl || PROVIDER_CONFIGS[provider.type].baseUrl;
+  const check = checkAIEndpoint(baseUrl);
+  if (!check.ok) throw new Error(check.message);
+  return baseUrl;
+}
+
 // Test provider connection
 export async function testProvider(provider: AIProvider, options?: { signal?: AbortSignal }): Promise<{ success: boolean; message: string }> {
+  let baseUrl: string;
+  try { baseUrl = providerBaseUrl(provider); }
+  catch (error) { return { success: false, message: (error as Error).message }; }
   try {
     options?.signal?.throwIfAborted();
     const testPrompt = 'Say "Hello" in one word.';
 
     if (provider.type === 'gemini') {
-      const baseUrl = provider.baseUrl || PROVIDER_CONFIGS.gemini.baseUrl;
       const endpoint = `${baseUrl}/models/${encodeURIComponent(provider.model)}:generateContent`;
 
       const response = await aiProviderFetch(provider, endpoint, {
@@ -797,7 +836,6 @@ export async function testProvider(provider: AIProvider, options?: { signal?: Ab
       return { success: true, message: 'Connection successful!' };
     } else {
       // OpenAI and Sarv use OpenAI-compatible API
-      const baseUrl = provider.baseUrl || PROVIDER_CONFIGS[provider.type].baseUrl;
       const endpoint = `${baseUrl}/chat/completions`;
       options?.signal?.throwIfAborted();
 
@@ -1086,7 +1124,7 @@ async function callOpenAICompatibleAPI(
   // path and marks the bubble partial — user can manually retry from
   // the amber refresh icon when the gateway recovers.
   const MAX_RETRIES = 1;
-  const baseUrl = provider.baseUrl || PROVIDER_CONFIGS[provider.type].baseUrl;
+  const baseUrl = providerBaseUrl(provider);
   const endpoint = `${baseUrl}/chat/completions`;
 
   const requestBody: Record<string, unknown> = {
@@ -1119,8 +1157,8 @@ async function callOpenAICompatibleAPI(
   const abortTimer = setTimeout(() => abortController.abort(), LLM_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
-    // Auth is attached by aiProviderFetch: a fresh OAuth bearer (Sarv), or the
-    // saved key — added by main, which the renderer never holds.
+    // Auth is attached by aiProviderFetch: a Sarv bearer or a saved key, both
+    // added by main (the renderer holds neither), or a key being typed.
     response = await aiProviderFetch(provider, endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1241,45 +1279,6 @@ async function callOpenAICompatibleAPI(
 }
 
 /**
- * Resolve the bearer token to use for this request. For OAuth-backed
- * providers (Sarv) we always ask the main process for a fresh token so the
- * refresh lifecycle is handled in one place and the renderer never caches
- * an access token longer than one request.
- */
-async function resolveBearerToken(provider: AIProvider): Promise<string> {
-  if (provider.authMethod === 'oauth') {
-    if (!provider.oauthProvider || !provider.oauthEmail) {
-      throw new Error(
-        `${provider.name}: authMethod=oauth but oauthProvider/oauthEmail missing`,
-      );
-    }
-    const res = await window.electronAPI.oauth.getAccessToken(
-      provider.oauthProvider,
-      provider.oauthEmail,
-    );
-    if (!res.success || !res.data) {
-      throw new Error(
-        res.error || `Failed to fetch OAuth token for ${provider.name}`,
-      );
-    }
-    const token = res.data.accessToken;
-    // Guard against an empty-but-present accessToken — it would build
-    // `Authorization: Bearer ` which the gateway rejects with "Illegal
-    // header value" and a generic 502. Fail here with a clear cause so
-    // the caller knows to re-authenticate instead of retrying forever.
-    if (typeof token !== 'string' || token.trim() === '') {
-      throw new Error(
-        `${provider.name}: OAuth returned an empty access token — re-sign in to Sarv in Settings.`,
-      );
-    }
-    return token;
-  }
-  // The shared header builder validates missing keys and permits Custom
-  // providers deliberately configured without authentication.
-  return provider.apiKey || '';
-}
-
-/**
  * Sarv CAI error with an actionable message. Maps Sarv's documented error
  * codes to what the UI should do next (re-authorize, top-up wallet,
  * contact admin, etc.).
@@ -1390,7 +1389,7 @@ async function callGeminiAPI(
   userMessage: string,
   maxTokens?: number
 ): Promise<string> {
-  const baseUrl = provider.baseUrl || PROVIDER_CONFIGS.gemini.baseUrl;
+  const baseUrl = providerBaseUrl(provider);
   // The key goes in a header (added by aiProviderFetch / main), never in the
   // URL's query string, where it ends up in logs and error messages.
   const endpoint = `${baseUrl}/models/${provider.model}:generateContent`;

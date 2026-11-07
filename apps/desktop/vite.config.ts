@@ -3,15 +3,16 @@ import { resolve } from 'path';
 
 import { sentryVitePlugin } from '@sentry/vite-plugin';
 import react from '@vitejs/plugin-react';
-import { defineConfig, loadEnv, type PluginOption } from 'vite';
+import { defineConfig, type PluginOption } from 'vite';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 
 
 import { injectCspMeta } from './vite/app-csp';
 import { browserSafeBuiltinsPlugin } from './vite/browser-safe-builtins';
-import { buildDefines as buildDefinesFor } from './vite/build-defines';
+import { buildDefines, loadBuildEnv, type DefineTarget } from './vite/build-defines';
 import { forbidNodeOnlyInRenderer } from './vite/forbid-node-only-renderer';
+import { forbidSecretsInRenderer, rendererForbiddenSecrets } from './vite/forbid-secrets-in-renderer';
 import {
   linkedCjsDepsToPrebundle,
   linkedDepsToExclude,
@@ -28,10 +29,15 @@ const APP_VERSION: string = JSON.parse(
 // renderer SDK config and in the source-map upload below.
 const SENTRY_RELEASE = `sarvinbox@${APP_VERSION}`;
 
-// Build-time string replacements shared by the main and renderer bundles; what
-// each one is and why lives in vite/build-defines.ts.
-function buildDefines(mode: string): Record<string, string> {
-  return buildDefinesFor(mode, loadEnv(mode, resolve(__dirname, '../..'), 'SARVINBOX'), APP_VERSION);
+// Where the SARVINBOX_* .env files live.
+const REPO_ROOT = resolve(__dirname, '../..');
+
+// Build-time `process.env.*` replacements for one bundle: only the names that
+// bundle's own code reads, so the OAuth client secret reaches main and never
+// the renderer (CASA I-3). The table, and why each name goes where it does,
+// is in vite/build-defines.ts.
+function definesFor(target: DefineTarget, mode: string): Record<string, string> {
+  return buildDefines(target, { env: loadBuildEnv(mode, REPO_ROOT), mode, appVersion: APP_VERSION });
 }
 
 // Upload renderer source maps to Sentry so minified stack traces symbolicate.
@@ -89,7 +95,7 @@ export default defineConfig(({ mode }) => ({
           );
         },
         vite: {
-          define: buildDefines(mode),
+          define: definesFor('main', mode),
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
@@ -120,7 +126,7 @@ export default defineConfig(({ mode }) => ({
           // not restart the main process or reload the window.
         },
         vite: {
-          define: buildDefines(mode),
+          define: definesFor('worker', mode),
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
@@ -156,7 +162,7 @@ export default defineConfig(({ mode }) => ({
           // restart the main process or reload the window.
         },
         vite: {
-          define: buildDefines(mode),
+          define: definesFor('worker', mode),
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
@@ -189,6 +195,10 @@ export default defineConfig(({ mode }) => ({
     // builds (which legitimately use these) are unaffected. This is what stops the
     // "Dynamic require of \"stream\" is not supported" startup crash from shipping.
     forbidNodeOnlyInRenderer(),
+    // HARD guard: fail the build if the renderer bundle carries the Google client
+    // secret (the configured value, or any "GOCSPX-" string). Renderer-only for
+    // the same reason as the guard above; main legitimately holds the secret.
+    forbidSecretsInRenderer(rendererForbiddenSecrets(loadBuildEnv(mode, REPO_ROOT))),
     // Inject the app document's Content-Security-Policy (production only).
     // Lives in vite/app-csp.ts — its img-src is load-bearing for the email body
     // iframe, which inherits this policy and can only narrow it.
@@ -196,7 +206,7 @@ export default defineConfig(({ mode }) => ({
     // Keep the Sentry plugin last so it sees the final emitted bundle + maps.
     ...sentrySourceMapPlugins(),
   ],
-  define: buildDefines(mode),
+  define: definesFor('renderer', mode),
   resolve: {
     // Deep-import the renderer-safe SUBPATHS, never the '@sarvinbox/core' barrel
     // (which re-exports imapflow/mailparser/nodemailer and breaks the renderer).

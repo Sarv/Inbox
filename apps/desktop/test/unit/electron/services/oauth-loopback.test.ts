@@ -107,9 +107,9 @@ import { OAUTH_CALLBACK_PORTS } from '../../../../electron/services/oauth-callba
 import {
   cancelOAuthFlow,
   closeOAuthCallbackServer,
-  RESPONSE_FLUSH_GRACE_MS,
   startOAuthFlow,
 } from '../../../../electron/services/oauth-service';
+import { RESPONSE_FLUSH_GRACE_MS } from '../../../../electron/utils/loopback-server-close';
 
 /** The ports this file's listener tries, as a mutable list a test can doctor. */
 const ports = OAUTH_CALLBACK_PORTS as number[];

@@ -9,7 +9,13 @@ import { checkAIConnection, loadSarvAIConnection } from '../../../../../../src/s
 import type { SecureStorageStatus } from '../../../../../../src/types/secure-storage';
 import { cleanup, fire, render, settle, toggle, typeInto, type Mounted } from '../../../../../helpers/render';
 
-vi.mock('../../../../../../src/services/ai-consent', () => ({ setAiConsent: vi.fn(), SARV_AI_DISCLOSURE: 'Sarv processes your email.' }));
+// Changed deliberately (CASA I-7): the setup flow now builds the non-Sarv
+// disclosure with ai-consent's providerAIDisclosure, so the real one is kept;
+// only the consent write and the Sarv text are still stubbed.
+vi.mock('../../../../../../src/services/ai-consent', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../../../src/services/ai-consent')>()),
+  setAiConsent: vi.fn(), SARV_AI_DISCLOSURE: 'Sarv processes your email.',
+}));
 vi.mock('../../../../../../src/services/ai-service', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../../../../src/services/ai-service')>();
   return { ...actual, loadAISettings: vi.fn(), addValidatedProvider: vi.fn(), removeProvider: vi.fn(), setDefaultProvider: vi.fn(), syncAIProviderToMain: vi.fn(), testProvider: vi.fn() };

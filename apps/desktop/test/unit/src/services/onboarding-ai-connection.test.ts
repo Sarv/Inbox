@@ -52,6 +52,18 @@ describe('AI configuration catalogs', () => {
   it.each(['http://localhost:11434/v1/', 'http://127.0.0.1:11434/v1/', 'http://[::1]:11434/v1/', 'https://example.com/v1/'])(
     'accepts supported endpoint %s', (endpoint) => expect(normalizeAIEndpoint(endpoint)).toBe(endpoint.replace(/\/$/, '')),
   );
+  // CASA I-7: the field uses the shared transport rule main also enforces, so
+  // what the user can type is what main will call. Breaks: a lookalike of this
+  // computer (or a userinfo trick) passes as a local model server.
+  it.each([
+    ['http://localhost.evil.example/v1', 'Use an HTTPS API endpoint. HTTP is supported only for a local model server.'],
+    ['http://127.0.0.1.nip.io/v1', 'Use an HTTPS API endpoint. HTTP is supported only for a local model server.'],
+    ['http://localhost@evil.example/v1', 'Use an HTTPS API endpoint. HTTP is supported only for a local model server.'],
+    ['http://user:pw@localhost:11434/v1', 'The API endpoint must not include a password, query string or fragment.'],
+    ['', 'Enter a complete API endpoint URL.'],
+  ])('refuses %s with the field message', (endpoint, message) => {
+    expect(() => normalizeAIEndpoint(endpoint)).toThrow(message);
+  });
 
   // Listing models validates a key without spending a generation request.
   it('filters OpenAI models for chat and keeps a valid selected model', async () => {
@@ -113,7 +125,8 @@ describe('AI configuration catalogs', () => {
   it('reuses the selected native Sarv identity without requiring a zone', async () => {
     const connection = await loadSarvAIConnection(makeAIConnection('sarv'), signal(), { email: 'selected@example.com' });
     expect(connection).toMatchObject({ verified: true, model: 'gpt-oss-120b', sarv: { email: 'selected@example.com', zoneCode: '' } });
-    expect(listCaiProviders).toHaveBeenCalledWith('https://cai.example', 'selected@example.com', '');
+    // Changed deliberately (CASA I-2): the catalog calls no longer take a base URL — main fetches from its own configured Sarv API.
+    expect(listCaiProviders).toHaveBeenCalledWith('selected@example.com', '');
     expect(fetchMock).not.toHaveBeenCalled();
     expect(vaultSet).not.toHaveBeenCalled();
   });
@@ -161,7 +174,8 @@ describe('AI configuration catalogs', () => {
     vi.mocked(loadZoneSelection).mockResolvedValue({ zones: [{ code: 'region', api_domain: 'https://region.example' }], zoneCode: 'region' });
     const second = await loadSarvAIConnection(first, signal());
     expect(second.model).toBe(first.model);
-    expect(listCaiProviders).toHaveBeenLastCalledWith('https://cai.example', 'first@example.com', 'region');
+    // Changed deliberately (CASA I-2): the catalog calls no longer take a base URL — main fetches from its own configured Sarv API.
+    expect(listCaiProviders).toHaveBeenLastCalledWith('first@example.com', 'region');
     expect(second.sarv?.providerCode).toBe('sarv_partners');
   });
 });
@@ -188,6 +202,42 @@ describe('resuming with a saved key', () => {
 
   it('still asks for a key when there is no saved one', async () => {
     await expect(checkAIConnection({ ...resumed(), storedProviderId: undefined }, new AbortController().signal)).rejects.toThrow('Enter your API key.');
+  });
+});
+
+describe('verifying a Sarv sign-in model', () => {
+  // THE I-2 regression for onboarding: the Sarv model test goes through main,
+  // which attaches the account's token. Breaks if any renderer fetch carries a
+  // Sarv bearer again, or main is not told which account to use.
+  it('tests the model through main by account, with no bearer in any renderer request', async () => {
+    const proxyFetch = vi.fn(async () => ({
+      ok: true, status: 200, statusText: 'OK', contentType: 'application/json', headers: {},
+      body: JSON.stringify({ choices: [{ message: { content: 'Hello' } }] }),
+    }));
+    (window.electronAPI as unknown as { aiProxy: unknown }).aiProxy = { fetch: proxyFetch, abort: vi.fn() };
+    const connection = await loadSarvAIConnection(makeAIConnection('sarv'), signal(), { email: 'selected@example.com' });
+
+    expect(await testProvider(providerFromConnection(connection))).toEqual({ success: true, message: 'Connection successful!' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(proxyFetch).toHaveBeenCalledWith(expect.objectContaining({
+      url: 'https://edge.example/edge/v1/llm/chat/completions',
+      oauth: { provider: 'sarv', email: 'selected@example.com' },
+    }));
+    expect(JSON.stringify(proxyFetch.mock.calls)).not.toMatch(/Bearer/);
+  });
+
+  // Breaks: a Sarv session that needs signing in again is reported as a
+  // passing test, or as something other than the failure it is.
+  it('fails the test when main reports the Sarv sign-in needs renewing', async () => {
+    (window.electronAPI as unknown as { aiProxy: unknown }).aiProxy = {
+      fetch: vi.fn(async () => ({ ok: false, reason: 'sign-in-required', error: 'Token refresh failed (400): invalid_grant' })),
+      abort: vi.fn(),
+    };
+    const connection = await loadSarvAIConnection(makeAIConnection('sarv'), signal());
+    const result = await testProvider(providerFromConnection(connection));
+    expect(result.success).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -458,9 +508,10 @@ describe('restoring an explicitly edited Sarv connection', () => {
   it('restores the saved nondefault region and nonrecommended backend before listing models', async () => {
     vi.mocked(loadZoneSelection).mockResolvedValue({ zones, zoneCode: 'default' });
     vi.mocked(listCaiProviders).mockResolvedValue(backends);
-    vi.mocked(listCaiModels).mockImplementation(async (_base, _email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', display_name: 'Saved model', provider_code: backend || '' }] : [{ code: 'recommended-model', provider_code: backend || '' }]);
+    // Changed deliberately (CASA I-2): the catalog calls no longer take a base URL — main fetches from its own configured Sarv API.
+    vi.mocked(listCaiModels).mockImplementation(async (_email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', display_name: 'Saved model', provider_code: backend || '' }] : [{ code: 'recommended-model', provider_code: backend || '' }]);
     const restored = await loadSarvAIConnection(edit(), signal(), { email: 'selected@example.com' });
-    expect(listCaiProviders).toHaveBeenLastCalledWith('https://cai.example', 'selected@example.com', 'saved-region');
+    expect(listCaiProviders).toHaveBeenLastCalledWith('selected@example.com', 'saved-region');
     expect(restored).toMatchObject({ model: 'saved-model', sarv: { zoneCode: 'saved-region', providerCode: 'saved-backend' } });
     const provider = (await import('../../../../src/services/onboarding-ai-connection')).providerFromConnection(restored);
     expect(provider).toMatchObject({ model: 'saved-model', baseUrl: 'https://other-region.example/edge/v1/llm', sarvProviderCode: 'saved-backend', sarvZoneCode: 'saved-region' });
@@ -470,7 +521,8 @@ describe('restoring an explicitly edited Sarv connection', () => {
   // Legacy entries whose friendly name changed still restore the backend that has their exact model.
   it('searches catalogs for a legacy saved model when its old backend name does not match', async () => {
     vi.mocked(listCaiProviders).mockResolvedValue(backends);
-    vi.mocked(listCaiModels).mockImplementation(async (_base, _email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', provider_code: backend || '' }] : [{ code: 'different-model', provider_code: backend || '' }]);
+    // Changed deliberately (CASA I-2): the catalog calls no longer take a base URL — main fetches from its own configured Sarv API.
+    vi.mocked(listCaiModels).mockImplementation(async (_email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', provider_code: backend || '' }] : [{ code: 'different-model', provider_code: backend || '' }]);
     const previous = edit(); previous.savedSarvProvider.name = 'Legacy custom name';
     const restored = await loadSarvAIConnection(previous, signal(), { email: 'selected@example.com' });
     expect(restored.sarv?.providerCode).toBe('saved-backend'); expect(restored.model).toBe('saved-model');
@@ -618,7 +670,8 @@ describe('Sarv catalog disappearance while editing', () => {
     vi.mocked(listCaiProviders).mockResolvedValue([{ code: 'saved', name: 'Saved' }]);
     vi.mocked(listCaiModels).mockResolvedValue([{ code: 'original-model', provider_code: 'saved' }]);
     const restored = await loadSarvAIConnection(edit(), signal(), { email: saved.oauthEmail });
-    expect(restored.sarv?.zoneCode).toBe('region'); expect(listCaiProviders).toHaveBeenLastCalledWith('https://cai.example', saved.oauthEmail, 'region');
+    // Changed deliberately (CASA I-2): the catalog calls no longer take a base URL — main fetches from its own configured Sarv API.
+    expect(restored.sarv?.zoneCode).toBe('region'); expect(listCaiProviders).toHaveBeenLastCalledWith(saved.oauthEmail, 'region');
   });
 
   // No-model legacy catalogs remain an honest failure rather than a fabricated verified model selection.

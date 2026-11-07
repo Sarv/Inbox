@@ -140,3 +140,16 @@ export function isTerminalOAuthError(err: unknown): boolean {
 export function isOAuthServerUnreachableError(err: unknown): boolean {
   return (err as { code?: unknown } | null | undefined)?.code === 'TOKEN_REFRESH_NETWORK_ERROR';
 }
+
+/**
+ * Whether only signing in again can produce a bearer for this account: a
+ * terminal refresh failure (see `isTerminalOAuthError`), or no stored account
+ * at all (`ACCOUNT_NOT_FOUND` — signed out or removed). Everything else — an
+ * unreachable OAuth server, a timeout, a 5xx — is worth retrying later.
+ *
+ * Read by code, never `instanceof`, for the bundle-boundary reason above.
+ */
+export function isSignInRequiredError(err: unknown): boolean {
+  if ((err as { code?: unknown } | null | undefined)?.code === 'ACCOUNT_NOT_FOUND') return true;
+  return isTerminalOAuthError(err);
+}

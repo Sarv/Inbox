@@ -57,16 +57,28 @@ export function readSmokeTestRequest(
 }
 
 /**
+ * What the app reports on success: the marker, then the Electron runtime it is
+ * actually running. The launcher compares that runtime with the exact version
+ * apps/desktop/package.json pins, because electron-builder once packaged a
+ * stale `build.electronVersion` (43.2.0) for eight releases while every test ran
+ * on Electron 44 (CASA I-4). scripts/lib/smoke-run.mjs parses this format; a
+ * unit test pins the two together.
+ */
+export function smokeTestReport(electronVersion: string): string {
+  return `${SMOKE_TEST_OK_MARKER} electron=${electronVersion}`;
+}
+
+/**
  * Record success where the launcher can see it regardless of stdout.
  *
  * Windows GUI binaries do not always hand their parent a usable stdout, so a
  * check that reads only the console can report a healthy build as a failure.
  * Best-effort: the exit code and the printed marker still stand on their own.
  */
-export function writeSmokeTestMarker(file: string | null): void {
+export function writeSmokeTestMarker(file: string | null, electronVersion: string): void {
   if (file === null) return;
   try {
-    writeFileSync(file, `${SMOKE_TEST_OK_MARKER}\n`, 'utf8');
+    writeFileSync(file, `${smokeTestReport(electronVersion)}\n`, 'utf8');
   } catch {
     /* Best-effort — stdout and the exit code remain. */
   }

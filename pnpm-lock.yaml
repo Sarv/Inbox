@@ -301,7 +301,7 @@ importers:
         specifier: ^10.6.1
         version: 10.6.1(postcss@8.5.28)
       electron:
-        specifier: ^44.9.1
+        specifier: 44.9.3
         version: 44.9.3
       electron-builder:
         specifier: ^26.17.0

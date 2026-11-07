@@ -32,6 +32,10 @@ import {
 /** The signed-in Sarv account plus the URLs its catalog lives at. */
 export interface SarvAccountEndpoints {
   email: string;
+  /**
+   * Main's configured Sarv API base URL — present means Sarv AI is configured.
+   * Main fetches the catalog from its own copy; the renderer never sends it.
+   */
   apiBaseUrl: string;
   fallbackEdgeBaseUrl?: string | null;
 }
@@ -54,12 +58,12 @@ export async function resolveRecommendedSarvDraft(
   account: SarvAccountEndpoints,
   catalog: SarvCatalogDeps = defaultCatalog,
 ): Promise<SarvProviderDraftResult> {
-  const { email, apiBaseUrl } = account;
-  const { zones, zoneCode } = await catalog.loadZoneSelection(apiBaseUrl, email);
-  const providers = await catalog.listCaiProviders(apiBaseUrl, email, zoneCode);
+  const { email } = account;
+  const { zones, zoneCode } = await catalog.loadZoneSelection(email);
+  const providers = await catalog.listCaiProviders(email, zoneCode);
   const providerCode = pickRecommendedProvider(providers)?.code ?? '';
   const models = providerCode
-    ? await catalog.listCaiModels(apiBaseUrl, email, providerCode, zoneCode)
+    ? await catalog.listCaiModels(email, providerCode, zoneCode)
     : [];
   const modelCode = pickRecommendedModel(models, providerCode)?.code ?? '';
   return buildSarvProviderDraft({

@@ -125,7 +125,7 @@ export function SarvSignInStep({ onNext }: SarvSignInStepProps) {
     if (phase !== 'picker' || !account) return;
     setPickerBusy(true);
     setError('');
-    loadZoneSelection(account.apiBaseUrl, account.email)
+    loadZoneSelection(account.email)
       .then((selection) => {
         if (!mountedRef.current) return;
         setZones(selection.zones);
@@ -144,7 +144,7 @@ export function SarvSignInStep({ onNext }: SarvSignInStepProps) {
   useEffect(() => {
     if (phase !== 'picker' || !account || !zonesResolved) return;
     setPickerBusy(true);
-    listCaiProviders(account.apiBaseUrl, account.email, zoneCode)
+    listCaiProviders(account.email, zoneCode)
       .then((list) => {
         if (!mountedRef.current) return;
         setProviders(list);
@@ -162,7 +162,7 @@ export function SarvSignInStep({ onNext }: SarvSignInStepProps) {
       return;
     }
     setPickerBusy(true);
-    listCaiModels(account.apiBaseUrl, account.email, providerCode, zoneCode)
+    listCaiModels(account.email, providerCode, zoneCode)
       .then((list) => {
         if (!mountedRef.current) return;
         setModels(list);

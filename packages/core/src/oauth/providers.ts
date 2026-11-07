@@ -121,6 +121,10 @@ function buildSarvProvider(urls: SarvUrls = {}): OAuthProviderConfig {
     clientSecret: undefined,
     authEndpoint: `${oauthBase}/api/oauth/authorize`,
     tokenEndpoint: `${oauthBase}/api/oauth/token`,
+    // RFC 7009, as oauth.sarv.com's discovery document advertises it. It takes
+    // JSON like the token endpoint (`tokenBodyFormat`: a form POST answers 422),
+    // and answers 200 with `{ revoked: false }` for a token it no longer knows.
+    revokeEndpoint: `${oauthBase}/api/oauth/revoke`,
     userInfoEndpoint: `${oauthBase}/api/oauth/userinfo`,
     // Sarv CAI resource-server scopes (colon form, ``resource:verb``).
     //   organization — embeds cai_org_id / cai_user_id in the JWT

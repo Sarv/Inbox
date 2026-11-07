@@ -60,7 +60,10 @@ async function tick(): Promise<void> {
     let found = 0;
     for (const c of contacts) {
       try {
-        const res = await chromiumFetch(gravatarPhotoUrl(c.email));
+        // No cookies: a jar cookie sent with this URL would tie every contact the
+        // app looks up to one visitor. `net.fetch` sends and stores them otherwise
+        // (measured on Electron 44; `credentials: 'omit'` does neither).
+        const res = await chromiumFetch(gravatarPhotoUrl(c.email), { credentials: 'omit' });
         const ct = res.headers.get('content-type') || '';
         if (res.ok && ct.startsWith('image/')) {
           const buf = Buffer.from(await res.arrayBuffer());

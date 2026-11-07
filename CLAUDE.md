@@ -229,6 +229,22 @@ Established shared helpers (extend this list as you add more):
   conversation-level star writes to: the LATEST message when starring, every
   row when unstarring (Outlook / Sarv Mail behaviour). Use it for any new
   thread-wide star control instead of passing the whole thread's ids.
+- `applyDbKey(db, key)` / `encryptPlaintextDb(db, key, schema?)` —
+  `packages/storage-node/src/db-encryption.ts` (import
+  `@sarvinbox/storage-node/db-encryption` from the desktop app; it has its own
+  entry point so a worker thread does not load the barrel). The ONE way a
+  connection gets its key: pins the cipher settings every database was written
+  with (`DB_CIPHER_SETTINGS`), reads them back, then keys. Never run
+  `PRAGMA key` / `rekey` by hand, and call `pinDbCipher(db)` before an
+  `ATTACH … KEY` on a connection it did not key.
+- `closeLoopbackServer(server, answering)` / `trackLoopbackResponse(answering, res)` —
+  `apps/desktop/electron/utils/loopback-server-close.ts`. Closes an OAuth loopback
+  listener from inside the handler that just answered, without cancelling that
+  answer's write on Windows. Use it for any local callback listener.
+- `vaultRefusalMessage(kind, host, result)` — `apps/desktop/electron/services/vault-credentials.ts`.
+  The re-enter message for a saved password main refused to send, or null when
+  the lookup was not a settled refusal. Use it in any new connect path, and never
+  treat a refusal as `none`, which reads as "not ready yet" and retries silently.
 - `useSecureStorageProtected()` — `apps/desktop/src/hooks/useSecureStorageProtected.ts`.
   Whether the OS key store really protects saved secrets on this device (false on
   Linux `basic_text`). Use it for any renderer wording that says a secret is
@@ -259,6 +275,23 @@ Established shared helpers (extend this list as you add more):
   class of a thrown value and nothing else, for a log line or error about a
   failure whose message may quote secret data (a decrypted payload, a
   keychain's refusal). Use it instead of `error.message` there.
+
+- `checkAIEndpoint(url)` — `packages/core/src/utils/ai-provider-auth.ts`. The one
+  transport rule for an AI provider address: https to any host, plain http only to
+  this computer, never credentials in the URL. Use it (or `aiEndpointOrigin`) for
+  anything that sends mail or a key to a provider address.
+- `isLoopbackHost(hostname)` — `packages/core/src/utils/loopback.ts`. Whether a
+  host is this computer, matched exactly. Use it instead of a prefix check.
+- `fetchWithBearerRetry(resolveBearer, send)` — `packages/core/src/utils/bearer-retry.ts`.
+  One request with an OAuth bearer, retried once with a fresh one on a 401, and
+  `BearerUnavailableError` when none could be minted. Use it instead of writing
+  the retry at each call site.
+- `toOneLine(text)` — `packages/core/src/utils/log-text.ts`. Text that did not come
+  from our code, made safe to write as one line of app.log.
+- `readBlob(key)` — `apps/desktop/electron/services/core-db.ts`. A core-DB blob, or
+  null when there is none; THROWS when the store cannot be read, where `getBlob`
+  answers null. Use it for any store whose readers decide what is gone or what to
+  overwrite (the OAuth token store does).
 
 ## Prefer a mature library over hand-rolled / regex logic
 

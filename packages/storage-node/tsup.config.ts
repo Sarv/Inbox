@@ -3,7 +3,11 @@ import { copyFileSync } from 'fs';
 import { join } from 'path';
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  // `db-encryption` is a SECOND entry point on purpose: the VACUUM worker and the
+  // core DB key their connections through it, and it imports nothing but `fs`.
+  // The barrel would pull all of SQLiteStorage (and @sarvinbox/core) onto the
+  // worker thread for one helper.
+  entry: ['src/index.ts', 'src/db-encryption.ts'],
   format: ['cjs', 'esm'],
   dts: true,
   splitting: false,

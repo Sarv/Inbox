@@ -21,7 +21,7 @@ import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAc
 import { sendTransformFor } from '../services/pgp-service';
 import { pokeReadModel } from '../services/read-model-poke';
 import { getPipelineUserName } from '../services/unified-pipeline-service';
-import { hostMismatchMessage, narrowSavedTransport, resolveVaultPassword, vaultIdCandidates, withSavedPassword, type VaultPasswordFound } from '../services/vault-credentials';
+import { narrowSavedTransport, resolveVaultPassword, vaultIdCandidates, vaultRefusalMessage, withSavedPassword, type VaultPasswordFound } from '../services/vault-credentials';
 import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId, getAccountIdForStorage } from '../shared';
 
 // Static import (not require()): the bundled main.js has no on-disk services
@@ -81,8 +81,9 @@ export async function withVaultSmtpPassword(
 ): Promise<{ config: SMTPConfig; saved?: VaultPasswordFound }> {
   if (config.authMethod === 'oauth2' || config.password) return { config };
   const vaulted = await resolveVaultPassword(vaultIdCandidates(accountId, config.username, config.host), 'smtp', config.host);
-  if (vaulted.status === 'host-mismatch') throw new Error(hostMismatchMessage('smtp', config.host, vaulted.boundHost));
-  if (vaulted.status === 'none') throw new Error(`No sending password saved for ${config.host} — set up sending for this account.`);
+  if (vaulted.status !== 'found') {
+    throw new Error(vaultRefusalMessage('smtp', config.host, vaulted) ?? `No sending password saved for ${config.host} — set up sending for this account.`);
+  }
   const applied = withSavedPassword(config, 'smtp', vaulted);
   if ('refusal' in applied) throw new Error(applied.refusal);
   return { config: applied.config, saved: vaulted };

@@ -52,14 +52,14 @@ import pLimit from 'p-limit';
 import { logUserAction } from '../ipc/agent-handlers';
 import { newDraftMessageId, saveDraftToIMAP } from '../ipc/draft-handlers';
 import { sendEmailFromMain, appendSentCopy } from '../ipc/smtp-handlers';
-import { getStorage, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, getSyncEngineForStorage, getAccountIdForStorage, getMainWindow, getSmtpClient, findStorageForEmail } from '../shared';
+import { getStorage, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, getSyncEngineForStorage, getAccountIdForStorage, getMainWindow, getSmtpClient, findStorageForEmail, getAICategorizationService } from '../shared';
 
 import { registryAccountEmail, resolveAccountEmail, resolveAccountIdentity } from './accounts-registry';
 import { loadAgentConfig } from './agent-config-store';
 import { ensureBundledAgentPrompts, readBundledAgentPrompt } from './agent-prompt-defaults';
 import { getAutoBacklogCap } from './ai-backlog-cap';
 import { decideAIErrorPolicy } from './ai-error-policy';
-import { prepareAIProviderConfig } from './ai-provider-config';
+import { isAIEndpointRefusedError, prepareAIProviderConfig, reportAIConfigRefused, reportAIEndpointRefused, type AIEndpointRefusedError } from './ai-provider-config';
 import { runClassificationMutation } from './classification-actions';
 import { refreshContactClassifications, startContactClassificationRefresh, stopContactClassificationRefresh } from './contact-classification-service';
 import { getMeta, setMeta } from './core-db';
@@ -108,10 +108,25 @@ const traceEnabled = (): boolean => logger.isLevelEnabled('trace');
 /**
  * Bring the last renderer-pushed AI config back after a main restart, with its
  * saved key filled in from the vault. Skipped if a config arrived meanwhile.
+ *
+ * Runs detached (`void`), so it never rejects: a refused address is surfaced
+ * like any other unusable provider, and anything else is logged.
  */
 async function restorePersistedAIConfig(persisted: AIProviderConfig): Promise<void> {
-  const prepared = await prepareAIProviderConfig(persisted);
-  if (aiConfig) return;
+  let prepared: AIProviderConfig;
+  try {
+    prepared = await prepareAIProviderConfig(persisted);
+  } catch (error) {
+    // The renderer's own push is authoritative: never report over it.
+    if (aiConfig || aiConfigPushed) return;
+    if (isAIEndpointRefusedError(error)) refuseAIConfig(error);
+    else logger.error('[Pipeline] could not restore the saved AI config:', error);
+    return;
+  }
+  // A push that arrived meanwhile wins — including one main refused, which
+  // leaves aiConfig empty on purpose: the provider the user switched away
+  // from must not come back from disk.
+  if (aiConfig || aiConfigPushed) return;
   aiConfig = prepared;
   logger.info(`[Pipeline] AI config restored from disk (${persisted.type}/${persisted.model})`);
   emitAiPipelineStatus();
@@ -120,7 +135,9 @@ async function restorePersistedAIConfig(persisted: AIProviderConfig): Promise<vo
   // categorize-fail forever. Revalidate and disable it here so a stale config
   // never resumes the error spam on restart. It clears aiConfig + re-emits
   // status when the account is gone.
-  void disablePipelineAIIfProviderRemoved();
+  void disablePipelineAIIfProviderRemoved().catch((e: Error) => {
+    logger.warn(`[Pipeline] could not re-check the saved AI provider's sign-in: ${e.message}`);
+  });
 }
 
 function withChromiumFetch(config: AIProviderConfig | null): AIProviderConfig | null {
@@ -408,6 +425,26 @@ function surfaceTerminalAIError(err: unknown): { terminal: boolean; kind: string
   return { terminal: true, kind: decision.kind, paused: true };
 }
 let aiConfig: AIProviderConfig | null = null;
+/** The renderer pushed a provider config in this process (see restorePersistedAIConfig). */
+let aiConfigPushed = false;
+/** Bumped by each push and by "no provider": a push that was overtaken while it waited must not apply. */
+let aiConfigPushes = 0;
+
+/**
+ * Main refused the AI provider's address (`AIEndpointRefusedError`: not HTTPS,
+ * and not a model server on this computer). No mail may go there — nor keep
+ * going to whichever provider was set before, which the user has moved away
+ * from — so the pipeline is left with none. The reason goes to the renderer on
+ * the channel its "AI inactive / Fix" banner already listens to, and is kept
+ * as the last AI error for the diagnostic snapshot.
+ */
+function refuseAIConfig(error: AIEndpointRefusedError): void {
+  aiConfig = null;
+  lastAIErrorReason = error.message;
+  logger.warn(`[Pipeline] AI provider refused — background AI is off until it is fixed: ${error.message}`);
+  emitAiPipelineStatus();
+  reportAIEndpointRefused(error);
+}
 
 /**
  * Tell the renderer whether the BACKGROUND pipeline currently has a usable AI
@@ -494,6 +531,22 @@ export function getPipelineAIConfig(): AIProviderConfig | null {
   return aiConfig;
 }
 
+/** The OAuth sign-in an AI provider config runs on; null for an API-key provider. */
+function oauthSignInOfAIConfig(config: object | null | undefined): { provider: OAuthProviderId; email: string } | null {
+  // Core's AIProviderConfig does not declare these: the renderer adds them, and
+  // they travel with the config through prepareAIProviderConfig and the saved copy.
+  const c = config as { authMethod?: string; oauthProvider?: OAuthProviderId; oauthEmail?: string } | null | undefined;
+  if (c?.authMethod !== 'oauth' || !c.oauthProvider || !c.oauthEmail) return null;
+  return { provider: c.oauthProvider, email: c.oauthEmail };
+}
+
+/** Stop using the current provider: nothing is sent to it, nothing waits on it. */
+function dropLiveAIConfig(): void {
+  aiConfig = null;
+  aiPausedUntil = 0;
+  lastAIErrorReason = '';
+}
+
 /**
  * Re-check that the OAuth account backing the AI provider still exists, and
  * DISABLE the AI pipeline if it's gone. The Sarv OAuth session powers BOTH the
@@ -504,27 +557,54 @@ export function getPipelineAIConfig(): AIProviderConfig | null {
  * error spam) and surface "AI not configured" so the user reconnects a provider.
  * No-op for API-key providers or when the account is still present. Returns true
  * if it disabled AI.
+ *
+ * Checks the live config as well as the saved one, because the live one is what
+ * calls the provider: a saved copy that cannot be read, or that belongs to
+ * another provider, must not keep a dead session running. An unreadable token
+ * store throws instead (unknown is not gone), and nothing is disabled.
  */
 export async function disablePipelineAIIfProviderRemoved(): Promise<boolean> {
-  const persisted = loadPipelineAIConfigSync() as
-    | { authMethod?: string; oauthProvider?: OAuthProviderId; oauthEmail?: string }
-    | null;
-  if (!persisted || persisted.authMethod !== 'oauth' || !persisted.oauthProvider || !persisted.oauthEmail) {
-    return false;
+  const live = oauthSignInOfAIConfig(aiConfig);
+  let saved: ReturnType<typeof oauthSignInOfAIConfig> = null;
+  try {
+    saved = oauthSignInOfAIConfig(loadPipelineAIConfigSync());
+  } catch (error) {
+    logger.warn(`[Pipeline] could not read the saved AI config: ${(error as Error).message}`);
   }
-  const account = await getOAuthAccount(persisted.oauthProvider, persisted.oauthEmail);
-  if (account) return false; // provider account still present — nothing to do
+  const liveGone = !!live && !(await getOAuthAccount(live.provider, live.email));
+  const savedGone = !!saved && !(await getOAuthAccount(saved.provider, saved.email));
+  if (!liveGone && !savedGone) return false; // provider account still present — nothing to do
 
-  aiConfig = null;
-  aiPausedUntil = 0;
-  lastAIErrorReason = '';
-  try { await clearPipelineAIConfig(); } catch { /* best-effort */ }
-  logger.warn(
-    `[Pipeline] AI provider ${persisted.oauthProvider}:${persisted.oauthEmail} was removed — ` +
-    'disabling AI until a provider is reconnected',
-  );
+  if (liveGone) dropLiveAIConfig();
+  if (savedGone) {
+    try { await clearPipelineAIConfig(); } catch { /* best-effort */ }
+  }
+  const gone = liveGone ? live! : saved!;
+  logger.warn(`[Pipeline] AI provider ${gone.provider}:${gone.email} was removed — disabling AI until a provider is reconnected`);
   emitAiPipelineStatus();
   return true;
+}
+
+/**
+ * The renderer has no AI provider any more (the last one was removed, in Settings
+ * or with the account behind it), so main must stop using its copies now, not at
+ * the next launch: the privacy policy tells users that removing the provider stops
+ * all AI processing. Not the same as AI Assist being off, which leaves the
+ * provider in place for the features the user asks for directly.
+ */
+function forgetPipelineAIConfig(): void {
+  // A saved config still being restored, or a push still reading the vault, must
+  // not come back after this.
+  aiConfigPushed = true;
+  aiConfigPushes++;
+  // The manual and timed categorization runs hold their own copy of the provider.
+  const categorization = getAICategorizationService();
+  categorization?.stop();
+  categorization?.stopAutoProcess();
+  if (!aiConfig) return;
+  dropLiveAIConfig();
+  logger.info('[Pipeline] no AI provider configured — background AI is off');
+  emitAiPipelineStatus();
 }
 
 const POLLING_INTERVAL_MS = 30_000;
@@ -2957,10 +3037,57 @@ function registerPipelineIPC(): void {
     }
   });
 
+  ipcMain.handle('pipeline:clearAIConfig', async () => {
+    forgetPipelineAIConfig();
+    try {
+      await clearPipelineAIConfig();
+    } catch (e) {
+      logger.warn(`[Pipeline] could not clear the saved AI config: ${(e as Error).message}`);
+    }
+    return { success: true };
+  });
+
   ipcMain.handle('pipeline:setAIConfig', async (_e, config: AIProviderConfig) => {
+    aiConfigPushed = true;
+    const push = ++aiConfigPushes;
+    // Not a failure: what replaced this push is what the renderer wants now.
+    const overtaken = { success: true, superseded: true };
+    // A provider signed in with an account that is gone can only ever fail. The
+    // renderer re-pushes its default the moment main reports "no AI" (see
+    // helpers.ts), and during an account's removal that default is still the
+    // removed Sarv provider. Taking it would report AI as available while every
+    // call fails. Unreadable store: unknown, not gone, so it stands.
+    const signIn = oauthSignInOfAIConfig(config);
+    if (signIn && await getOAuthAccount(signIn.provider, signIn.email).then((a) => !a, () => false)) {
+      if (push !== aiConfigPushes) return overtaken;
+      const reason = 'This AI provider\'s sign-in was removed. Connect a provider to turn AI back on.';
+      logger.warn(`[Pipeline] AI config refused: its ${signIn.provider} sign-in is no longer on this device`);
+      dropLiveAIConfig();
+      lastAIErrorReason = reason;
+      void clearPipelineAIConfig().catch((e: Error) => logger.warn(`[Pipeline] could not clear the saved AI config: ${e.message}`));
+      emitAiPipelineStatus();
+      // The renderer ignores a push's answer, and a provider still listed there
+      // with no sign-in behind it would otherwise show no sign of a problem.
+      reportAIConfigRefused(reason);
+      return { success: false, error: reason };
+    }
     // Fill in the saved API key (the renderer sends only its providerId) and
     // wrap oauth-backed configs so every LLM call fetches a fresh bearer.
-    aiConfig = await prepareAIProviderConfig(config);
+    let prepared: AIProviderConfig;
+    try {
+      prepared = await prepareAIProviderConfig(config);
+    } catch (error) {
+      if (isAIEndpointRefusedError(error)) {
+        refuseAIConfig(error);
+        // Nor is a refused provider the one to bring back after a restart.
+        void clearPipelineAIConfig().catch((e: Error) => logger.warn(`[Pipeline] could not clear the saved AI config: ${e.message}`));
+        return { success: false, error: error.message };
+      }
+      logger.error('[Pipeline] AI config could not be prepared:', error);
+      return { success: false, error: (error as Error).message };
+    }
+    if (push !== aiConfigPushes) return overtaken;
+    aiConfig = prepared;
     // Mirror the RAW (pre-bearer, serializable) config to disk so a later main
     // restart can restore it without the renderer re-pushing. Best-effort.
     void savePipelineAIConfig(config);

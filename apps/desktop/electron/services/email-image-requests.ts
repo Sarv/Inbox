@@ -4,9 +4,10 @@ const logger = createLogger('email-image-requests');
 
 /**
  * Everything that has to happen at the NETWORK layer for the images in an email
- * to appear. All three rules below are workarounds for the same structural fact:
- * a mail reader embeds other people's images, and the web platform's defaults
- * for embedded third-party content are written for a website, not a mailbox.
+ * to appear, and to tell their hosts as little as possible. Every rule below is a
+ * workaround for the same structural fact: a mail reader embeds other people's
+ * images, and the web platform's defaults for embedded third-party content are
+ * written for a website, not a mailbox.
  *
  * They live together, and outside `main.ts`, because each one is a rule about
  * one request and is worth testing as such.
@@ -28,6 +29,19 @@ const CONTENT_RESOURCE_TYPES = new Set(['image', 'media', 'font']);
 /** Only these two are fetched as pictures, and only they need a referer. */
 const IMAGE_RESOURCE_TYPES = new Set(['image', 'media']);
 
+/**
+ * Response headers a content response never gets to act on. See
+ * {@link strippedResponseHeaders} for the first three and
+ * {@link cookielessRequestHeaders} for the cookie pair. Lower case.
+ */
+const STRIPPED_RESPONSE_HEADERS = new Set([
+  'cross-origin-resource-policy',
+  'cross-origin-embedder-policy',
+  'cross-origin-opener-policy',
+  'set-cookie',
+  'set-cookie2',
+]);
+
 /** Every request, for the hooks that have to see the whole session. */
 const ALL_URL_FILTER = ['*://*/*'];
 
@@ -40,14 +54,19 @@ export const PROXY_URL_FILTERS = [
 ];
 
 /**
- * Response headers with Chromium's cross-origin embedding blocks removed, or
- * null to leave the response untouched.
+ * Response headers with Chromium's cross-origin embedding blocks and any cookies
+ * removed, or null to leave the response untouched.
  *
  * `Cross-Origin-Resource-Policy: same-origin`/`same-site` is a website telling
  * browsers not to let OTHER sites embed its images. Every image in every email
  * is exactly that embed, so honouring it renders broken pictures across whole
  * newsletters. Limited to the subresource kinds an email body can contain — a
  * document or script response keeps its policy.
+ *
+ * `Set-Cookie` goes for the reason {@link cookielessRequestHeaders} gives. It has
+ * to go here rather than being left unsent later: Chromium saves a response's
+ * cookies from the headers this hook returns, redirect hops included (measured on
+ * Electron 44).
  */
 export function strippedResponseHeaders(details: RequestDetails): Record<string, string[]> | null {
   if (!CONTENT_RESOURCE_TYPES.has(details.resourceType || '')) return null;
@@ -55,12 +74,36 @@ export function strippedResponseHeaders(details: RequestDetails): Record<string,
   const headers = { ...(details.responseHeaders || {}) };
   let changed = false;
   for (const key of Object.keys(headers)) {
-    const lower = key.toLowerCase();
-    if (
-      lower === 'cross-origin-resource-policy' ||
-      lower === 'cross-origin-embedder-policy' ||
-      lower === 'cross-origin-opener-policy'
-    ) {
+    if (STRIPPED_RESPONSE_HEADERS.has(key.toLowerCase())) {
+      delete headers[key];
+      changed = true;
+    }
+  }
+  return changed ? headers : null;
+}
+
+/**
+ * Request headers with any `Cookie` removed, or null to send them unchanged.
+ *
+ * The main window has one session for every mailbox, so a `SameSite=None` cookie
+ * set by a pixel in one message comes back on the next message from any sender
+ * using that host, in any account: a read receipt with an identity attached.
+ * Nothing an email is allowed to load needs one. Gmail fetches mail images through
+ * a cookieless proxy, so senders' hosts already have to work without them.
+ *
+ * Limited to the same subresource kinds as {@link strippedResponseHeaders}: the
+ * app's own requests keep whatever they are entitled to. There is no request flag
+ * for this on an `<img>`, and `credentials` on `net.fetch` does not reach the
+ * renderer's requests, so the header is removed here on the way out. That also
+ * covers cookies an older version left in the jar.
+ */
+export function cookielessRequestHeaders(details: RequestDetails): Record<string, string> | null {
+  if (!CONTENT_RESOURCE_TYPES.has(details.resourceType || '')) return null;
+
+  const headers = { ...(details.requestHeaders || {}) };
+  let changed = false;
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === 'cookie') {
       delete headers[key];
       changed = true;
     }
@@ -228,14 +271,23 @@ export function installEmailImageRequestHandlers(webRequest: WebRequestLike): vo
     logger.warn('[Main] Image-proxy unwrapper disabled: redirect tracking unavailable');
   }
 
-  tryInstall('image referer', () => {
+  // Cookies only. An image host can still recognise a returning reader through the
+  // HTTP cache's validators: a pixel answering `ETag: "user-42"` with `Cache-Control:
+  // no-cache` gets `If-None-Match: "user-42"` back on the next message's load, in any
+  // account, and `Last-Modified` works the same way (measured on Electron 44). That
+  // lasts until the cache is cleared and the renderer has restarted, because Blink
+  // keeps its own copy. Left alone deliberately: forcing no-cache to drop them would
+  // refetch every image on every open, which shows the host each open instead.
+  tryInstall('image referer and cookie remover', () => {
     webRequest.onBeforeSendHeaders({ urls: ALL_URL_FILTER }, (details, callback) => {
-      const requestHeaders = refererHeadersFor(details);
+      const withoutCookies = cookielessRequestHeaders(details);
+      const requestHeaders =
+        refererHeadersFor(withoutCookies ? { ...details, requestHeaders: withoutCookies } : details) ?? withoutCookies;
       callback(requestHeaders ? { cancel: false, requestHeaders } : { cancel: false });
     });
   });
 
-  tryInstall('CORP header stripper', () => {
+  tryInstall('CORP and Set-Cookie header stripper', () => {
     webRequest.onHeadersReceived({ urls: ALL_URL_FILTER }, (details, callback) => {
       const responseHeaders = strippedResponseHeaders(details);
       callback(

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { isLoopbackHost } from '@sarvinbox/core';
+
 export interface ScannerCapabilities {
   protocolVersion: 1;
   engine: { name: 'ClamAV'; version: string; signatureVersion: string; signaturesUpdatedAt: string; scanPolicyVersion: string };
@@ -16,8 +18,7 @@ export interface ScannerCapabilities {
 export function scannerOrigin(value: string, allowDevelopmentLoopback = false): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error('Enter a valid scanner HTTPS URL.'); }
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(allowDevelopmentLoopback && loopback && url.protocol === 'http:')) {
+  if (url.protocol !== 'https:' && !(allowDevelopmentLoopback && isLoopbackHost(url.hostname) && url.protocol === 'http:')) {
     throw new Error('Scanner connections require HTTPS. HTTP loopback is available only in the development app.');
   }
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) {
