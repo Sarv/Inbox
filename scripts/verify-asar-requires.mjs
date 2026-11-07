@@ -64,17 +64,23 @@ function main(args) {
       const shown = path.relative(releaseDir, resources) || '.';
       const files = listArchive(archive);
       const read = (file) => extractFile(archive, file.split('/').join(path.sep)).toString('utf8');
-      const { missing, reached, packed } = analyseRequires(files, read);
+      const { missing, unresolved, reached, packed } = analyseRequires(files, read);
 
       for (const { name, requiredBy } of missing) {
         problems.push(`FAIL: ${releaseDir} -> ${shown}: ${requiredBy} requires "${name}", which is not packed`);
+      }
+      for (const { name, importer, file } of unresolved) {
+        problems.push(
+          `FAIL: ${releaseDir} -> ${shown}: ${file} stands in for "${name}" (an optional peer of ${importer}) ` +
+            'with a module that throws, because it was not installed when the app was bundled'
+        );
       }
       const unused = packed.filter((name) => !reached.includes(name));
       if (unused.length > 0) {
         // Not a failure: dead weight costs download size, not correctness.
         console.warn(`WARN: ${shown} packs node_modules nothing requires: ${unused.join(', ')}`);
       }
-      if (missing.length === 0) {
+      if (missing.length === 0 && unresolved.length === 0) {
         console.log(`OK:   ${releaseDir} -> ${shown} loads only what it carries (${reached.join(', ') || 'no packages'})`);
       }
     }
@@ -85,7 +91,10 @@ function main(args) {
     console.error('');
     console.error('A module made external in vite.config.ts must also be listed in');
     console.error('apps/desktop/package.json build.files, or the app throws when it is first');
-    console.error('required -- possibly only when a user reaches that feature. Do not publish this build.');
+    console.error('required -- possibly only when a user reaches that feature. An optional peer');
+    console.error('the bundle stands in for must be declared as a dependency of the package that');
+    console.error('uses it (or, if the app never calls it, listed in OPTIONAL_PEERS_LEFT_OUT in');
+    console.error('scripts/lib/asar-requires.mjs with the reason). Do not publish this build.');
     return 1;
   }
 

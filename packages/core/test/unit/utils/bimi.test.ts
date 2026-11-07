@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   BIMI_EKU_OID,
@@ -19,7 +22,18 @@ import {
   parseDmarcRecord,
   validateVmc,
   vmcDomains,
+  vmcVerifierUnavailable,
 } from '../../../src/utils/bimi';
+
+import {
+  VMC_CHAIN,
+  VMC_DOMAIN,
+  VMC_LOGO,
+  VMC_NOW,
+  VMC_ROOT,
+  VMC_VERIFIED,
+  vmcLookupOptions,
+} from './fixtures/bimi/vmc-fixture';
 
 /**
  * BIMI and the Verified Mark Certificate behind the blue tick — as Inbox sees
@@ -120,5 +134,101 @@ describe('lookupBimi through the seam', () => {
     const broken = await look('boom.example');
     expect(broken.status).toBe('error');
     expect(broken.detail).toContain('ESERVFAIL');
+  });
+});
+
+/**
+ * The blue tick itself, on a real certificate chain: fixtures/bimi holds a
+ * throwaway root, an issuing CA, and a VMC for brand.example binding logo.svg
+ * (see its README). The root is pinned here the way MVA_ROOTS pins the real
+ * three, so this runs exactly the code a real brand's certificate runs.
+ *
+ * REGRESSION (found 2026-11-03): the library checks a certificate with
+ * OPTIONAL peer dependencies, @peculiar/x509 (reflect-metadata first) and
+ * asn1js. From 44192edb (2026-09-21) no package declared them, so they were
+ * not installed, and a missing peer does not throw: every lookup landed as
+ * "logo" with "Certificate not verified: … needs the optional peer
+ * dependency", no sender got the tick, and nothing failed. If a test here
+ * fails with that message, the dependency is gone again.
+ */
+describe('a Verified Mark Certificate through the seam', () => {
+  // No tick for any brand: the certificate library cannot be loaded.
+  it('verifies a valid chain to a pinned root', async () => {
+    expect(await validateVmc(VMC_CHAIN, VMC_DOMAIN, VMC_LOGO, { roots: [VMC_ROOT], now: VMC_NOW })).toEqual(VMC_VERIFIED);
+  });
+
+  // The fixture proves nothing if it verifies without its pin: then the
+  // "verified" above could be a hole rather than the chain doing its job. A
+  // file that carries its own root is what a self-minted certificate looks like.
+  it('refuses the same chain, root included, when that root is not pinned', async () => {
+    const result = await validateVmc(`${VMC_CHAIN}\n${VMC_ROOT.pem}`, VMC_DOMAIN, VMC_LOGO, { now: VMC_NOW });
+    expect(result.status).toBe('untrusted-root');
+    expect(result.detail).toContain('Inbox Test Verified Mark Root');
+  });
+
+  // The tick as the main process caches it: DNS and fetch as a real brand
+  // serves them, answering "verified" with the organisation the hover names.
+  it('answers verified for a brand whose record points at that certificate', async () => {
+    expect(await lookupBimi(VMC_DOMAIN, vmcLookupOptions())).toEqual({
+      status: 'verified',
+      logo: `data:image/svg+xml;base64,${VMC_LOGO.toString('base64')}`,
+      organization: VMC_VERIFIED.organization,
+      issuer: VMC_VERIFIED.issuer,
+      certificateExpires: VMC_VERIFIED.notAfter,
+      dmarcPolicy: 'reject',
+      recordDomain: VMC_DOMAIN,
+      detail: VMC_VERIFIED.detail,
+    });
+  });
+
+  // A build that cannot check certificates says so, rather than looking
+  // exactly like a world in which no brand has one.
+  it('reports the verifier as available', async () => {
+    expect(await vmcVerifierUnavailable()).toBeNull();
+  });
+
+  // THE CAUSE: these were installed only while a package declared them, and
+  // the hoisted node_modules can still resolve one by accident (asn1js comes
+  // in under electron-builder) until that tool changes its own dependencies.
+  // Each must be a dependency of this package AND resolve from the library.
+  it('declares every optional peer the certificate check loads', () => {
+    const manifest = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+    const fromLibrary = createRequire(createRequire(import.meta.url).resolve('@sarv-in/mailguard/brand'));
+    for (const peer of ['@peculiar/x509', 'reflect-metadata', 'asn1js']) {
+      expect(manifest.dependencies[peer], `${peer} in packages/core/package.json`).toBeDefined();
+      expect(() => fromLibrary.resolve(peer)).not.toThrow();
+    }
+  });
+});
+
+describe('vmcVerifierUnavailable when a peer cannot load', () => {
+  const MISSING_X509 = "Verifying a BIMI certificate needs the optional peer dependency '@peculiar/x509', which is not installed.";
+
+  async function probeWith(overrides: Record<string, unknown>): Promise<string | null> {
+    vi.resetModules();
+    vi.doMock('@sarv-in/mailguard/brand', async (importOriginal) => ({
+      ...(await importOriginal<Record<string, unknown>>()),
+      ...overrides,
+    }));
+    try {
+      const fresh = await import('../../../src/utils/bimi');
+      return await fresh.vmcVerifierUnavailable();
+    } finally {
+      vi.doUnmock('@sarv-in/mailguard/brand');
+      vi.resetModules();
+    }
+  }
+
+  // A missing @peculiar/x509 (or reflect-metadata, loaded with it) would be reported as "available".
+  it('names the certificate library', async () => {
+    expect(await probeWith({ validateVmc: async () => { throw new Error(MISSING_X509); } })).toBe(MISSING_X509);
+  });
+
+  // A missing asn1js would be reported as "available": validateVmc alone never reaches it.
+  it('names the ASN.1 library, whatever it threw', async () => {
+    expect(await probeWith({ extractLogotypeEvidence: async () => { throw 'asn1js is not installed'; } }))
+      .toBe('asn1js is not installed');
   });
 });

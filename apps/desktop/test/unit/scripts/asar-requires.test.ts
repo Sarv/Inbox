@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  OPTIONAL_PEERS_LEFT_OUT,
   analyseRequires,
   isRuntimeProvided,
   owningPackageOf,
   packageNameOf,
   requiredPackagesOf,
+  unresolvedPeersOf,
 } from '../../../../../scripts/lib/asar-requires.mjs';
 
 /**
@@ -183,5 +185,105 @@ describe('analyseRequires', () => {
     });
 
     expect(analyseRequires(files, read).missing).toEqual([]);
+  });
+});
+
+/**
+ * Vite's stand-in for an optional peer dependency that was not installed when
+ * the app was bundled, byte for byte as the production main bundle carried it
+ * from 2026-09-21: a chunk that throws on load, with no require() of the peer
+ * left anywhere for the walk above to find.
+ */
+const stub = (peer: string, importer = '@sarv-in/mailguard') =>
+  `const e=require("./rolldown-runtime-CPUxUITh.js");var t;e.n((()=>{throw t={},Error(\`Could not resolve "${peer}" imported by "${importer}". Is it installed?\`)}))(),exports.default=t;`;
+
+describe('unresolvedPeersOf', () => {
+  // THE regression it exists for: BIMI's certificate library bundled as a
+  // stub, so no sender got the verified tick and the release check passed.
+  it('reads the stub vite bundles for a missing optional peer', () => {
+    expect(unresolvedPeersOf(stub('@peculiar/x509'))).toEqual([{ name: '@peculiar/x509', importer: '@sarv-in/mailguard' }]);
+  });
+
+  // A peer left out on purpose must not fail every release, but only for the
+  // package it was left out of: the same name elsewhere is still a miss.
+  it('skips a peer left out on purpose, and only for its own importer', () => {
+    expect(OPTIONAL_PEERS_LEFT_OUT['@sarv-in/mailguard']).toEqual(['mailauth']);
+    expect(unresolvedPeersOf(stub('mailauth'))).toEqual([]);
+    expect(unresolvedPeersOf(stub('mailauth', 'some-other-lib'))).toEqual([{ name: 'mailauth', importer: 'some-other-lib' }]);
+  });
+
+  // Two stubs for one peer (a subpath and the package) are one problem; the
+  // order is stable so the release log reads the same on every platform.
+  it('reports each peer once per importer, by package, sorted', () => {
+    const source = [stub('reflect-metadata'), stub('@peculiar/x509/sub'), stub('@peculiar/x509'), stub('zod', 'a-lib')].join('\n');
+    expect(unresolvedPeersOf(source)).toEqual([
+      { name: '@peculiar/x509', importer: '@sarv-in/mailguard' },
+      { name: 'reflect-metadata', importer: '@sarv-in/mailguard' },
+      { name: 'zod', importer: 'a-lib' },
+    ]);
+  });
+
+  // An inherited Object key as an importer must not crash the check.
+  it('treats an importer named like an Object property as not allowlisted', () => {
+    expect(unresolvedPeersOf(stub('x', 'constructor'))).toEqual([{ name: 'x', importer: 'constructor' }]);
+  });
+
+  it('finds nothing in a bundle without stubs', () => {
+    expect(unresolvedPeersOf('require("better-sqlite3")')).toEqual([]);
+  });
+});
+
+describe('analyseRequires and unresolved optional peers', () => {
+  // The shipped shape: main.js requires the stub chunks lazily; the release
+  // must fail naming the peer and the chunk that throws in its place.
+  it('fails a bundle that stands in for an optional peer, naming the chunk', () => {
+    const { files, read } = archive({
+      'dist-electron/main.js': 'require("./mailguard-BvvgJteH.js");require("./mailguard-BfPAS2mb.js")',
+      'dist-electron/mailguard-BvvgJteH.js': stub('@peculiar/x509'),
+      'dist-electron/mailguard-CNAaa7wz.js': stub('reflect-metadata'),
+      'dist-electron/mailguard-BfPAS2mb.js': stub('mailauth'),
+    });
+
+    const result = analyseRequires(files, read);
+
+    expect(result.missing).toEqual([]);
+    expect(result.unresolved).toEqual([
+      { name: '@peculiar/x509', importer: '@sarv-in/mailguard', file: 'dist-electron/mailguard-BvvgJteH.js' },
+      { name: 'reflect-metadata', importer: '@sarv-in/mailguard', file: 'dist-electron/mailguard-CNAaa7wz.js' },
+    ]);
+  });
+
+  // The fixed build: the peer is a real chunk, only the deliberate stub is left.
+  it('passes once the peer is bundled for real', () => {
+    const { files, read } = archive({
+      'dist-electron/main.js': 'require("./x509.es-D-eZWtV1.js");require("./mailguard-BfPAS2mb.js")',
+      'dist-electron/x509.es-D-eZWtV1.js': 'module.exports={X509Certificate:class{}}',
+      'dist-electron/mailguard-BfPAS2mb.js': stub('mailauth'),
+    });
+
+    expect(analyseRequires(files, read)).toMatchObject({ missing: [], unresolved: [] });
+  });
+
+  // One peer stubbed in two chunks is reported once, at the first.
+  it('reports a peer stubbed in several chunks once', () => {
+    const { files, read } = archive({
+      'dist-electron/a.js': stub('@peculiar/x509'),
+      'dist-electron/b.js': stub('@peculiar/x509'),
+    });
+
+    expect(analyseRequires(files, read).unresolved).toEqual([
+      { name: '@peculiar/x509', importer: '@sarv-in/mailguard', file: 'dist-electron/a.js' },
+    ]);
+  });
+
+  // Only the app's own bundles are vite output; a packed package's source
+  // mentioning the message is not a stub vite made.
+  it('looks for stubs only in the app bundles', () => {
+    const { files, read } = archive({
+      'dist-electron/main.js': 'require("better-sqlite3")',
+      'node_modules/better-sqlite3/lib/database.js': stub('@peculiar/x509'),
+    });
+
+    expect(analyseRequires(files, read).unresolved).toEqual([]);
   });
 });
