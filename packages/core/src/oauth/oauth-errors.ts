@@ -71,6 +71,24 @@ export function isOAuthTokenError(err: unknown): boolean {
 }
 
 /**
+ * The token-layer error behind `err`: `err` itself, or the `cause` it wraps
+ * (one level only). Undefined when neither came from the OAuth token layer.
+ *
+ * A layer that re-throws a refresh failure under its OWN code — the IMAP
+ * client's `OAUTH_REFRESH_FAILED` — hides the code every classifier here keys
+ * on. While that wrapper also dropped the cause, a grant revoked by a password
+ * change did not read as an auth failure, so the reconnect ladder kept minting
+ * and POSTing the dead refresh token until the refresh scheduler's own next run
+ * noticed (up to ~45 min for Google). Classify by what failed, not by the
+ * envelope it arrived in.
+ */
+export function oauthTokenErrorOf(err: unknown): unknown {
+  if (isOAuthTokenError(err)) return err;
+  const cause = (err as { cause?: unknown } | null | undefined)?.cause;
+  return isOAuthTokenError(cause) ? cause : undefined;
+}
+
+/**
  * Whether an OAuth refresh error is TERMINAL — the refresh token itself is
  * dead/revoked/expired and ONLY interactive re-authentication can fix it — vs a
  * transient failure (network blip, rate-limit, 5xx) that's worth retrying.
@@ -80,8 +98,13 @@ export function isOAuthTokenError(err: unknown): boolean {
  * (`invalid_grant` / `invalid_client` / `unauthorized_client` / `invalid_token`,
  * or a 400/401 response). Everything else — `TOKEN_REFRESH_NETWORK_ERROR`, 429,
  * 5xx, timeouts — is transient.
+ *
+ * A wrapper carrying a token-layer error on `cause` is judged by that error
+ * (see `oauthTokenErrorOf`), never by its own code or text.
  */
 export function isTerminalOAuthError(err: unknown): boolean {
+  const tokenError = oauthTokenErrorOf(err);
+  if (tokenError !== undefined && tokenError !== err) return isTerminalOAuthError(tokenError);
   const code = (err as { code?: unknown } | null | undefined)?.code;
   if (typeof code === 'string') {
     if (code === 'EMPTY_STORED_TOKEN' || code === 'EMPTY_REFRESH_TOKEN') return true;
