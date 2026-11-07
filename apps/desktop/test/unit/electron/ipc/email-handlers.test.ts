@@ -1025,3 +1025,58 @@ describe('emails:search — tag: operator', () => {
     expect(lastQuery()).toMatchObject({ isUnread: true, query: 'invoice' });
   });
 });
+
+describe('Starred folder — server stars are the folder sync\'s job, not an IPC handler\'s', () => {
+  // Both handlers used to run their own add-only star sync: SEARCH the starred
+  // folder, then write `{ flags: [...] }` to the matched rows. `flags` is not a
+  // column (stars are the `|starred|` tag), so the write failed on the first
+  // unstarred row and the loop died. "Fixing" the field would have been worse:
+  // that pass ignores pending local ops, so a star the user had just removed
+  // (op still queued) flipped back on. syncFlags owns server→local stars and
+  // honours that guard; opening the folder already runs it via syncSingleFolder.
+  const list = () => h.handlers.get('emails:list')!;
+  const client = { search: vi.fn(), fetchMessagesByUID: vi.fn(), getSelectedFolder: vi.fn(), selectFolder: vi.fn() };
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  beforeEach(() => {
+    Object.assign(h.syncEngine, { client });
+    client.search.mockReset().mockResolvedValue([7]);
+    client.fetchMessagesByUID.mockReset().mockResolvedValue([{ uid: 7, envelope: { messageId: '<s@x>' } }]);
+    client.getSelectedFolder.mockReset().mockReturnValue('[Gmail]/Starred');
+    client.selectFolder.mockReset().mockResolvedValue(undefined);
+    h.storage.getFolder.mockResolvedValue({ id: 'f-starred', path: '[Gmail]/Starred' });
+    h.storage.getFolders.mockResolvedValue([{ id: 'f-starred', path: '[Gmail]/Starred' }, { id: 'f-inbox', path: 'INBOX' }]);
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(h.syncEngine, 'client');
+  });
+
+  // Breaks if the handler stops listing local stars: the Starred folder opens empty.
+  it('lists the locally starred mail', async () => {
+    const starred = [{ id: 'e1', tags: '|INBOX|starred|' }];
+    h.storage.searchEmails.mockResolvedValue(starred);
+
+    const result = await list()(null, 'f-starred', 50, 0);
+
+    expect(result).toEqual({ success: true, data: starred });
+    expect(h.storage.searchEmails).toHaveBeenCalledWith(expect.objectContaining({ isFlagged: true, limit: 50, offset: 0 }));
+  });
+
+  // Breaks if a second, unguarded star sync comes back into the handler: it would
+  // re-star mail whose unstar is still queued, and race the folder sync for the
+  // primary connection's selected mailbox.
+  it('runs no IMAP pass and writes no row of its own, even while connected', async () => {
+    await list()(null, 'f-starred', 50, 0);
+    await flush(); await flush();
+
+    expect(client.search).not.toHaveBeenCalled();
+    expect(client.fetchMessagesByUID).not.toHaveBeenCalled();
+    expect(h.storage.updateEmail).not.toHaveBeenCalled();
+  });
+
+  // Breaks if the never-called emails:syncStarred handler (and its `flags` write)
+  // is re-registered; a manual "sync stars" must go through syncFlags.
+  it('no longer registers emails:syncStarred', () => {
+    expect(h.handlers.has('emails:syncStarred')).toBe(false);
+  });
+});

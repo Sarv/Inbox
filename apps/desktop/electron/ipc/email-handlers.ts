@@ -619,56 +619,16 @@ export function registerEmailHandlers(): void {
   ipcMain.handle('emails:list', async (_event, folderId: string, limit = 100, offset = 0) => {
     try {
       const storage = requireStorage();
-      const syncEngine = getSyncEngine();
 
       const folder = await storage.getFolder(folderId);
       const folderPath = folder?.path?.toLowerCase() || '';
 
-      // Handle virtual folders (Gmail's Starred)
+      // Handle virtual folders (Gmail's Starred). Server stars reach these rows
+      // through the folder sync's syncFlags (\Flagged ⇄ the `starred` tag, with
+      // pending local ops left alone), which opening the folder already runs —
+      // so no second, hand-rolled star pass belongs here.
       if (folderPath.includes('starred') || folderPath.includes('star')) {
         logger.info('[Main] Loading starred emails (virtual folder)');
-
-        // Sync starred in background
-        if (syncEngine && syncEngine.isConnected()) {
-          (async () => {
-            try {
-              const client = (syncEngine as any).client;
-              const folders = await storage.getFolders();
-              let searchFolder = folders.find((f: any) =>
-                f.path === '[Gmail]/Starred' || f.path.toLowerCase().includes('/starred')
-              );
-              if (!searchFolder) {
-                searchFolder = folders.find((f: any) => f.path === 'INBOX');
-              }
-
-              if (searchFolder) {
-                // SEARCH and the FETCH of its hits are one section — the UIDs it
-                // returns are only meaningful in the mailbox that produced them.
-                const messages = await withFolderSelected(client, searchFolder.path, async () => {
-                  const isStarredFolder = searchFolder.path.toLowerCase().includes('starred');
-                  const starredUIDs = isStarredFolder
-                    ? await client.search({ all: true })
-                    : await client.search({ flagged: true });
-                  if (starredUIDs.length === 0) return [];
-                  return client.fetchMessagesByUID(starredUIDs.slice(-100), { bodies: ['HEADER'] });
-                });
-
-                for (const msg of messages) {
-                  if (msg.envelope?.messageId) {
-                    const existing = await storage.getEmailByMessageId(msg.envelope.messageId);
-                    if (existing && !(existing.flags || []).includes('\\Flagged')) {
-                      await storage.updateEmail(existing.id, {
-                        flags: [...(existing.flags || []), '\\Flagged']
-                      });
-                    }
-                  }
-                }
-              }
-            } catch (err) {
-              logger.error('[Main] Background starred sync error:', err);
-            }
-          })();
-        }
 
         const emails = await storage.searchEmails({
           query: '',
@@ -1441,72 +1401,6 @@ export function registerEmailHandlers(): void {
       return { success: true, data: result.categories, syncStatus: result.syncStatus };
     } catch (error) {
       logger.error('Change category error:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  });
-
-  /**
-   * Sync starred emails from server
-   */
-  ipcMain.handle('emails:syncStarred', async () => {
-    try {
-      const storage = requireStorage();
-      const syncEngine = requireSyncEngine();
-
-      if (!syncEngine.isConnected()) {
-        return { success: false, error: 'Not connected to IMAP' };
-      }
-
-      const client = (syncEngine as any).client;
-      const folders = await storage.getFolders();
-
-      let searchFolder = folders.find((f: any) =>
-        f.path === '[Gmail]/Starred' || f.path.toLowerCase().includes('/starred')
-      );
-      if (!searchFolder) {
-        searchFolder = folders.find((f: any) =>
-          f.path.toLowerCase().includes('all mail') || f.path === '[Gmail]/All Mail'
-        );
-      }
-      if (!searchFolder) {
-        searchFolder = folders.find((f: any) => f.path === 'INBOX');
-      }
-
-      if (!searchFolder) {
-        return { success: false, error: 'No suitable folder found for starred sync' };
-      }
-
-      // SEARCH and the FETCH of its hits are one section — the UIDs it returns
-      // are only meaningful in the mailbox that produced them.
-      const { starredUIDs, messages } = await withFolderSelected(client, searchFolder.path, async () => {
-        const isStarredFolder = searchFolder.path.toLowerCase().includes('starred');
-        const uids: number[] = isStarredFolder
-          ? await client.search({ all: true })
-          : await client.search({ flagged: true });
-        return {
-          starredUIDs: uids,
-          messages: uids.length > 0
-            ? await client.fetchMessagesByUID(uids, { bodies: ['HEADER'] })
-            : [],
-        };
-      });
-
-      let updatedCount = 0;
-      for (const msg of messages) {
-        if (msg.envelope?.messageId) {
-          const existing = await storage.getEmailByMessageId(msg.envelope.messageId);
-          if (existing && !(existing.flags || []).includes('\\Flagged')) {
-            await storage.updateEmail(existing.id, {
-              flags: [...(existing.flags || []), '\\Flagged']
-            });
-            updatedCount++;
-          }
-        }
-      }
-
-      return { success: true, data: { synced: starredUIDs.length, updated: updatedCount } };
-    } catch (error) {
-      logger.error('Sync starred error:', error);
       return { success: false, error: (error as Error).message };
     }
   });
