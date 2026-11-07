@@ -22,6 +22,7 @@
     "type-check": "tsc --noEmit",
     "test": "node ../../scripts/native-abi.mjs node && vitest run",
     "test:coverage": "node ../../scripts/native-abi.mjs node && vitest run --coverage",
+    "test:sandbox-escape": "node test/sandbox-escape/run.mjs",
     "lint": "eslint electron src test vite --ext .ts,.tsx",
     "check:renderer-bundle": "vite build --config vite/check-renderer-bundle.config.ts",
     "clean": "rm -rf dist dist-electron node_modules/.vite && node ../../scripts/clean-stale-js.mjs src electron",
@@ -293,6 +294,9 @@
           "target": "rpm"
         }
       ]
+    },
+    "appImage": {
+      "executableArgs": []
     },
     "deb": {
       "packageName": "sarv-inbox"

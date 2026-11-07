@@ -1,27 +1,30 @@
 /**
  * Extension Host
  *
- * Owns extension lifecycle. Extension code itself runs in a separate sandbox
- * process, reached through `ExtensionBridge`; what stays here is everything
- * that decides what an extension is allowed to do.
+ * Owns extension lifecycle. Each extension's code runs in a sandbox of its own,
+ * reached through its own `ExtensionBridge`; what stays here is everything that
+ * decides what an extension is allowed to do.
  *
  * The split matters because the permission-checked `ExtensionContextImpl` is
  * still built here, per extension, from the permissions the user actually
  * granted — the sandbox holds no authority of its own, it asks. So a
- * compromised extension gets a process with no filesystem handle, no database
- * and no network client, and every request it makes is answered by the same
- * checks that guarded the in-process version.
+ * compromised extension gets a sandbox with no filesystem, no database and no
+ * network, and every request it makes is answered by the same checks that
+ * guarded the in-process version.
  *
  * Workflows the sandbox reports are registered back through
  * `context.registerWorkflow`, so a workflow that skipped its permission check
  * on the far side is rejected here before it can ever run.
  */
 
+import { join, relative, sep } from 'path';
+
 import { EventBus } from '../pipeline/event-bus';
 import type { WorkflowResult } from '../pipeline/types';
 import { EmailWorkflow, WorkflowContext, WorkflowPriority } from '../pipeline/types';
 import type { EmailRecord } from '../types/models';
 import { logger } from '../utils/logger';
+import { withTimeout } from '../utils/timeout';
 
 import {
   createExtensionContext,
@@ -31,6 +34,7 @@ import {
   type ExtensionSettingsBackend,
   type ExtensionUIBackend,
   type ExtensionMailBackend,
+  type ExtensionNetworkBackend,
   type ExtensionSecurityBackend,
   toWorkflowResult,
 } from './extension-api';
@@ -38,10 +42,19 @@ import type { LoadedExtension } from './extension-loader';
 import type { ExtensionRegistry } from './extension-registry';
 import { panelRequestPermission, type PanelRequest, type PanelResponse } from './panel-bridge';
 import { ExtensionBridge } from './runtime/extension-bridge';
+import { MAX_MESSAGE_BYTES, messageBytes } from './runtime/flood-budget';
 import { createInProcessChannelPair } from './runtime/in-process-channel';
-import type { ExtensionChannel, SandboxSyncState, WorkflowDescriptor } from './runtime/protocol';
+import { createNodeModuleLoader } from './runtime/node-module-loader';
+import type {
+  ExtensionChannel,
+  SandboxCloseDetails,
+  SandboxSyncState,
+  SandboxTarget,
+  WorkflowDescriptor,
+} from './runtime/protocol';
 import { createRemoteExports, createRemoteWorkflow } from './runtime/remote-proxies';
 import { startExtensionSandbox } from './runtime/sandbox';
+import { unsupportedNodeApiMessage } from './runtime/unsupported-node-api';
 import {
   ExtensionState,
   type ExtensionManifest,
@@ -62,13 +75,49 @@ export interface ExtensionModule {
 }
 
 /**
- * Run the sandbox in this process, on an in-memory channel.
+ * How long a sandbox gets to start and say it is ready.
  *
- * The fallback when no channel factory is supplied. It is the same engine the
- * desktop app runs across a process boundary — the only difference is which
- * side of the channel the sandbox sits on — so an extension behaves identically
- * either way and the tests exercise the shipping code.
+ * A sandbox that never does must surface as one failed activation, not as an
+ * install that hangs with no error anywhere.
  */
+export const SANDBOX_START_TIMEOUT_MS = 30_000;
+
+/**
+ * How long `activateAll` holds up the caller.
+ *
+ * The app waits for this before it opens its window. An extension that takes
+ * longer, or hangs at load until its transport kills it, keeps activating in the
+ * background: it should not be able to keep the mail from appearing.
+ */
+export const ACTIVATE_ALL_WAIT_MS = 3_000;
+
+/**
+ * How long to wait before starting a crashed extension again, one entry per attempt.
+ * A crash can be anything: the OS reclaiming memory, a transient bug in the renderer. A
+ * hang or a flood is the extension's own doing and gets no second try. Three, because an
+ * extension that crashes on every start must end up visibly off, not cycling for ever.
+ */
+export const SANDBOX_RESTART_DELAYS_MS = [2_000, 15_000, 60_000] as const;
+
+/** Running this long after a crash counts as having recovered: the attempts start over. */
+export const SANDBOX_RESTART_FORGIVE_MS = 10 * 60 * 1000;
+
+/** The longest piece of an extension's own name shown in the app's voice. */
+export const MAX_NAME_ON_PROBLEM_CARD = 32;
+
+/** The line in Settings for an extension whose code was held back at launch. */
+export const EXTENSION_HELD_BACK =
+  'Not started: Sarv Inbox closed unexpectedly while starting extensions. Turn extensions back on above when you are ready.';
+
+/** What is left of an extension's name on a card shown without `ui:notify`. */
+function nameOnCard(name: string): string {
+  return name.length > MAX_NAME_ON_PROBLEM_CARD ? `${name.slice(0, MAX_NAME_ON_PROBLEM_CARD)}…` : name;
+}
+
+/** The card for an extension whose own code failed while starting. */
+export const EXTENSION_FAILED_TO_START =
+  'This extension could not start. Settings, Extensions has the details.';
+
 /** What the app has to supply for the requests the host cannot answer alone. */
 export interface PanelRequestDeps {
   /**
@@ -78,9 +127,17 @@ export interface PanelRequestDeps {
   getCurrentMessage?(): Promise<unknown>;
 }
 
-function createInProcessSandboxChannel(): ExtensionChannel {
+/**
+ * Run the sandbox in this process, on an in-memory channel.
+ *
+ * The fallback when no channel factory is supplied: the CLI and the tests. It is
+ * the same engine the desktop app runs inside a confined Worker, with Node's own
+ * `require` to load with, so the tests exercise the shipping code. It confines
+ * nothing: the desktop app always supplies a factory.
+ */
+function createInProcessSandboxChannel(target: SandboxTarget): ExtensionChannel {
   const { host, sandbox } = createInProcessChannelPair();
-  startExtensionSandbox(sandbox);
+  startExtensionSandbox(sandbox, createNodeModuleLoader(target.rootDir));
   return host;
 }
 
@@ -110,17 +167,21 @@ export interface ExtensionHostOptions {
   mailBackend?: ExtensionMailBackend;
   securityBackend?: ExtensionSecurityBackend;
 
+  /** Network backend (omit for a host that gives extensions no network) */
+  networkBackend?: ExtensionNetworkBackend;
+
   /** Base path for extension storage */
   extensionStoragePath: string;
 
   /**
-   * Opens the channel to the sandbox process.
+   * Opens the channel to one extension's sandbox.
    *
-   * The desktop app supplies one backed by an Electron `utilityProcess`. Left
-   * out, extensions run in an in-process sandbox instead — which is what the
-   * CLI and the tests want, and is still the old trust model, not a weaker one.
+   * The desktop app supplies one backed by a confined Electron renderer. Left
+   * out, extensions run in an in-process sandbox instead — which is what the CLI
+   * and the tests want, and confines nothing. Rejecting is how a host refuses to
+   * run extension code at all: the reason reaches the user.
    */
-  createChannel?: () => ExtensionChannel | Promise<ExtensionChannel>;
+  createChannel?: (target: SandboxTarget) => ExtensionChannel | Promise<ExtensionChannel>;
 }
 
 /**
@@ -152,16 +213,31 @@ export class ExtensionHost {
   private uiBackend?: ExtensionUIBackend;
   private mailBackend?: ExtensionMailBackend;
   private securityBackend?: ExtensionSecurityBackend;
+  private networkBackend?: ExtensionNetworkBackend;
   private extensionStoragePath: string;
 
-  private createChannel: () => ExtensionChannel | Promise<ExtensionChannel>;
+  private createChannel: (target: SandboxTarget) => ExtensionChannel | Promise<ExtensionChannel>;
 
   private activeExtensions: Map<string, ActiveExtension> = new Map();
   private workflowAdapters: Map<string, ExtensionWorkflowAdapter> = new Map();
 
-  private bridge: ExtensionBridge | null = null;
-  /** In flight while the sandbox starts, so concurrent activations share one. */
-  private bridgeStarting: Promise<ExtensionBridge> | null = null;
+  /** One sandbox per extension, and only for those with code to run. */
+  private bridges: Map<string, ExtensionBridge> = new Map();
+
+  /** What the user has been told about each extension since it last started. */
+  private problemsShown: Map<string, string> = new Map();
+
+  /** Crashed extensions being given another go. See `planRestart`. */
+  private restarts: Map<
+    string,
+    { attempts: number; timer: ReturnType<typeof setTimeout> | null; startedAt: number }
+  > = new Map();
+
+  /** Enabled extensions whose code was not started at launch. See `activateAll`. */
+  private heldBack: Set<string> = new Set();
+
+  /** Contexts for panels of extensions whose code is not running. See `contextForPanel`. */
+  private panelContexts: Map<string, ExtensionContextImpl> = new Map();
 
   constructor(options: ExtensionHostOptions) {
     this.registry = options.registry;
@@ -172,44 +248,85 @@ export class ExtensionHost {
     this.uiBackend = options.uiBackend;
     this.mailBackend = options.mailBackend;
     this.securityBackend = options.securityBackend;
+    this.networkBackend = options.networkBackend;
     this.extensionStoragePath = options.extensionStoragePath;
     this.createChannel = options.createChannel ?? createInProcessSandboxChannel;
   }
 
   /**
-   * The bridge to the sandbox, starting it if it is not up.
+   * Start one extension's sandbox and the bridge to it.
    *
-   * One sandbox is shared by every extension. Per-extension processes would
-   * isolate a crash, but at a fixed cost per installed extension — and the
-   * boundary that actually matters, between extension code and the app's data,
-   * is already drawn by the first one.
+   * One each rather than one shared, for two things measured in the real runtime:
+   * a Worker that runs its renderer out of memory crashes that whole renderer,
+   * and two Workers of one origin read each other's IndexedDB and BroadcastChannel.
+   * A shared sandbox also could not tell its extensions apart, because each would
+   * be able to post on the channel in another's name.
    */
-  private async ensureBridge(): Promise<ExtensionBridge> {
-    if (this.bridge && !this.bridge.isClosed()) return this.bridge;
-    if (this.bridgeStarting) return this.bridgeStarting;
+  private async startBridge(target: SandboxTarget): Promise<ExtensionBridge> {
+    const { extensionId } = target;
+    const channel = await this.createChannel(target);
+    const bridge: ExtensionBridge = new ExtensionBridge({
+      channel,
+      extensionId,
+      hooks: {
+        getContext: (id) => this.activeExtensions.get(id)?.context,
+        onWorkflowRegistered: (id, descriptor) => this.adoptWorkflow(id, descriptor),
+        onWorkflowUnregistered: (id, fullId) => this.dropWorkflow(id, fullId),
+        onSandboxClosed: (reason, details) =>
+          this.handleSandboxLoss(extensionId, bridge, reason, details),
+        onUnsupportedApi: (id, api) => this.reportProblem(id, unsupportedNodeApiMessage(api)),
+      },
+    });
+    this.bridges.set(extensionId, bridge);
+    await withTimeout(bridge.whenReady(), SANDBOX_START_TIMEOUT_MS, 'Extension sandbox did not start');
+    return bridge;
+  }
 
-    this.bridgeStarting = (async () => {
-      const channel = await this.createChannel();
-      const bridge = new ExtensionBridge({
-        channel,
-        hooks: {
-          getContext: (extensionId) => this.activeExtensions.get(extensionId)?.context,
-          onWorkflowRegistered: (extensionId, descriptor) =>
-            this.adoptWorkflow(extensionId, descriptor),
-          onWorkflowUnregistered: (extensionId, fullId) =>
-            this.dropWorkflow(extensionId, fullId),
-          onSandboxClosed: () => this.handleSandboxLoss(),
-        },
-      });
-      await bridge.whenReady();
-      this.bridge = bridge;
-      return bridge;
-    })();
+  /**
+   * Close an extension's sandbox on purpose. Its closing is not a failure.
+   *
+   * @param hung it has already failed to answer: no time is spent asking it to wind down
+   */
+  private async retireBridge(extensionId: string, hung = false): Promise<void> {
+    const bridge = this.bridges.get(extensionId);
+    if (!bridge) return;
+    // Forgotten first: that is what tells `handleSandboxLoss` this one was asked for.
+    this.bridges.delete(extensionId);
+    if (hung) await bridge.terminate('This extension was stopped.');
+    else await bridge.shutdown();
+  }
 
+  /**
+   * Say that an extension is not doing its job, where the user will see it.
+   *
+   * An extension that stops working at startup, before any window exists, would
+   * otherwise be noticed days later as something that quietly no longer happens.
+   * The line in Settings stays; the card is what makes anyone look. Once per problem
+   * until it next starts: a workflow failing on every message would otherwise bring a
+   * dismissed card back with each one.
+   *
+   * `message` must be the host's own words, never text from the extension: this card
+   * is shown without `ui:notify`, in the app's voice.
+   */
+  private reportProblem(extensionId: string, message: string): void {
+    const info = this.registry.getRuntimeInfo(extensionId);
+    if (info) {
+      info.error = message;
+      this.registry.setRuntimeInfo(extensionId, info);
+    }
+    // Another attempt is on its way, so this may yet come to nothing. Settings has it.
+    if (this.restarts.get(extensionId)?.timer) return;
+    if (this.problemsShown.get(extensionId) === message) return;
+    this.problemsShown.set(extensionId, message);
+    const name = nameOnCard(info?.manifest.name ?? extensionId);
     try {
-      return await this.bridgeStarting;
-    } finally {
-      this.bridgeStarting = null;
+      this.uiBackend?.reportProblem?.(extensionId, {
+        id: 'extension-problem',
+        title: `${name} has a problem`,
+        body: message,
+      });
+    } catch (error) {
+      logger.warn(`Could not show a problem with ${extensionId}:`, error);
     }
   }
 
@@ -251,14 +368,14 @@ export class ExtensionHost {
    * answering with the value from activation time.
    */
   refreshSyncState(extensionId?: string): void {
-    const bridge = this.bridge;
-    if (!bridge || bridge.isClosed()) return;
     const targets = extensionId
       ? [this.activeExtensions.get(extensionId)].filter(
           (active): active is ActiveExtension => active !== undefined
         )
       : Array.from(this.activeExtensions.values());
     for (const active of targets) {
+      const bridge = this.bridges.get(active.manifest.id);
+      if (!bridge || bridge.isClosed()) continue;
       bridge.pushSyncState(active.manifest.id, this.syncStateFor(active.manifest));
     }
   }
@@ -272,7 +389,7 @@ export class ExtensionHost {
    */
   private adoptWorkflow(extensionId: string, descriptor: WorkflowDescriptor): void {
     const active = this.activeExtensions.get(extensionId);
-    const bridge = this.bridge;
+    const bridge = this.bridges.get(extensionId);
     if (!active || !bridge) return;
     if (this.workflowAdapters.has(descriptor.fullId)) return;
 
@@ -309,52 +426,109 @@ export class ExtensionHost {
   }
 
   /**
-   * The sandbox died.
+   * An extension's sandbox died.
    *
-   * Nothing it was running is running any more, so the adapters have to go now:
+   * Nothing it was running is running any more, so its adapters have to go now:
    * left in place they would keep being handed every incoming message, each one
-   * failing against a dead channel and turning one crash into a per-email
-   * error for the rest of the session. Extensions are marked errored and stay
-   * down until something asks for them again — `reload` re-forks the sandbox.
+   * failing against a dead channel and turning one crash into a per-email error
+   * for the rest of the session. A crash gets a few more tries (`planRestart`); anything
+   * else stays down until something asks for it again — `reload` starts a new sandbox.
+   * Every other extension is in a sandbox of its own and carries on.
    */
-  private handleSandboxLoss(): void {
-    if (this.activeExtensions.size === 0) {
-      this.bridge = null;
+  private handleSandboxLoss(
+    extensionId: string,
+    bridge: ExtensionBridge,
+    reason?: string,
+    details?: SandboxCloseDetails
+  ): void {
+    // Closed on purpose, or an older sandbox of something since started again.
+    if (this.bridges.get(extensionId) !== bridge) return;
+    this.bridges.delete(extensionId);
+
+    const active = this.activeExtensions.get(extensionId);
+    if (!active) return;
+
+    logger.error(`Extension sandbox stopped for ${extensionId}${reason ? `: ${reason}` : ''}`);
+    active.context.revokeSecurityAccess();
+    void this.revokeSecurity(extensionId);
+    try {
+      active.context.dispose();
+    } catch {
+      // Cleanup is best-effort; one bad disposer must not strand the rest.
+    }
+    this.activeExtensions.delete(extensionId);
+    for (const adapter of this.getExtensionWorkflows(extensionId)) {
+      this.workflowAdapters.delete(adapter.id);
+    }
+    const info = this.registry.getRuntimeInfo(extensionId);
+    if (info) {
+      info.state = ExtensionState.ERROR;
+      info.workflowIds = [];
+      this.registry.setRuntimeInfo(extensionId, info);
+    }
+    if (details?.transient) this.planRestart(extensionId);
+    this.reportProblem(extensionId, reason ?? 'Extension sandbox stopped');
+  }
+
+  /**
+   * Give a crashed extension another go, a bounded number of times.
+   *
+   * An extension that runs for a while after each start is recovering, not looping, so
+   * its attempts start over. One that keeps crashing runs out, and only then does anyone
+   * get a card: a crash that a restart quietly fixes is not worth interrupting a reader.
+   */
+  private planRestart(extensionId: string): void {
+    const previous = this.restarts.get(extensionId);
+    const recovered = previous && Date.now() - previous.startedAt > SANDBOX_RESTART_FORGIVE_MS;
+    const attempts = previous && !recovered ? previous.attempts : 0;
+    if (previous?.timer) clearTimeout(previous.timer);
+
+    const delay = SANDBOX_RESTART_DELAYS_MS[attempts];
+    const loaded = this.registry.getLoaded(extensionId);
+    const installed = this.registry.get(extensionId);
+    if (delay === undefined || !loaded || !installed?.enabled) {
+      this.restarts.delete(extensionId);
       return;
     }
-    logger.error(`Extension sandbox stopped with ${this.activeExtensions.size} extensions active`);
-    for (const [extensionId, active] of this.activeExtensions) {
-      active.context.revokeSecurityAccess();
-      void this.revokeSecurity(extensionId);
-      try {
-        active.context.dispose();
-      } catch {
-        // Cleanup is best-effort; one bad disposer must not strand the rest.
-      }
-      const info = this.registry.getRuntimeInfo(extensionId);
-      if (info) {
-        info.state = ExtensionState.ERROR;
-        info.error = 'Extension sandbox stopped';
-        info.workflowIds = [];
-        this.registry.setRuntimeInfo(extensionId, info);
-      }
-    }
-    this.activeExtensions.clear();
-    this.workflowAdapters.clear();
-    this.bridge = null;
+
+    const timer = setTimeout(() => {
+      const state = this.restarts.get(extensionId);
+      if (state) state.timer = null;
+      void this.activate(loaded, installed.grantedPermissions).catch((error) => {
+        logger.warn(`Restarting ${extensionId} failed:`, error);
+      });
+    }, delay);
+    timer.unref?.();
+    this.restarts.set(extensionId, { attempts: attempts + 1, timer, startedAt: Date.now() });
+    logger.warn(`Restarting ${extensionId} in ${delay} ms, attempt ${attempts + 1}`);
+  }
+
+  private cancelRestart(extensionId: string): void {
+    const state = this.restarts.get(extensionId);
+    if (state?.timer) clearTimeout(state.timer);
+    this.restarts.delete(extensionId);
   }
 
   /**
    * Activate all enabled extensions
    */
-  async activateAll(): Promise<void> {
+  async activateAll(options: { holdCode?: boolean } = {}): Promise<void> {
     const enabled = this.registry.filter({ enabled: true });
 
-    for (const ext of enabled) {
+    // Together, so one that hangs at load holds up nobody but itself. A failure
+    // here has already been recorded on the extension and reported to the user.
+    const activations = enabled.map(async (ext) => {
       const loaded = this.registry.getLoaded(ext.id);
       if (!loaded) {
         logger.warn(`Extension ${ext.id} is enabled but not loaded`);
-        continue;
+        return;
+      }
+
+      // A panel-only extension has no code, so nothing about it can be what is
+      // bringing the app down. Everything about the rest stays as the user left it.
+      if (options.holdCode && loaded.entryPoint) {
+        this.holdBack(loaded);
+        return;
       }
 
       try {
@@ -362,9 +536,57 @@ export class ExtensionHost {
       } catch (error) {
         logger.error(`Failed to activate extension ${ext.id}:`, error);
       }
+    });
+
+    try {
+      await withTimeout(
+        Promise.all(activations),
+        ACTIVATE_ALL_WAIT_MS,
+        'still starting; carrying on without waiting'
+      );
+    } catch (error) {
+      logger.warn(`Extensions: ${(error as Error).message}`);
     }
 
     logger.info(`Activated ${this.activeExtensions.size} extensions`);
+  }
+
+  private holdBack(loaded: LoadedExtension): void {
+    this.heldBack.add(loaded.manifest.id);
+    this.registry.setRuntimeInfo(loaded.manifest.id, {
+      manifest: loaded.manifest,
+      state: ExtensionState.ERROR,
+      enabled: true,
+      path: loaded.path,
+      error: EXTENSION_HELD_BACK,
+      heldBack: true,
+      workflowIds: [],
+      subscriptions: [],
+    });
+  }
+
+  /** The extensions whose code was held back at launch and has not been started since. */
+  getHeldBack(): string[] {
+    return Array.from(this.heldBack);
+  }
+
+  /**
+   * Start what was held back at launch. The user asked for this, so failures are theirs
+   * to see on each extension, as with any activation.
+   */
+  async startHeldBack(): Promise<void> {
+    const ids = this.getHeldBack();
+    await Promise.all(
+      ids.map(async (id) => {
+        const loaded = this.registry.getLoaded(id);
+        const installed = this.registry.get(id);
+        this.heldBack.delete(id);
+        if (!loaded || !installed?.enabled) return;
+        await this.activate(loaded, installed.grantedPermissions).catch((error) => {
+          logger.error(`Failed to activate extension ${id}:`, error);
+        });
+      })
+    );
   }
 
   /**
@@ -381,6 +603,17 @@ export class ExtensionHost {
       return;
     }
 
+    this.problemsShown.delete(manifest.id);
+    this.heldBack.delete(manifest.id);
+    this.panelContexts.delete(manifest.id);
+    const restart = this.restarts.get(manifest.id);
+    if (restart?.timer) {
+      clearTimeout(restart.timer);
+      restart.timer = null;
+    }
+    /** Past this point a failure's text comes from the extension's own code. */
+    let sandboxStarted = false;
+
     logger.info(`Activating extension: ${manifest.id}`);
 
     // Update runtime info
@@ -396,10 +629,9 @@ export class ExtensionHost {
 
     try {
       // Create extension context
-      const storagePath = `${this.extensionStoragePath}/${manifest.id}`;
       const context = createExtensionContext({
         manifest,
-        storagePath,
+        storagePath: join(this.extensionStoragePath, manifest.id),
         grantedPermissions,
         eventBus: this.eventBus,
         storageBackend: this.storageBackend,
@@ -408,6 +640,7 @@ export class ExtensionHost {
         uiBackend: this.uiBackend,
         mailBackend: this.mailBackend,
         securityBackend: this.securityBackend,
+        networkBackend: this.networkBackend,
       });
 
       // Registered BEFORE activate() returns, because the extension makes host
@@ -420,15 +653,22 @@ export class ExtensionHost {
       });
 
       // A panel-only extension has no module: there is nothing to run, so no
-      // sandbox process is started for it. Its panels are served straight from
+      // sandbox is started for it. Its panels are served straight from
       // its folder and it is active the moment its context exists.
       if (entryPoint) {
-        const bridge = await this.ensureBridge();
+        const bridge = await this.startBridge({
+          extensionId: manifest.id,
+          rootDir: loaded.path,
+          entryPoint,
+        });
+        sandboxStarted = true;
         const outcome = await bridge.activate({
           extensionId: manifest.id,
           manifest,
-          entryPoint,
-          storagePath,
+          // Nothing absolute crosses: a real path would name the user's home
+          // directory to code with no other way to learn it.
+          entryPoint: relative(loaded.path, entryPoint).split(sep).join('/'),
+          storagePath: `/extension-storage/${manifest.id}`,
           grantedPermissions,
           state: this.syncStateFor(manifest),
         });
@@ -470,14 +710,26 @@ export class ExtensionHost {
         `Extension ${manifest.id} activated with ${workflows.length} workflows`
       );
     } catch (error) {
-      // A failed activation must leave nothing behind: the sandbox already
-      // dropped its half, and an entry kept here would make the next attempt
-      // report the extension as already active.
+      // A failed activation must leave nothing behind: an entry kept here would
+      // make the next attempt report the extension as already active, and its
+      // sandbox has nothing left to run.
       this.activeExtensions.get(manifest.id)?.context.revokeSecurityAccess();
       await this.revokeSecurity(manifest.id);
       this.activeExtensions.delete(manifest.id);
+      await this.retireBridge(manifest.id);
+      const message = error instanceof Error ? error.message : String(error);
       info.state = ExtensionState.ERROR;
-      info.error = error instanceof Error ? error.message : String(error);
+      this.registry.setRuntimeInfo(manifest.id, info);
+      if (!sandboxStarted) {
+        // The host refused or could not start it, and says why.
+        this.reportProblem(manifest.id, message);
+      } else if (!this.problemsShown.has(manifest.id)) {
+        // Its own code threw, so the card keeps to the app's words: an extension must
+        // not be able to put a sentence of its choosing on screen just by failing.
+        this.reportProblem(manifest.id, EXTENSION_FAILED_TO_START);
+      }
+      // Settings says what the error really was, as it always has.
+      info.error = message;
       this.registry.setRuntimeInfo(manifest.id, info);
 
       throw error;
@@ -488,6 +740,9 @@ export class ExtensionHost {
    * Deactivate an extension
    */
   async deactivate(extensionId: string): Promise<void> {
+    this.cancelRestart(extensionId);
+    this.heldBack.delete(extensionId);
+    this.panelContexts.delete(extensionId);
     const active = this.activeExtensions.get(extensionId);
     active?.context.revokeSecurityAccess();
     await this.revokeSecurity(extensionId);
@@ -508,8 +763,9 @@ export class ExtensionHost {
       // The sandbox runs the extension's own deactivate(); it still needs its
       // context to answer host calls from inside that hook, so the entry here
       // is only removed once it has returned.
-      if (this.bridge && !this.bridge.isClosed()) {
-        await this.bridge.deactivate(extensionId);
+      const bridge = this.bridges.get(extensionId);
+      if (bridge && !bridge.isClosed()) {
+        await bridge.deactivate(extensionId);
       }
 
       // Read the workflow ids BEFORE disposing: `dispose()` clears the
@@ -530,9 +786,15 @@ export class ExtensionHost {
       // Remove from active
       this.activeExtensions.delete(extensionId);
 
+      // Nothing else runs in that sandbox, so it goes with the extension.
+      await this.retireBridge(extensionId);
+      this.problemsShown.delete(extensionId);
+
       // Update runtime info
       if (info) {
         info.state = ExtensionState.DEACTIVATED;
+        // A problem it had while running is not a problem with something switched off.
+        info.error = undefined;
         info.workflowIds = [];
         this.registry.setRuntimeInfo(extensionId, info);
       }
@@ -546,6 +808,8 @@ export class ExtensionHost {
       for (const adapter of this.getExtensionWorkflows(extensionId)) {
         this.workflowAdapters.delete(adapter.id);
       }
+      // Its hook hung or threw: asking it again would only make the reader wait again.
+      await this.retireBridge(extensionId, true);
       if (info) {
         info.state = ExtensionState.ERROR;
         info.error = error instanceof Error ? error.message : String(error);
@@ -569,11 +833,10 @@ export class ExtensionHost {
    * Deactivate all extensions
    */
   async deactivateAll(): Promise<void> {
+    // Together, because the app is usually quitting: a `deactivate()` that hangs
+    // costs one grace period, not one each.
     const extensionIds = Array.from(this.activeExtensions.keys());
-
-    for (const id of extensionIds) {
-      await this.deactivate(id);
-    }
+    await Promise.all(extensionIds.map((id) => this.deactivate(id)));
   }
 
   /**
@@ -627,9 +890,7 @@ export class ExtensionHost {
       // the sandbox holds them when they run out of process. Both are asked,
       // and whichever has no subscribers does nothing.
       active.context.dispatchUIAction(action);
-      if (this.bridge) {
-        await this.bridge.invoke(extensionId, 'ui.action', [action]);
-      }
+      await this.bridges.get(extensionId)?.invoke(extensionId, 'ui.action', [action]);
     } catch (error) {
       logger.warn(
         `[ExtensionHost] ${extensionId} failed to handle card action '${action.action}':`,
@@ -685,6 +946,44 @@ export class ExtensionHost {
   }
 
   /**
+   * The context a panel's requests are served through.
+   *
+   * A panel page runs in the window, and nothing about it needs the extension's code to
+   * be running. An extension whose sandbox crashed, was refused or was held back must not
+   * lose its panel with it: for the antivirus extension that panel is where setup is
+   * reached, and a dead end there leaves the user unable to fix anything. So the panel
+   * gets a context of its own, built from what is installed and granted, exactly as an
+   * activation would build it. Only `exports.call` needs the code, and says so.
+   */
+  private contextForPanel(extensionId: string): ExtensionContextImpl | undefined {
+    const active = this.activeExtensions.get(extensionId);
+    if (active?.state === ExtensionState.ACTIVE) return active.context;
+
+    const installed = this.registry.get(extensionId);
+    const loaded = this.registry.getLoaded(extensionId);
+    if (!installed?.enabled || !loaded) return undefined;
+
+    let context = this.panelContexts.get(extensionId);
+    if (!context) {
+      context = createExtensionContext({
+        manifest: loaded.manifest,
+        storagePath: join(this.extensionStoragePath, extensionId),
+        grantedPermissions: installed.grantedPermissions,
+        eventBus: this.eventBus,
+        storageBackend: this.storageBackend,
+        aiBackend: this.aiBackend,
+        settingsBackend: this.settingsBackend,
+        uiBackend: this.uiBackend,
+        mailBackend: this.mailBackend,
+        securityBackend: this.securityBackend,
+        networkBackend: this.networkBackend,
+      });
+      this.panelContexts.set(extensionId, context);
+    }
+    return context;
+  }
+
+  /**
    * Answer one request from an extension's panel.
    *
    * The renderer relays panel traffic but decides nothing: it holds the open
@@ -713,14 +1012,13 @@ export class ExtensionHost {
       error,
     });
 
-    const active = this.activeExtensions.get(extensionId);
-    if (!active || active.state !== ExtensionState.ACTIVE) {
+    const context = this.contextForPanel(extensionId);
+    if (!context) {
       return refuse(`Extension ${extensionId} is not running`);
     }
 
     // A panel exists only because `ui:panel` was granted; losing that grant has
     // to stop the panel talking, not just stop it being shown next time.
-    const context = active.context;
     if (!context.hasPermission('ui:panel')) {
       return refuse("Permission denied: Extension requires 'ui:panel' permission");
     }
@@ -733,6 +1031,13 @@ export class ExtensionHost {
     }
     if (required !== null && !context.hasPermission(required)) {
       return refuse(`Permission denied: Extension requires '${required}' permission`);
+    }
+
+    // A panel is a stranger's code as well, with no sandbox to stop, so this one is refused.
+    // It stops here, and not in each case below, because any of them may stringify what it
+    // is given, and that takes the whole app down: see MAX_MESSAGE_BYTES.
+    if (messageBytes(request) > MAX_MESSAGE_BYTES) {
+      return refuse('This request is too large');
     }
 
     const params = (request.params ?? {}) as Record<string, unknown>;
@@ -758,11 +1063,15 @@ export class ExtensionHost {
         case 'settings.get':
           return reply(context.settings.get(String(params.key)));
         case 'settings.all':
-          return reply(this.readSettings(active.manifest));
+          return reply(this.readSettings(context.manifest));
 
         case 'exports.call': {
           const name = String(params.name);
           const callable = context.exports[name];
+          if (!this.activeExtensions.has(extensionId)) {
+            const why = this.registry.getRuntimeInfo(extensionId)?.error;
+            return refuse(`${extensionId}'s background code is not running${why ? `: ${why}` : ''}`);
+          }
           if (typeof callable !== 'function') {
             return refuse(`${extensionId} exports no function named '${name}'`);
           }
@@ -927,10 +1236,10 @@ export class ExtensionHost {
    * Cleanup and dispose
    */
   async dispose(): Promise<void> {
+    for (const id of Array.from(this.restarts.keys())) this.cancelRestart(id);
     await this.deactivateAll();
     this.workflowAdapters.clear();
-    await this.bridge?.shutdown();
-    this.bridge = null;
+    await Promise.all(Array.from(this.bridges.keys()).map((id) => this.retireBridge(id)));
     await this.securityBackend?.dispose?.();
   }
 }

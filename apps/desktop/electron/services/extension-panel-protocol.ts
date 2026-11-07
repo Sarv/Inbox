@@ -194,9 +194,11 @@ export async function handlePanelRequest(request: Request): Promise<Response> {
 
   let body: Buffer;
   try {
-    const stat = await fs.promises.stat(filePath);
-    // A directory answers `readFile` with EISDIR on some platforms and an empty
-    // read on others; refuse it the same way everywhere.
+    // `lstat`, not `stat`: a link is not a file of this extension's, wherever it
+    // points. A panel can fetch its own origin, so following one would let it read
+    // any file the user can. A directory answers `readFile` with EISDIR on some
+    // platforms and an empty read on others; refuse it the same way everywhere.
+    const stat = await fs.promises.lstat(filePath);
     if (!stat.isFile()) return errorResponse(request, 404, 'Panel file not found');
     body = await fs.promises.readFile(filePath);
   } catch {

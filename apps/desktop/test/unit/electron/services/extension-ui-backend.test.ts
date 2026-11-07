@@ -53,6 +53,8 @@ import {
   EXTENSION_OPEN_MESSAGE_CHANNEL,
   EXTENSION_OPEN_PANEL_CHANNEL,
   createExtensionUIBackend,
+  noteWindowGone,
+  takeHeldProblems,
 } from '../../../../electron/services/extension-ui-backend';
 
 function makeBackend() {
@@ -239,5 +241,95 @@ describe('openMessage', () => {
     backend.openMessage!('otp-code', '');
 
     expect(sent).toHaveLength(0);
+  });
+});
+
+describe('a card about an extension that is not working', () => {
+  beforeEach(() => {
+    takeHeldProblems();
+    noteWindowGone();
+  });
+
+  // A card a live window has shown must not come back on its next reload, after the reader
+  // has dismissed it. Held only while a push would reach nobody.
+  it('is not held once a window is listening and has it', () => {
+    const { backend, sent } = makeBackend();
+    takeHeldProblems();
+
+    backend.reportProblem?.('old', { id: 'extension-problem', title: 'T', body: 'B' });
+
+    expect(sent).toHaveLength(1);
+    expect(takeHeldProblems()).toEqual([]);
+  });
+
+  // No window at all, whatever was listening before.
+  it('is held when the push reaches no window', () => {
+    takeHeldProblems();
+    const backend = createExtensionUIBackend(() => false);
+
+    backend.reportProblem?.('old', { id: 'extension-problem', title: 'T', body: 'B' });
+
+    expect(takeHeldProblems()).toHaveLength(1);
+  });
+
+  // The window closed on macOS, and a new one is on its way but has not asked yet.
+  it('is held again after the window has gone', () => {
+    const { backend } = makeBackend();
+    takeHeldProblems();
+    noteWindowGone();
+
+    backend.reportProblem?.('old', { id: 'extension-problem', title: 'T', body: 'B' });
+
+    expect(takeHeldProblems()).toHaveLength(1);
+  });
+
+  // Extensions start before any window exists. A push at that moment reaches nobody, and
+  // an extension that stopped working at launch is exactly what must not be lost that way.
+  it('is held for a window that is not listening yet', () => {
+    const { backend } = makeBackend();
+
+    backend.reportProblem?.('old', { id: 'extension-problem', title: 'Old has a problem', body: 'Node' });
+
+    expect(takeHeldProblems()).toEqual([
+      expect.objectContaining({ id: 'old:extension-problem', title: 'Old has a problem', body: 'Node', extensionId: 'old' }),
+    ]);
+  });
+
+  // The window asks once. Shown twice, a dismissed card comes back on every reload.
+  it('is handed over only once', () => {
+    const { backend } = makeBackend();
+    backend.reportProblem?.('old', { id: 'extension-problem', title: 'T', body: 'B' });
+
+    takeHeldProblems();
+
+    expect(takeHeldProblems()).toEqual([]);
+  });
+
+  // A window already open shows it straight away.
+  it('is also pushed to a window that is listening', () => {
+    const { backend, sent } = makeBackend();
+
+    backend.reportProblem?.('old', { id: 'extension-problem', title: 'T', body: 'B' });
+
+    expect(sent).toEqual([
+      { channel: EXTENSION_NOTIFY_CHANNEL, payload: expect.objectContaining({ id: 'old:extension-problem' }) },
+    ]);
+  });
+
+  // The latest word for each extension, not a stack of old ones.
+  it('replaces an earlier one from the same extension', () => {
+    const { backend } = makeBackend();
+    backend.reportProblem?.('old', { id: 'extension-problem', title: 'T', body: 'first' });
+    backend.reportProblem?.('old', { id: 'extension-problem', title: 'T', body: 'second' });
+    backend.reportProblem?.('other', { id: 'extension-problem', title: 'T', body: 'third' });
+
+    expect(takeHeldProblems().map((card) => card.body)).toEqual(['second', 'third']);
+  });
+
+  it('is dropped when it cannot be drawn', () => {
+    const { backend, sent } = makeBackend();
+    backend.reportProblem?.('old', { id: '', title: '' });
+    expect(takeHeldProblems()).toEqual([]);
+    expect(sent).toEqual([]);
   });
 });

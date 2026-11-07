@@ -477,3 +477,44 @@ describe('reporting actions back to the extension', () => {
     expect(text(mounted)).not.toContain('Verification code');
   });
 });
+
+describe('ExtensionNotification: problems from before it was listening', () => {
+  // An extension that stopped working at launch told a window that was not there yet. If
+  // the stack does not ask, a user with an old extension sees nothing at all, and the
+  // extension just quietly stops doing its job.
+  it('shows them as soon as it mounts', async () => {
+    const takeHeldProblems = vi.fn(async () => [
+      { id: 'old:extension-problem', extensionId: 'old', title: 'Old has a problem', body: 'Uses Node\'s "fs"' },
+    ]);
+    (window as unknown as { electronAPI: { extensions: Record<string, unknown> } }).electronAPI.extensions.takeHeldProblems =
+      takeHeldProblems;
+
+    const view = render(<ExtensionNotification />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(takeHeldProblems).toHaveBeenCalledTimes(1);
+    expect(view.container.textContent).toContain('Old has a problem');
+    expect(view.container.textContent).toContain('"fs"');
+    view.unmount();
+  });
+
+  // Settings still says what is wrong. A failed ask must not take the stack down with it.
+  it('carries on when asking fails', async () => {
+    (window as unknown as { electronAPI: { extensions: Record<string, unknown> } }).electronAPI.extensions.takeHeldProblems =
+      vi.fn(async () => {
+        throw new Error('not ready');
+      });
+
+    const view = render(<ExtensionNotification />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(view.container.textContent).toBe('');
+    view.unmount();
+  });
+});

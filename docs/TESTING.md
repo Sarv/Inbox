@@ -19,6 +19,18 @@ npx vitest run packages/core/test/unit/imap # one directory
 npx vitest run -t 'UIDVALIDITY'             # one test by name
 ```
 
+### The extension sandbox: `pnpm --filter @sarvinbox/desktop test:sandbox-escape`
+
+Whether extension code can read a file or reach the network is decided by Chromium,
+so the unit tests can only pin the settings. This one runs hostile extension code
+against the real transport in real Electron, from a real `app.asar`, with real
+listeners on HTTP, WebSocket and UDP, and fails if anything gets out
+(`apps/desktop/test/sandbox-escape`). It is not part of `pnpm test`: CI runs it on
+macOS, Windows and Linux. Run it yourself when you touch `extension-runtime.ts` or
+upgrade Electron, and add to `fixtures/probe` when a new way out turns up. Never
+start it beside your own dev app without `SANDBOX_ESCAPE_ELECTRON`: see the note in
+`run.mjs`.
+
 ### The one gotcha: better-sqlite3's ABI
 
 `better-sqlite3` is a compiled addon, valid for exactly **one** ABI at a time,

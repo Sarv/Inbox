@@ -27,6 +27,11 @@
       "types": "./dist/pgp.d.ts",
       "import": "./dist/pgp.mjs",
       "require": "./dist/pgp.js"
+    },
+    "./extension-sandbox-guest": {
+      "types": "./dist/extension-sandbox-guest.d.ts",
+      "import": "./dist/extension-sandbox-guest.mjs",
+      "require": "./dist/extension-sandbox-guest.js"
     }
   },
   "scripts": {

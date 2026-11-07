@@ -1226,6 +1226,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Panels. `listPanels` is re-read whenever extensions change: a disabled
     // extension's panel has to disappear straight away.
     listPanels: () => ipcRenderer.invoke('extensions:listPanels'),
+    takeHeldProblems: () => ipcRenderer.invoke('extensions:takeHeldProblems'),
+    getHeldBack: () => ipcRenderer.invoke('extensions:getHeldBack'),
+    startHeldBack: () => ipcRenderer.invoke('extensions:startHeldBack'),
     // One request from a panel iframe, relayed verbatim. The renderer must not
     // interpret it — main re-validates and permission-checks every field.
     panelRequest: (
@@ -2095,6 +2098,11 @@ export interface ElectronAPI {
     getRegistries: () =>
       Promise<{ success: boolean; data?: { registries: string[]; systemExtensions: string[] }; error?: string }>;
     listPanels: () => Promise<{ success: boolean; data?: AvailablePanel[]; error?: string }>;
+    /** Cards about extensions that stopped working before the window was listening. */
+    takeHeldProblems: () => Promise<ExtensionNotificationCard[]>;
+    /** Extensions whose code was not started this launch after repeated crashes. */
+    getHeldBack: () => Promise<string[]>;
+    startHeldBack: () => Promise<{ success: boolean; error?: string }>;
     panelRequest: (
       extensionId: string,
       payload: unknown,

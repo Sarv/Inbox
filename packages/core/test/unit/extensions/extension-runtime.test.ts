@@ -2,8 +2,8 @@
  * The out-of-process extension runtime, driven end to end.
  *
  * These exercise the real sandbox engine over an in-memory channel — the same
- * code the desktop app runs across a `utilityProcess` boundary, with only the
- * transport swapped. A mock sandbox would prove nothing: the whole point of the
+ * code the desktop app runs inside a confined Web Worker, with only the transport
+ * and the module loader swapped. A mock sandbox would prove nothing: the whole point of the
  * boundary is what happens when a call crosses it.
  */
 
@@ -25,10 +25,12 @@ import type { LoadedExtension } from '../../../src/extensions/extension-loader';
 import type { ExtensionRegistry } from '../../../src/extensions/extension-registry';
 import { ExtensionBridge } from '../../../src/extensions/runtime/extension-bridge';
 import { createInProcessChannelPair } from '../../../src/extensions/runtime/in-process-channel';
+import { createNodeModuleLoader } from '../../../src/extensions/runtime/node-module-loader';
 import type {
   ExtensionChannel,
   SandboxToHostMessage,
 } from '../../../src/extensions/runtime/protocol';
+import { startExtensionSandbox } from '../../../src/extensions/runtime/sandbox';
 import {
   ExtensionState,
   type ExtensionInfo,
@@ -563,9 +565,7 @@ describe('extension runtime', () => {
         const pair = createInProcessChannelPair();
         sandboxSide = pair.sandbox;
         // The real sandbox, started the way the default factory starts it.
-        void import('../../../src/extensions/runtime/sandbox').then(({ startExtensionSandbox }) =>
-          startExtensionSandbox(pair.sandbox)
-        );
+        startExtensionSandbox(pair.sandbox, createNodeModuleLoader(loaded.path));
         return pair.host;
       },
     });
@@ -606,6 +606,7 @@ describe('ExtensionBridge permission boundary', () => {
 
     const bridge = new ExtensionBridge({
       channel: pair.host,
+      extensionId: 'sneaky',
       hooks: {
         getContext: () => context,
         onWorkflowRegistered: () => undefined,

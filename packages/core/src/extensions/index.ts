@@ -29,6 +29,10 @@ export type {
   ExtensionAI,
   ExtensionSettings,
   ExtensionMail,
+  ExtensionNetwork,
+  ExtensionNetworkRequest,
+  ExtensionNetworkResponse,
+  ExtensionNetworkResult,
   ExtensionMailFolder,
   ExtensionSecurity,
   AntivirusScanTarget,
@@ -105,6 +109,7 @@ export {
   type ExtensionSettingsBackend,
   type ExtensionUIBackend,
   type ExtensionMailBackend,
+  type ExtensionNetworkBackend,
   type ExtensionSecurityBackend,
   type RegisteredWorkflow,
 } from './extension-api';
@@ -159,6 +164,13 @@ export {
 export {
   ExtensionHost,
   ExtensionWorkflowAdapter,
+  ACTIVATE_ALL_WAIT_MS,
+  EXTENSION_FAILED_TO_START,
+  EXTENSION_HELD_BACK,
+  MAX_NAME_ON_PROBLEM_CARD,
+  SANDBOX_RESTART_DELAYS_MS,
+  SANDBOX_RESTART_FORGIVE_MS,
+  SANDBOX_START_TIMEOUT_MS,
   initializeExtensionHost,
   getExtensionHost,
   createExtensionHost,
@@ -168,11 +180,22 @@ export {
 } from './extension-host';
 
 // Out-of-process runtime — the boundary extension code actually runs behind.
-// Exported so the desktop app can supply its own transport (a `utilityProcess`)
+// Exported so the desktop app can supply its own transport (a confined renderer)
 // and so a headless embedder can drive the sandbox directly.
 export {
   ExtensionBridge,
+  DEACTIVATE_TIMEOUT_MS,
   DEFAULT_INVOKE_TIMEOUT_MS,
+  HOST_CALL_SLICE_MS,
+  MAX_DESCRIPTION_LENGTH,
+  MAX_EXPORTS_PER_EXTENSION,
+  MAX_IDENTIFIER_LENGTH,
+  MAX_LABEL_LENGTH,
+  MAX_LABELS_PER_CHANGE,
+  MAX_QUEUED_HOST_CALLS,
+  MAX_SUBSCRIPTIONS_PER_EXTENSION,
+  MAX_WORKFLOW_REGISTRATIONS,
+  MAX_WORKFLOWS_PER_EXTENSION,
   type ActivationOutcome,
   type ExtensionBridgeHooks,
   type ExtensionBridgeOptions,
@@ -190,6 +213,38 @@ export {
   type SandboxModuleLoader,
 } from './runtime/sandbox';
 
+export { createNodeModuleLoader } from './runtime/node-module-loader';
+
+export {
+  messageBytes,
+  MAX_MESSAGE_BYTES,
+  createFloodBudget,
+  FLOOD_BASE_MESSAGES,
+  FLOOD_BYTES,
+  FLOOD_MESSAGES_PER_CALL,
+  FLOOD_WINDOW_MS,
+  type FloodBudget,
+  type FloodVerdict,
+} from './runtime/flood-budget';
+
+export {
+  createLogBudget,
+  LOG_LINES_PER_WINDOW,
+  LOG_WINDOW_MS,
+  MAX_EXTENSION_LOG_LINE,
+  type LogBudget,
+  type LogBudgetVerdict,
+} from './runtime/log-budget';
+
+export {
+  isKnownNodeApi,
+  nodeApiBehindError,
+  nodeBuiltinNamed,
+  refusalInConsoleLine,
+  UnsupportedNodeApiError,
+  unsupportedNodeApiMessage,
+} from './runtime/unsupported-node-api';
+
 export {
   serializeError,
   deserializeError,
@@ -197,8 +252,10 @@ export {
   type HostCallMethod,
   type HostToSandboxMessage,
   type SandboxActivationRequest,
+  type SandboxCloseDetails,
   type SandboxInvokeTarget,
   type SandboxSyncState,
+  type SandboxTarget,
   type SandboxToHostMessage,
   type SerializedError,
   type SerializedWorkflowCall,
@@ -216,6 +273,9 @@ export {
 // Extension Manager
 export {
   ExtensionManager,
+  STORAGE_MAX_KEY_LENGTH,
+  STORAGE_MAX_TOTAL_BYTES,
+  STORAGE_MAX_VALUE_BYTES,
   initializeExtensionManager,
   getExtensionManager,
   createExtensionManager,

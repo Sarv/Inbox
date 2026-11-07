@@ -36,8 +36,9 @@ import { loadEnv } from 'vite';
  * runtime; release bundles ignore those overrides at runtime instead
  * (oauth-service.ts sarvEnvOverrides) and use the hardcoded production defaults.
  *
- * The VACUUM and extension-sandbox workers read none of these, so they get an
- * empty map. The preload and the attachment-extraction worker get no `define`.
+ * The VACUUM worker and the extension sandbox's guest read none of these, so
+ * they get an empty map. The two preloads (the app's and the extension
+ * sandbox's) and the attachment-extraction worker get no `define`.
  */
 
 /** A bundle vite.config.ts builds with its own `define` map. */

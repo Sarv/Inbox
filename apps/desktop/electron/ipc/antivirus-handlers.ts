@@ -5,6 +5,7 @@ import { requireTargetAccountId } from '../services/account-target';
 import { readRegistryAccounts } from '../services/accounts-registry';
 import { cancelSarvScannerOAuth, completeSarvScannerOAuth, connectSarvScannerOAuth, getOnboardingScannerSetup } from '../services/antivirus-onboarding';
 import { getAntivirusScanService } from '../services/antivirus-scan-service';
+import { isScannerExtensionAvailable } from '../services/attachment-download-protection';
 import { getPendingUnscannedAttachmentWarning, respondUnscannedAttachmentWarning } from '../services/attachment-unscanned-warning';
 import { unscannedWarningPreferences } from '../services/attachment-warning-preferences';
 import { getExtensionManager, getMainWindow } from '../shared';
@@ -22,8 +23,8 @@ function authorize(event: IpcMainInvokeEvent, extensionId: string, permission: E
   authorizeWindow(event);
   const manager = getExtensionManager();
   const installed = typeof extensionId === 'string' ? manager?.getRegistry().get(extensionId) : undefined;
-  if (!installed || !manager?.getHost().isActive(extensionId) || !installed.grantedPermissions.includes(permission)) {
-    throw new Error('This extension is inactive or lacks the scanner permission.');
+  if (!installed || !isScannerExtensionAvailable(manager, extensionId) || !installed.grantedPermissions.includes(permission)) {
+    throw new Error('This extension is turned off or lacks the scanner permission.');
   }
 }
 

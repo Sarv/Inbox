@@ -380,6 +380,37 @@ describe('startExtensionWorkflowRunner - applying results', () => {
     expect(storage.updateEmail).not.toHaveBeenCalled();
   });
 
+  // Regression: the index was built once per drain, so an extension that started while a
+  // backlog drained, as one past the startup wait does, had its results dropped until the
+  // backlog ended: a reader's first sync, with no tags and no error anywhere.
+  it('applies the results of an extension that started during the drain', async () => {
+    const specs: WorkflowSpec[] = [
+      { workflowId: 'early.w', extensionId: 'early', permissions: ['email:label'], result: labelResult('early') },
+    ];
+    installManager(specs, async (email: any) => {
+      const results = new Map<string, any>();
+      for (const spec of specs) results.set(spec.workflowId, spec.result('new', email));
+      // It starts between the two messages, as a slow one does while a backlog drains.
+      if (email.id === 'e1') {
+        specs.push({ workflowId: 'late.w', extensionId: 'late', permissions: ['email:label'], result: labelResult('late') });
+      }
+      return results;
+    });
+    const storage = makeStorage({ e1: makeEmail('e1'), e2: makeEmail('e2') });
+    h.storageByEmail.set('e1', storage);
+    h.storageByEmail.set('e2', storage);
+
+    startExtensionWorkflowRunner();
+    emitSynced(makeEmail('e1'));
+    emitSynced(makeEmail('e2'));
+    await settle();
+
+    const tagsFor = (id: string) =>
+      storage.updateEmail.mock.calls.filter((call: any[]) => call[0] === id).map((call: any[]) => call[1].tags);
+    expect(tagsFor('e1').join()).not.toContain('late');
+    expect(tagsFor('e2').join()).toContain('late');
+  });
+
   it('writes nothing when no workflow asked for a change', async () => {
     // Regression: every message is re-written on every pass, turning a read-only
     // extension into a full-mailbox write on each sync.
