@@ -158,6 +158,26 @@ describe('loadAccounts', () => {
   });
 });
 
+// The core DB cannot be read (a broken addon, a missing key). getBlob answers
+// "no blob" for that, the same as an empty store. Breaks: "no accounts" is cached
+// for the session, so the next save destroys every other account's refresh token,
+// AI is switched off because "its sign-in is gone", and a removal revokes nothing.
+describe('a core DB that cannot be read', () => {
+  it('rejects instead of reading as empty, and caches nothing', async () => {
+    const { store, db } = await setup();
+    await store.saveAccount(acct());
+    vi.resetModules();
+    const fresh = await import('../../../../electron/services/oauth-token-store');
+
+    db.fail.add('blob-read');
+    await expect(fresh.getAccount('gmail' as never, 'me@gmail.com')).rejects.toThrow('blob-read');
+    await expect(fresh.listAccounts()).rejects.toThrow('blob-read');
+
+    db.fail.delete('blob-read');
+    await expect(fresh.getAccount('gmail' as never, 'me@gmail.com')).resolves.toMatchObject({ refreshToken: 'rt' });
+  });
+});
+
 describe('removeAccount', () => {
   it('removes a matching account (case-insensitively) and reports it', async () => {
     const { store } = await setup();

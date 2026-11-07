@@ -26,6 +26,7 @@ import {
   isOAuthMailHostAllowed,
   isOAuthProviderConfigured,
   isSarvAIEndpointAllowed,
+  listOAuthProviders,
   OAuthError,
   refreshAccessToken,
   revokeToken,
@@ -36,7 +37,9 @@ import {
   setOAuthClientId,
   setOAuthClientSecret,
   setSarvBaseUrl,
+  TOKEN_REQUEST_TIMEOUT_MS,
   userInfoFromIdToken,
+  withTimeout,
   type OAuthAccount,
   type OAuthMailProtocol,
   type OAuthProviderId,
@@ -52,6 +55,7 @@ import { shell } from 'electron';
 import { getSystemSuspended } from '../shared';
 import { isReleaseBundle } from '../utils/dev-mode';
 import { loopbackCallbackCsp, setLoopbackCallbackHeaders } from '../utils/loopback-callback-headers';
+import { closeLoopbackServer, trackLoopbackResponse, type AnsweringResponses } from '../utils/loopback-server-close';
 
 import { waitForNetworkReady } from './network-readiness';
 import { OAUTH_CALLBACK_PORTS } from './oauth-callback-ports';
@@ -246,7 +250,41 @@ export async function startOAuthFlow(providerId: OAuthProviderId): Promise<OAuth
  * that rotate refresh tokens reject the duplicates with invalid_grant,
  * which effectively signs the user out.
  */
-const inflightRefresh = new Map<string, Promise<string>>();
+const inflightRefresh = new Map<string, { promise: Promise<string>; signOutCount: number }>();
+
+/**
+ * Sign-outs per provider:email. A refresh notes the count before its first
+ * await and re-checks it around every step: once it has moved, the refresh sends
+ * nothing more and saves nothing, so tokens deleted a moment ago cannot come
+ * back from a response that was already in the air, and the user is not asked to
+ * sign in again to an account they just removed.
+ */
+const signOutCounts = new Map<string, number>();
+
+/**
+ * Refresh tokens a provider issued to a refresh that ended after its account was
+ * signed out. Nothing on this device can use them, but the grant is live under
+ * them, so they are what the sign-out has to revoke.
+ */
+const rotatedAfterSignOut = new Map<string, string>();
+
+/**
+ * Sign-outs whose in-flight refresh ended with no answer from the server (a
+ * timeout, an abort, a dropped connection). It may have spent the stored token,
+ * which would leave the grant live under one nobody here ever saw.
+ */
+const refreshUnansweredAtSignOut = new Set<string>();
+
+/** Longest a sign-out waits for an in-flight refresh before revoking anyway. */
+const REFRESH_SETTLE_WAIT_MS = TOKEN_REQUEST_TIMEOUT_MS + 2_000;
+
+const oauthAccountKey = (providerId: OAuthProviderId, email: string): string =>
+  `${providerId}:${email.toLowerCase()}`;
+
+const signOutCountOf = (key: string): number => signOutCounts.get(key) ?? 0;
+
+const accountGoneError = (providerId: OAuthProviderId, email: string): OAuthError =>
+  new OAuthError(`No OAuth account for ${providerId}:${email}`, 'ACCOUNT_NOT_FOUND');
 
 /**
  * Cancels every token refresh currently in flight. Replaced after each abort so
@@ -357,10 +395,10 @@ export async function getValidAccessToken(
   email: string,
   forceRefresh = false,
 ): Promise<string> {
+  const key = oauthAccountKey(providerId, email);
+  const signOutCount = signOutCountOf(key);
   const account = await getAccount(providerId, email);
-  if (!account) {
-    throw new OAuthError(`No OAuth account for ${providerId}:${email}`, 'ACCOUNT_NOT_FOUND');
-  }
+  if (!account || signOutCountOf(key) !== signOutCount) throw accountGoneError(providerId, email);
   // `forceRefresh` bypasses the proactive expiry gate — used to recover from a
   // 401 where the resource server rejected a token our local clock still
   // thought was valid (clock skew, server-side revocation-then-reissue, or a
@@ -378,10 +416,11 @@ export async function getValidAccessToken(
     return account.accessToken;
   }
 
-  // Single-flight: join an already-running refresh for this account.
-  const key = `${providerId}:${email.toLowerCase()}`;
+  // Single-flight: join an already-running refresh for this account. Not one left
+  // over from a sign-in that has since been signed out, which can only end in
+  // "account gone" and would report that for the account signed in again now.
   const existing = inflightRefresh.get(key);
-  if (existing) return existing;
+  if (existing?.signOutCount === signOutCount) return existing.promise;
 
   // Refuse to START a refresh while the machine is suspended — deliberately
   // placed AFTER the cached-token fast path (a still-valid token is still
@@ -421,6 +460,21 @@ export async function getValidAccessToken(
     );
   }
 
+  const signedOutSinceStart = (): boolean => signOutCountOf(key) !== signOutCount;
+
+  // Save a refresh's result unless the account was signed out meanwhile. Checked
+  // on both sides of the write: the store's write can interleave with its
+  // removal, and that must not leave tokens behind.
+  const saveUnlessSignedOut = async (next: OAuthAccount): Promise<void> => {
+    if (!signedOutSinceStart()) {
+      await saveAccount(next);
+      if (!signedOutSinceStart()) return;
+      await removeAccount(providerId, email);
+    }
+    if (next.refreshToken !== account.refreshToken) rotatedAfterSignOut.set(key, next.refreshToken);
+    throw accountGoneError(providerId, email);
+  };
+
   const refreshPromise = (async () => {
     // Captured BEFORE the first await: `abortInFlightTokenRefreshes` swaps the
     // controller, and reading `.signal` later would hand this refresh the fresh
@@ -430,6 +484,9 @@ export async function getValidAccessToken(
     // A wake's first seconds have no DNS. Let the link settle rather than
     // spending this refresh on a guaranteed ENOTFOUND.
     await waitForNetworkReady();
+    // Signed out during that wait: the token is being revoked. Presenting it now
+    // is exactly what a reuse detector counts against the session.
+    if (signedOutSinceStart()) throw accountGoneError(providerId, email);
     const tokens = await refreshAccessToken({
       provider,
       refreshToken: account.refreshToken,
@@ -467,7 +524,7 @@ export async function getValidAccessToken(
     // invalid_grant → the re-login flow (handled, not corruption). The clean,
     // complete fix for that residual is a server-side refresh-token grace window.
     if (rotated) {
-      await saveAccount({ ...account, refreshToken: tokens.refresh_token!, updatedAt: now });
+      await saveUnlessSignedOut({ ...account, refreshToken: tokens.refresh_token!, updatedAt: now });
     }
 
     // Refresh providers can return { access_token: '' } on transient failures.
@@ -501,15 +558,24 @@ export async function getValidAccessToken(
         `[OAuth] ${providerId}:${email} refresh returned a NARROWER grant — lost: ${lost.join(' ')}`,
       );
     }
-    await saveAccount(updated);
+    await saveUnlessSignedOut(updated);
     return updated.accessToken;
-  })();
+  })().catch((err: unknown) => {
+    if (!signedOutSinceStart()) throw err;
+    // Whatever went wrong, it no longer matters to anyone: the account is gone,
+    // so nothing may read this as a session that needs signing in again. All the
+    // sign-out still needs to know is whether the server answered at all.
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code !== 'ACCOUNT_NOT_FOUND' && code !== 'TOKEN_REFRESH_FAILED') refreshUnansweredAtSignOut.add(key);
+    throw accountGoneError(providerId, email);
+  });
 
-  inflightRefresh.set(key, refreshPromise);
+  const inflight = { promise: refreshPromise, signOutCount };
+  inflightRefresh.set(key, inflight);
   try {
     return await refreshPromise;
   } finally {
-    inflightRefresh.delete(key);
+    if (inflightRefresh.get(key) === inflight) inflightRefresh.delete(key);
   }
 }
 
@@ -589,24 +655,76 @@ function decodeJwtClaims(token: string): { exp?: number; iat?: number } | null {
 /**
  * Sign out: forget the tokens on this device (awaited, so they are gone before
  * this resolves, even if the provider is unreachable), then revoke the grant at
- * the provider where it supports RFC 7009 (Google). The revocation is handed
- * back as its own promise so a caller can finish its own work without waiting
- * on a network round-trip. It never rejects: a 'failed' outcome is logged and
- * the user can still revoke from their account page (see the privacy policy).
+ * the provider where it supports RFC 7009 (Google, Sarv). The revocation is
+ * handed back as its own promise so a caller can finish its own work without
+ * waiting on a network round-trip. It never rejects: a 'failed' outcome is logged
+ * and the user is told (see the privacy policy).
+ *
+ * A refresh already in flight is NOT aborted. Aborting cannot un-send it, and
+ * against a rotating provider it would leave the grant live under a token we
+ * never saw. The revocation waits for it instead and revokes the newest token,
+ * so it can neither present a token the refresh just spent nor have that refresh
+ * replay one it just revoked. Either of those reads as token theft to Sarv's
+ * reuse detector (see TOKEN_REQUEST_TIMEOUT_MS in core's token-refresher).
+ *
+ * The tokens cannot always be deleted: rewriting the store needs the OS key store
+ * to seal it, and that can be refused. The revocation still goes ahead with the
+ * token in hand, so what stays on disk is dead. Only a store that could not be
+ * read at all fails the sign-out, because there is then nothing to revoke with.
  */
 export async function signOut(
   providerId: OAuthProviderId,
   email: string,
 ): Promise<{ revocation: Promise<RevokeOutcome | 'no-account'> }> {
-  const account = await getAccount(providerId, email);
-  await removeAccount(providerId, email);
+  const key = oauthAccountKey(providerId, email);
+  // Before any await: from here on, no refresh can start or save for this account.
+  signOutCounts.set(key, signOutCountOf(key) + 1);
+  // What an earlier sign-out left behind belongs to an older sign-in, not this one.
+  rotatedAfterSignOut.delete(key);
+  refreshUnansweredAtSignOut.delete(key);
+  let account: OAuthAccount | null = null;
+  try {
+    account = await getAccount(providerId, email);
+    await removeAccount(providerId, email);
+  } catch (error) {
+    if (!account) throw error;
+    logger.error(`[OAuth] ${providerId}:${email} could not be deleted from this device: ${(error as Error)?.message}`);
+  } finally {
+    // Again, now the account is gone: a caller that read it just before its
+    // removal, after the first count, must still see that it was signed out.
+    signOutCounts.set(key, signOutCountOf(key) + 1);
+  }
   if (!account) return { revocation: Promise.resolve('no-account') };
-  const revocation = revokeToken({ provider: getOAuthProvider(providerId), token: account.refreshToken })
-    .then((outcome) => {
-      logger.info(`[OAuth] ${providerId}:${email} signed out — revocation ${outcome}`);
-      return outcome;
-    });
-  return { revocation };
+  return {
+    revocation: revokeAfterRefreshSettles(providerId, email, account.refreshToken, inflightRefresh.get(key)?.promise),
+  };
+}
+
+async function revokeAfterRefreshSettles(
+  providerId: OAuthProviderId,
+  email: string,
+  storedRefreshToken: string,
+  refreshing: Promise<string> | undefined,
+): Promise<RevokeOutcome> {
+  const key = oauthAccountKey(providerId, email);
+  // Bounded by the refresh's own deadline; the bound here is only a backstop.
+  const settled = !refreshing || await withTimeout(
+    refreshing.then(() => true, () => true),
+    REFRESH_SETTLE_WAIT_MS,
+    'refresh did not settle',
+  ).catch(() => false);
+  const refreshUnanswered = refreshUnansweredAtSignOut.delete(key) || !settled;
+  const token = rotatedAfterSignOut.get(key) ?? storedRefreshToken;
+  rotatedAfterSignOut.delete(key);
+  const answer = await revokeToken({ provider: getOAuthProvider(providerId), token });
+  // "Not found" normally means the state we wanted. After a refresh nobody heard
+  // back from, it can mean that refresh spent this token, and then the grant lives
+  // on under a newer one. Nothing is confirmed, so it must not read as done.
+  const outcome = answer === 'already-invalid' && refreshUnanswered ? 'failed' : answer;
+  const line = `[OAuth] ${providerId}:${email} signed out — revocation ${outcome}`;
+  if (outcome === 'failed') logger.warn(line);
+  else logger.info(line);
+  return outcome;
 }
 
 export async function listSignedInAccounts(): Promise<OAuthAccount[]> {
@@ -637,27 +755,61 @@ export function attachOAuthBearer<
     config.oauthProvider &&
     config.oauthEmail
   ) {
-    // Only a Sarv session powers an AI provider, and only toward Sarv's own AI
-    // endpoints. Both fields arrive from the renderer, so without this a
-    // config naming 'gmail' and its own baseUrl would be POSTed the user's
-    // Gmail token. Refused configs pass through with no bearer: the request
-    // then fails as unauthenticated rather than leaking a credential.
-    if (config.oauthProvider !== 'sarv' || !isSarvAIEndpointAllowed(config.baseUrl)) {
-      logger.warn(
-        `[OAuth] Refused a ${String(config.oauthProvider)} token for AI endpoint "${config.baseUrl ?? ''}" — only a Sarv sign-in may authenticate Sarv AI endpoints`,
-      );
-      return config;
-    }
-    const providerId = config.oauthProvider;
-    const email = config.oauthEmail;
-    // The closure forwards `forceRefresh` so a call site can force a fresh
-    // token on 401 and retry, instead of failing the whole categorization run.
-    return {
-      ...config,
-      resolveBearer: (forceRefresh?: boolean) => getValidAccessToken(providerId, email, forceRefresh),
-    };
+    // Refused configs pass through with no bearer: the request then fails as
+    // unauthenticated rather than leaking a credential.
+    const resolveBearer = sarvAIBearerResolver(config.oauthProvider, config.oauthEmail, config.baseUrl);
+    return resolveBearer ? { ...config, resolveBearer } : config;
   }
   return config;
+}
+
+/**
+ * THE rule for which OAuth sign-in may authenticate a request to an AI
+ * endpoint: only a Sarv session, and only toward Sarv's own AI endpoints
+ * (`isSarvAIEndpointAllowed`: a zone edge host `<zone>-ai-edge.sarv.com` over
+ * https, or the configured Sarv edge origin, and only the LLM API path under
+ * `/edge/v1/llm`; never a URL carrying credentials). Shared by the background
+ * categorizers (`attachOAuthBearer`) and the renderer's AI proxy
+ * (`ai-provider-proxy.ts`), so the two cannot drift.
+ *
+ * The provider, email and URL all arrive from the renderer. Without this a
+ * request naming 'gmail' (or 'sarv') with a URL of its own would be sent the
+ * user's Gmail token, or the Sarv token — which is also the Sarv mailbox's
+ * XOAUTH2 credential (email:read/send/delete).
+ *
+ * Returns a resolver that mints the bearer — `forceRefresh` forces a fresh one,
+ * for a retry after a 401 — or null when refused. Refusal happens BEFORE the
+ * token store is read, and is logged without echoing renderer text: the
+ * provider is named only if it is a real one, and the URL only by its parsed
+ * origin, so a crafted value cannot forge lines in app.log.
+ */
+export function sarvAIBearerResolver(
+  oauthProvider: unknown,
+  email: string,
+  url: string | undefined,
+): ((forceRefresh?: boolean) => Promise<string>) | null {
+  if (oauthProvider !== 'sarv' || !isSarvAIEndpointAllowed(url)) {
+    logger.warn(
+      `[OAuth] Refused ${describeOAuthProvider(oauthProvider)} token for AI endpoint ${describeEndpoint(url)} — only a Sarv sign-in may authenticate Sarv AI endpoints`,
+    );
+    return null;
+  }
+  return (forceRefresh?: boolean) => getValidAccessToken('sarv', email, forceRefresh);
+}
+
+/** "a gmail" for a real provider id; never the renderer's raw text otherwise. */
+function describeOAuthProvider(providerId: unknown): string {
+  return listOAuthProviders().some((p) => p.id === providerId) ? `a ${String(providerId)}` : 'an unrecognised provider\'s';
+}
+
+/** The URL's origin (never its path, query or credentials), for a log line. */
+function describeEndpoint(url: string | undefined): string {
+  if (typeof url !== 'string' || url.trim() === '') return '(none)';
+  try {
+    return new URL(url.trim()).origin;
+  } catch {
+    return '(not a URL)';
+  }
 }
 
 // ---------- Internal helpers ----------
@@ -693,9 +845,9 @@ interface CallbackListener {
   /**
    * Each response written on this listener that has not yet reached the OS,
    * settling when it has (or its connection is gone) — what a close waits for
-   * before dropping connections. See `closeCallbackListener`.
+   * before dropping connections. See `closeLoopbackServer`.
    */
-  answering: Map<http.ServerResponse, Promise<void>>;
+  answering: AnsweringResponses;
 }
 
 /**
@@ -737,9 +889,6 @@ let callbackServerHolds = 0;
  * of two sign-ins started together must still win.
  */
 let flowCancelEpoch = 0;
-
-/** How long a closing listener waits for a response it is still sending before dropping the connection anyway. */
-export const RESPONSE_FLUSH_GRACE_MS = 2_000;
 
 /** Listen on one port, resolving on success and rejecting on the bind error. */
 const listenOnce = (server: http.Server, port: number): Promise<void> =>
@@ -834,16 +983,9 @@ const ensureCallbackServer = (): Promise<CallbackListener> => {
   if (callbackServer) return Promise.resolve(callbackServer);
   if (!callbackServerPending) {
     const server = http.createServer();
-    const answering: CallbackListener['answering'] = new Map();
+    const answering: AnsweringResponses = new Map();
     server.on('request', (req, res) => {
-      answering.set(res, new Promise<void>((resolve) => {
-        const answered = () => {
-          answering.delete(res);
-          resolve();
-        };
-        res.once('finish', answered);
-        res.once('close', answered);
-      }));
+      trackLoopbackResponse(answering, res);
       // Before any branch can write a status, so every answer carries them.
       setLoopbackCallbackHeaders(res, CALLBACK_PAGE_CSP);
       try {
@@ -897,37 +1039,10 @@ const releaseCallbackServer = (): void => {
   if (current) closeCallbackListener(current);
 };
 
-/**
- * Free the port at once; drop every connection still open on it once each
- * response already written has reached the OS.
- *
- * `server.close()` stops accepting and drops idle connections (a browser's
- * speculative preconnect), but leaves one whose request is being answered.
- * Whatever it leaves — that response, or a request whose headers never
- * finished — would keep the old listener and its handler alive with no port
- * behind it, so `closeAllConnections()` follows. Not straight away: a
- * successful sign-in releases the listener from INSIDE the request handler,
- * right after `res.end()`. On POSIX the page is already in the kernel then (the
- * write is synchronous); on Windows it is overlapped I/O, and closing the
- * socket under it can cancel the write — the browser would show a reset instead
- * of "Signed in". So the drop waits for every answer in flight to finish (or
- * its connection to go), and an unref'd timer bounds the wait for a client that
- * stops reading.
- */
+/** Close the listener, letting the "Signed in" page reach the browser first (see `closeLoopbackServer`). */
 const closeCallbackListener = ({ server, port, answering }: CallbackListener): void => {
-  server.close();
+  closeLoopbackServer(server, answering);
   logger.info(`[OAuth] Loopback callback server on port ${port} closed — no sign-in pending`);
-  const inFlight = [...answering.values()];
-  if (inFlight.length === 0) {
-    server.closeAllConnections();
-    return;
-  }
-  const backstop = setTimeout(() => server.closeAllConnections(), RESPONSE_FLUSH_GRACE_MS);
-  backstop.unref();
-  void Promise.all(inFlight).then(() => {
-    clearTimeout(backstop);
-    server.closeAllConnections();
-  });
 };
 
 /** FLOW_CANCELLED, for the live sign-in if there is one. Not a cancel of its own — see `flowCancelEpoch`. */

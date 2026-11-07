@@ -1,14 +1,17 @@
 // Sarv CAI catalog API — renderer-side.
 //
-// We deliberately DON'T runtime-import from `@sarvinbox/core` here: that
-// package's barrel re-exports imapflow / nodemailer / agent pipeline
-// code, which drags Node's `events` module into the renderer bundle and
-// breaks Vite's ESM loader (see "Dynamic require of 'events' is not
-// supported" errors).
+// The catalog is FETCHED by main (`oauth:sarvCatalog`, core's
+// `fetchSarvCatalog`): it needs the account's Sarv bearer, which is also the
+// Sarv mailbox's XOAUTH2 credential, and the renderer — which renders untrusted
+// email HTML — never holds it (CASA I-2). This module names the account and the
+// list, then normalises main's raw answer into the shapes the pickers use. Main
+// sends the request to its own configured Sarv API base URL; there is no URL
+// for the renderer to choose.
 //
-// Types mirror `@sarvinbox/core/oauth/sarv-catalog` — if those drift, fix
-// here. Fetch logic is small enough that duplicating it is cheaper than
-// making core safe to import from the renderer.
+// We deliberately DON'T runtime-import from `@sarvinbox/core` here: that
+// package's barrel re-exports imapflow / nodemailer / agent pipeline code,
+// which drags Node's `events` module into the renderer bundle and breaks Vite's
+// ESM loader (see "Dynamic require of 'events' is not supported" errors).
 
 import { createLogger } from '@sarvinbox/core/logger';
 
@@ -68,106 +71,26 @@ interface RawZone {
   is_default?: boolean;
 }
 
+/**
+ * A failed catalog lookup. `status` is the HTTP status (0 when no response
+ * arrived); `code` is Sarv's error code (`insufficient_scope`,
+ * `cai_account_required`, …) or main's own (`sign_in_required`,
+ * `token_unavailable`, `network`, `timeout`).
+ */
 export interface SarvApiErrorShape extends Error {
   status: number;
   code: string;
-  retryAfterSec?: number;
-  detail?: unknown;
 }
 
-async function freshBearer(email: string): Promise<string> {
-  const res = await window.electronAPI.oauth.getAccessToken('sarv', email);
-  if (!res.success || !res.data) {
-    throw new Error(res.error || 'Failed to get Sarv access token');
-  }
-  return res.data.accessToken;
-}
+type SarvCatalogRequest = Parameters<typeof window.electronAPI.oauth.sarvCatalog>[0];
 
-async function getJson<T>(url: string, accessToken: string): Promise<T> {
-  log.info('GET', url);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: 'GET',
-      redirect: 'error',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-      },
-      signal: controller.signal,
-    });
-  } catch (err) {
-    const e = err as Error;
-    // AbortController.abort(), CORS failures, and DNS/connection refused
-    // all end up here. Make the message specific enough to diagnose.
-    const hint = e.name === 'AbortError'
-      ? ` (timed out after 15s — server unreachable or hung)`
-      : e.message.includes('Failed to fetch')
-        ? ` (CORS blocked or connection refused — check the API server is running and allows Origin ${window.location.origin})`
-        : '';
-    throw new Error(`${e.message}${hint} → ${url}`);
-  } finally {
-    clearTimeout(timeout);
-  }
-  log.info(`${url} → ${res.status}`);
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    let code = String(res.status);
-    let message = `Sarv API ${res.status}`;
-    try {
-      const body = JSON.parse(text);
-      // FastAPI's `detail` can be three shapes:
-      //   - "human string"                                            (most 4xx)
-      //   - {error, error_description, message, required_scopes, ...} (oauth)
-      //   - [{loc, msg, ...}, ...]                                    (422)
-      // Pick the human string out of each so we don't end up with
-      // "[object Object]" interpolated into the user-facing toast.
-      const pickStr = (v: unknown): string | null => {
-        if (typeof v === 'string' && v.trim()) return v;
-        if (Array.isArray(v)) {
-          const parts = v.map((d: any) => (typeof d === 'string' ? d : d?.msg)).filter(Boolean);
-          return parts.length ? parts.join('; ') : null;
-        }
-        if (v && typeof v === 'object') {
-          const o = v as any;
-          return o.error_description || o.message || o.error || null;
-        }
-        return null;
-      };
-      // The machine-readable code sits INSIDE `detail` for the oauth shape
-      // (`{detail: {error: 'insufficient_scope', …}}`) — reading only the top
-      // level left every catalog 403 reported as the bare status, which is the
-      // one thing that cannot tell a missing scope from a missing CAI account.
-      const payload = (body && typeof body.detail === 'object' && body.detail) || body;
-      code = payload?.error || payload?.code || body.error || body.code || code;
-      message =
-        pickStr(body.error_description) ||
-        pickStr(body.message) ||
-        pickStr(body.detail) ||
-        message;
-    } catch {
-      // non-JSON body — keep defaults
-    }
-    const err: SarvApiErrorShape = Object.assign(
-      new Error(`${message} → ${url}${text ? ` (${text.slice(0, 200)})` : ''}`),
-      { status: res.status, code, detail: text },
-    );
-    // Log the REASON, not just the status. Only `→ 403` reached app.log before,
-    // and a 403 here is three different problems with three different fixes:
-    // `insufficient_scope` (the token was never granted llm:view — re-authorize),
-    // `cai_account_required` (signed in, but no CAI account — onboarding), and
-    // `invalid_token`. Without the code, "the AI stopped working" is
-    // undiagnosable from the log, which is exactly where it was last time.
-    log.warn(`${url} → ${res.status} code=${code}`, message);
-    throw err;
-  }
-  return (await res.json()) as T;
-}
-
-function trimBase(u: string): string {
-  return u.replace(/\/$/, '');
+/** Main's answer, or a SarvApiErrorShape carrying its status, code and message. */
+async function getCatalog(request: SarvCatalogRequest): Promise<unknown> {
+  const res = await window.electronAPI.oauth.sarvCatalog(request);
+  if (res.ok) return res.body;
+  // Main logs the failure with its code; rebuilt here because an Error's own
+  // properties do not survive IPC.
+  throw Object.assign(new Error(res.message), { status: res.status, code: res.code }) as SarvApiErrorShape;
 }
 
 function normalizeProvider(p: RawProvider): SarvLLMProvider {
@@ -197,63 +120,29 @@ function unwrapArray<T>(body: unknown): T[] {
   return [];
 }
 
-// The Sarv CAI API exposes OAuth-JWT-authenticated catalog endpoints under
-// `/oauth/v1/*`; our OAuth access_token is only accepted there (the routes
-// require the `llm:view` scope), not on the session-authenticated paths the
-// web dashboard uses.
-//
-// Zone-aware filtering: dashboard calls pass zone_id in the query string
-// to scope the catalog to a specific region. The OAuth surface accepts
-// zone_code the same way — server ignores it if zone-filtering isn't
-// wired yet, which is a safe forward-compat posture.
-
-function qsFrom(params: Record<string, string | undefined>): string {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== '');
-  if (entries.length === 0) return '';
-  const sp = new URLSearchParams();
-  for (const [k, v] of entries) sp.set(k, String(v));
-  return `?${sp.toString()}`;
-}
+// The Sarv CAI API exposes the catalog under `/oauth/v1/*` (scope `llm:view`).
+// `zoneCode` is an optional filter, the way the dashboard scopes the catalog
+// to a region; an empty one is dropped rather than sent as a real filter.
 
 export async function listCaiProviders(
-  apiBaseUrl: string,
   email: string,
   zoneCode?: string,
 ): Promise<SarvLLMProvider[]> {
-  const token = await freshBearer(email);
-  const body = await getJson<unknown>(
-    `${trimBase(apiBaseUrl)}/oauth/v1/llm/providers${qsFrom({ zone_code: zoneCode })}`,
-    token,
-  );
+  const body = await getCatalog({ kind: 'providers', email, zoneCode });
   return unwrapArray<RawProvider>(body).map(normalizeProvider);
 }
 
 export async function listCaiModels(
-  apiBaseUrl: string,
   email: string,
   providerCode?: string,
   zoneCode?: string,
 ): Promise<SarvLLMModel[]> {
-  const token = await freshBearer(email);
-  const body = await getJson<unknown>(
-    `${trimBase(apiBaseUrl)}/oauth/v1/llm/models${qsFrom({
-      provider_code: providerCode,
-      zone_code: zoneCode,
-    })}`,
-    token,
-  );
+  const body = await getCatalog({ kind: 'models', email, providerCode, zoneCode });
   return unwrapArray<RawModel>(body).map(normalizeModel);
 }
 
-export async function listCaiZones(
-  apiBaseUrl: string,
-  email: string,
-): Promise<SarvZone[]> {
-  const token = await freshBearer(email);
-  const body = await getJson<unknown>(
-    `${trimBase(apiBaseUrl)}/oauth/v1/zones`,
-    token,
-  );
+export async function listCaiZones(email: string): Promise<SarvZone[]> {
+  const body = await getCatalog({ kind: 'zones', email });
   return unwrapArray<RawZone>(body).map((z) => ({
     code: z.code || z.id || '',
     name: z.name || null,
@@ -297,12 +186,9 @@ export interface SarvZoneSelection {
  * Both the onboarding step and Settings go through here, so they cannot
  * drift on which failures are fatal.
  */
-export async function loadZoneSelection(
-  apiBaseUrl: string,
-  email: string,
-): Promise<SarvZoneSelection> {
+export async function loadZoneSelection(email: string): Promise<SarvZoneSelection> {
   try {
-    const zones = await listCaiZones(apiBaseUrl, email);
+    const zones = await listCaiZones(email);
     return { zones, zoneCode: pickDefaultZone(zones)?.code ?? '' };
   } catch (err) {
     // Still non-fatal (see above), but no longer INVISIBLE. A 403 with

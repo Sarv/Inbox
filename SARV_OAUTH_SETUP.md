@@ -48,8 +48,8 @@ variable but never its value.
 | --- | --- | --- |
 | `SARVINBOX_SARV_CLIENT_ID` | OAuth client id to use instead of the built-in one | built-in production client |
 | `SARVINBOX_SARV_CLIENT_SECRET` | Optional. Sent to the token endpoint only if set — the default registration is a public PKCE client and needs none | unset |
-| `SARVINBOX_SARV_OAUTH_BASE_URL` | Base URL of the OAuth server; `/api/oauth/authorize`, `/api/oauth/token` and `/api/oauth/userinfo` are appended | `https://oauth.sarv.com` |
-| `SARVINBOX_SARV_API_BASE_URL` | Base URL of the Sarv API (models, zones, wallet) | `https://ai.sarv.com` |
+| `SARVINBOX_SARV_OAUTH_BASE_URL` | Base URL of the OAuth server; `/api/oauth/authorize`, `/api/oauth/token`, `/api/oauth/userinfo` and `/api/oauth/revoke` are appended | `https://oauth.sarv.com` |
+| `SARVINBOX_SARV_API_BASE_URL` | Base URL of the Sarv API (the LLM provider, model and zone catalog) | `https://ai.sarv.com` |
 | `SARVINBOX_SARV_EDGE_BASE_URL` | Base URL of the LLM gateway; `/edge/v1/llm` is appended | Sarv's production edge |
 
 ```bash
@@ -155,6 +155,25 @@ The flow relies on the standard OAuth 2.1 server-side guarantees — per-client
 `code_challenge` / `code_verifier` (S256) matching. On the client side Sarv Inbox
 sends a random `state` and rejects a callback where it doesn't round-trip
 unchanged.
+
+The access token never leaves the main process. It is also the mailbox's
+XOAUTH2 credential (`email:read`, `email:send`, `email:delete`, …), and the
+renderer displays untrusted email HTML, so the renderer never receives it —
+there is no IPC channel that returns a token. Sarv AI requests and catalog
+lookups are made by the main process (`ai:providerFetch`, `oauth:sarvCatalog`):
+the renderer names the account, and main attaches the token only for Sarv AI
+endpoints (a zone edge host `<zone>-ai-edge.sarv.com` over https on the default
+port, or the configured edge base URL; only under `/edge/v1/llm`; never a URL
+carrying credentials), fetches the catalog only from its own configured API
+base URL, and refuses redirects. On a 401 it refreshes the token and retries
+once.
+
+Removing a Sarv account deletes its tokens from this device and then revokes the
+refresh token at `/api/oauth/revoke` (RFC 7009, JSON body). A refresh already in
+flight is allowed to finish first, so the two never present one token twice, which
+Sarv's reuse detector would treat as theft. A `200` with `{"revoked":false}` means
+the server no longer knows the token, and a failure never blocks the removal: it
+is logged as failed and the user is told.
 
 [g-native]: https://developers.google.com/identity/protocols/oauth2/native-app
 

@@ -37,7 +37,7 @@ const baseElectronAPI = (over: any = {}) => ({
   secureCreds: { delete: vi.fn().mockResolvedValue(undefined) },
   aiSecrets: { delete: vi.fn(), set: vi.fn() },
   ai: { setProviderConfigured: vi.fn().mockResolvedValue(undefined) },
-  agent: { setAIConfig: vi.fn().mockResolvedValue(undefined) },
+  agent: { setAIConfig: vi.fn().mockResolvedValue(undefined), clearAIConfig: vi.fn().mockResolvedValue({ success: true }) },
   accounts: { remove: vi.fn().mockResolvedValue({ success: true }) },
   ...over,
 });
@@ -317,6 +317,166 @@ describe('removeAccountById', () => {
     });
   });
 
+  // Sarv is mailbox AND AI, so removing the mailbox ends the AI provider too. Main
+  // reports "no AI" only as a change, and has already done so while the provider
+  // was still here to re-push. Breaks: AI Assist stays on, doing nothing, and
+  // nobody says so.
+  describe('the AI provider that ran on the removed account', () => {
+    const SARV_PROVIDER = { id: 'p1', type: 'sarv', name: 'Sarv', model: 'm', isDefault: true, authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: 'me@sarv.com' };
+    const SARV_ACCOUNT = account('a', { email: 'me@sarv.com', imapConfig: { oauthProvider: 'sarv', authMethod: 'oauth2' } });
+    const banner = async () => (await import('../../../../../src/services/ai-service')).getAIHealth();
+    const resetBanner = async () => (await import('../../../../../src/services/ai-service')).reportAIHealthy();
+    beforeEach(resetBanner);
+    afterEach(resetBanner);
+
+    it('raises the AI-inactive notice when no provider is left and AI Assist is on', async () => {
+      const api = baseElectronAPI();
+      const { state } = await loadSlice({ accounts: [SARV_ACCOUNT], activeAccountId: 'a', __aiProviders: [SARV_PROVIDER] }, api);
+      await state.removeAccountById('a');
+      expect(await banner()).toMatchObject({ healthy: false, reason: expect.stringContaining('The account you removed') });
+      // Breaks: main keeps its own copy of the provider until the next restart.
+      await vi.waitFor(() => expect(api.agent.clearAIConfig).toHaveBeenCalled());
+    });
+
+    // Breaks: a deliberate "AI off" gets a banner about AI being off.
+    it('stays quiet when AI Assist is off', async () => {
+      const { state } = await loadSlice({ accounts: [SARV_ACCOUNT], activeAccountId: 'a', __aiProviders: [SARV_PROVIDER] }, baseElectronAPI());
+      const { saveAgentSettings, loadAgentSettings } = await import('../../../../../src/services/agent-settings');
+      saveAgentSettings({ ...loadAgentSettings(), enabled: false });
+      await state.removeAccountById('a');
+      expect((await banner()).healthy).toBe(true);
+    });
+
+    // Breaks: a banner though AI simply moved on to the provider that remains.
+    it('stays quiet and hands main the next provider when another one remains', async () => {
+      const api = baseElectronAPI();
+      const { state } = await loadSlice({
+        accounts: [SARV_ACCOUNT],
+        activeAccountId: 'a',
+        __aiProviders: [SARV_PROVIDER, { id: 'p2', type: 'gemini', name: 'Gemini', model: 'g', isDefault: false, authMethod: 'apiKey' }],
+      }, api);
+      await state.removeAccountById('a');
+      expect((await banner()).healthy).toBe(true);
+      expect(api.agent.setAIConfig).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'p2' }));
+    });
+
+    // Multi-account. Breaks: removing one Sarv mailbox stops AI on another's sign-in.
+    it('leaves a provider on another Sarv sign-in alone', async () => {
+      const { state } = await loadSlice({
+        accounts: [SARV_ACCOUNT, account('b', { email: 'other@sarv.com', imapConfig: { oauthProvider: 'sarv', authMethod: 'oauth2' } })],
+        activeAccountId: 'a',
+        __aiProviders: [{ ...SARV_PROVIDER, oauthEmail: 'other@sarv.com' }],
+      }, baseElectronAPI());
+      await state.removeAccountById('a');
+      expect(JSON.parse(localStorage.getItem(AI_SETTINGS_KEY)!).providers).toHaveLength(1);
+      expect((await banner()).healthy).toBe(true);
+    });
+
+    // A failed wipe keeps the account. Breaks: its provider is pruned and AI lost
+    // although the account (and its sign-in) stayed.
+    it('keeps the provider, and no banner, when the removal fails', async () => {
+      const api = baseElectronAPI({ accounts: { remove: vi.fn().mockResolvedValue({ success: false, error: 'disk full' }) } });
+      const { state } = await loadSlice({ accounts: [SARV_ACCOUNT], activeAccountId: 'a', __aiProviders: [SARV_PROVIDER] }, api);
+      await expect(state.removeAccountById('a')).rejects.toThrow('disk full');
+      expect(JSON.parse(localStorage.getItem(AI_SETTINGS_KEY)!).providers).toHaveLength(1);
+      expect((await banner()).healthy).toBe(true);
+    });
+  });
+
+  // The wait for the provider's answer about the sign-in can be 10 s, offline. What
+  // happened meanwhile must survive. Breaks: removing B writes A back to the list
+  // and to disk after main deleted A's data, or drops an account added meanwhile.
+  describe('while another removal is waiting on the network', () => {
+    const waitingRemoval = () => {
+      const pending = new Map<string, (value: { success: boolean }) => void>();
+      const remove = vi.fn((id: string) => new Promise<{ success: boolean }>((resolve) => { pending.set(id, resolve); }));
+      return { pending, api: baseElectronAPI({ accounts: { remove } }) };
+    };
+    const savedIds = () => JSON.parse(localStorage.getItem('sarvinbox-accounts')!).map((a: { id: string }) => a.id);
+
+    it('a removal that finishes last does not bring back the one that finished first', async () => {
+      const { pending, api } = waitingRemoval();
+      const { state } = await loadSlice({ accounts: [account('keep'), account('a'), account('b')], activeAccountId: 'keep' }, api);
+
+      const first = state.removeAccountById('a');
+      const second = state.removeAccountById('b');
+      await vi.waitFor(() => expect(pending.size).toBe(2));
+      pending.get('a')!({ success: true });
+      await first;
+      pending.get('b')!({ success: true });
+      await second;
+
+      expect(state.accounts.map((x: any) => x.id)).toEqual(['keep']);
+      expect(savedIds()).toEqual(['keep']);
+      expect(state.deletingAccountIds).toEqual([]);
+    });
+
+    it('keeps an account added during the wait', async () => {
+      const { pending, api } = waitingRemoval();
+      const { state } = await loadSlice({ accounts: [account('keep'), account('a')], activeAccountId: 'keep' }, api);
+
+      const removal = state.removeAccountById('a');
+      await vi.waitFor(() => expect(pending.size).toBe(1));
+      state.accounts = [...state.accounts, account('added')];
+      pending.get('a')!({ success: true });
+      await removal;
+
+      expect(state.accounts.map((x: any) => x.id)).toEqual(['keep', 'added']);
+    });
+
+    // Breaks: the active account moves onto one that is itself being deleted.
+    it('does not switch to an account that is also being removed', async () => {
+      const { pending, api } = waitingRemoval();
+      const { state } = await loadSlice({ accounts: [account('a'), account('b'), account('keep')], activeAccountId: 'a' }, api);
+
+      const first = state.removeAccountById('a');
+      const second = state.removeAccountById('b');
+      await vi.waitFor(() => expect(pending.size).toBe(2));
+      pending.get('a')!({ success: true });
+      await first;
+
+      expect(state.selectAccount).toHaveBeenCalledExactlyOnceWith('keep');
+      pending.get('b')!({ success: true });
+      await second;
+      expect(state.accounts.map((x: any) => x.id)).toEqual(['keep']);
+    });
+
+    // Breaks: the user switched away during the wait and is moved again when it ends.
+    it('leaves the active account alone when the user switched during the wait', async () => {
+      const { pending, api } = waitingRemoval();
+      const { state } = await loadSlice({ accounts: [account('a'), account('keep'), account('other')], activeAccountId: 'a' }, api);
+
+      const removal = state.removeAccountById('a');
+      await vi.waitFor(() => expect(pending.size).toBe(1));
+      state.activeAccountId = 'other';
+      pending.get('a')!({ success: true });
+      await removal;
+
+      expect(state.selectAccount).not.toHaveBeenCalled();
+      expect(state.activeAccountId).toBe('other');
+      expect(state.accounts.map((x: any) => x.id)).toEqual(['keep', 'other']);
+    });
+
+    // The last two accounts, the active one first. Breaks: it selects the other
+    // one, and when that finishes the app is left pointing at an account that is gone.
+    it('ends with no active account when the last two are removed together', async () => {
+      const { pending, api } = waitingRemoval();
+      const { state } = await loadSlice({ accounts: [account('a'), account('b')], activeAccountId: 'a' }, api);
+
+      const first = state.removeAccountById('a');
+      const second = state.removeAccountById('b');
+      await vi.waitFor(() => expect(pending.size).toBe(2));
+      pending.get('a')!({ success: true });
+      await first;
+      pending.get('b')!({ success: true });
+      await second;
+
+      expect(state.selectAccount).not.toHaveBeenCalled();
+      expect(state.activeAccountId).toBeNull();
+      expect(state.accounts).toEqual([]);
+    });
+  });
+
   it('leaves AI providers untouched when the removed account did not back one', async () => {
     const api = baseElectronAPI();
     const { state } = await loadSlice(
@@ -334,5 +494,26 @@ describe('removeAccountById', () => {
 
     const providers = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY)!).providers;
     expect(providers).toHaveLength(1);
+  });
+});
+
+// CASA I-6: Settings learns from removeAccountById what happened to the removed
+// account's grant, to tell the user when Google's revocation did not go through.
+describe('removeAccountById — revocation outcome', () => {
+  // Breaks: the outcome main reports never reaches Settings, so no notice is shown.
+  it.each(['revoked', 'failed', 'unsupported', 'skipped'])('resolves with main\'s %s outcome', async (outcome) => {
+    const api = baseElectronAPI({ accounts: { remove: vi.fn().mockResolvedValue({ success: true, revocation: outcome }) } });
+    const { state } = await loadSlice({ accounts: [account('a'), account('b')], activeAccountId: 'a' }, api);
+    await expect(state.removeAccountById('b')).resolves.toBe(outcome);
+    expect(state.accounts.map((a: any) => a.id)).toEqual(['a']);
+  });
+
+  // Breaks: a password account (no grant), an older main without the field, or a
+  // no-op removal makes Settings show a revocation notice.
+  it('resolves undefined when main reports none, and for a no-op removal', async () => {
+    const api = baseElectronAPI();
+    const { state } = await loadSlice({ accounts: [account('a'), account('b')], activeAccountId: 'a' }, api);
+    await expect(state.removeAccountById('b')).resolves.toBeUndefined();
+    await expect(state.removeAccountById('gone')).resolves.toBeUndefined();
   });
 });

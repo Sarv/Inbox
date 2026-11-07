@@ -21,7 +21,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, renameSync, statSync, unli
 import { dirname, join } from 'path';
 import { inspect } from 'util';
 
-import { isLogLevel, redactEmailAddresses, redactSecrets } from '@sarvinbox/core';
+import { isLogLevel, redactEmailAddresses, redactSecrets, toOneLine } from '@sarvinbox/core';
 import { app } from 'electron';
 import pino from 'pino';
 
@@ -134,23 +134,6 @@ function restrictLogFileModes(): void {
   }
 }
 
-/**
- * One forwarded record = one line in app.log. CR and LF become the visible
- * escapes `\r` / `\n`, and every other control character (ESC, NUL, the
- * Unicode line/paragraph separators, …) becomes `\uXXXX`, so text from the
- * renderer can neither start a fake line that reads as the main process's own
- * nor drive a terminal that later `cat`s the file.
- */
-function toOneLine(text: string): string {
-  // eslint-disable-next-line no-control-regex -- matching control characters is the point
-  return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => {
-    if (c === '\n') return '\\n';
-    if (c === '\r') return '\\r';
-    if (c === '\t') return c;
-    return `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`;
-  });
-}
-
 /** `text` cut to `max` characters, saying so when it was. */
 function capLength(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}… [truncated]`;
@@ -221,7 +204,7 @@ function write(method: string, args: unknown[]): void {
  * app or block the event loop.
  *
  * The record is untrusted (any renderer code can send one), so it can't forge
- * the file's structure: the text is ONE line (see toOneLine) capped at 8 KB,
+ * the file's structure: the text is ONE line (core's toOneLine) capped at 8 KB,
  * the level must be one of the logger's levels (anything else is INFO), and the
  * name is one line without brackets, at most 64 characters. Main-process
  * lines (write above) are trusted and keep their multi-line stacks.

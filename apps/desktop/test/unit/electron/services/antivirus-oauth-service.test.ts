@@ -1,10 +1,12 @@
 import http from 'node:http';
+import net from 'node:net';
 
 import type { AntivirusSetupStatus } from '@sarvinbox/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AntivirusOAuthService, runScannerLoopbackFlow, SARV_SCANNER_EXTENSION_ID, SARV_SCANNER_ORIGIN } from '../../../../electron/services/antivirus-oauth-service';
 import { LOOPBACK_CALLBACK_CSP } from '../../../../electron/utils/loopback-callback-headers';
+import { RESPONSE_FLUSH_GRACE_MS } from '../../../../electron/utils/loopback-server-close';
 
 const EMPTY: AntivirusSetupStatus = { configured: false, enabled: false, endpoint: '', allowedAccountIds: [], allowBody: false,
   accounts: [{ id: 'account-a', email: 'a@example.test', name: 'Account A' }, { id: 'account-b', email: 'b@example.test', name: 'Account B' }] };
@@ -302,6 +304,96 @@ describe('exact scanner loopback callback', () => {
     } });
     await expect(pending).rejects.toThrow(/cancelled|incomplete|could not open/);
     await expect(fetch(redirect)).rejects.toThrow();
+  });
+
+  /**
+   * Watch the next listener: `destroy` each time one of its sockets is destroyed, `finish` when a response it
+   * wrote has reached the OS. With `stall`, its responses are never ended, as for a client that stops reading.
+   */
+  const watchNextListener = (options: { stall?: boolean } = {}) => {
+    const events: Array<'destroy' | 'finish'> = [];
+    const realCreateServer = http.createServer;
+    const spy = vi.spyOn(http, 'createServer').mockImplementationOnce(((handler: http.RequestListener) => {
+      const server = realCreateServer();
+      server.on('connection', (socket: net.Socket) => {
+        const destroy = socket.destroy.bind(socket);
+        socket.destroy = ((error?: Error) => { events.push('destroy'); return destroy(error); }) as typeof socket.destroy;
+      });
+      server.on('request', (_request, response) => {
+        response.once('finish', () => events.push('finish'));
+        if (options.stall) response.end = (() => response) as typeof response.end;
+      });
+      server.on('request', handler);
+      return server;
+    }) as typeof http.createServer);
+    return { events, restore: () => spy.mockRestore() };
+  };
+
+  // Breaks (Windows): these pages are written right before the flow settles, inside the same handler. Closing every
+  // connection straight after end() can cancel the overlapped write, so the user sees a reset instead of being told
+  // to return to Inbox. On POSIX the write is synchronous, so only the ORDER of events shows it. Same on Windows CI.
+  it.each([
+    ['declined', 'error=access_denied', 200, /was declined/],
+    ['missing-code', '', 400, /was incomplete/],
+    ['duplicate-code', 'code=a&code=b', 400, /was incomplete/],
+  ] as const)('delivers the %s page before dropping its connection', async (_label, query, status, page) => {
+    const watch = watchNextListener();
+    try {
+      const controller = new AbortController(); let reply: Promise<{ status: number; body: string }> | undefined;
+      const pending = runScannerLoopbackFlow(value => value, 'synthetic-state', controller.signal, { port: 0, openExternal: async redirect => {
+        reply = fetch(redirect + '?state=synthetic-state&' + query).then(async answer => ({ status: answer.status, body: await answer.text() }));
+      } });
+      await expect(pending).rejects.toThrow(/cancelled|incomplete/);
+      const answered = await reply!;
+      expect(answered.status).toBe(status);
+      expect(answered.body).toMatch(page);
+      await vi.waitFor(() => expect(watch.events).toContain('destroy'));
+      expect(watch.events[0]).toBe('finish');
+    } finally { watch.restore(); }
+  });
+
+  // Breaks if the fix lost the drop on the success path, which has none of its own: a browser's preconnect or a
+  // request that never finished would keep the closed listener and its handler alive, with no port behind it.
+  it.each(['success', 'declined'] as const)('drops silent and half-open connections after a %s callback too', async reason => {
+    const controller = new AbortController(); let silentClosed = false; let halfOpenClosed = false;
+    const sockets: net.Socket[] = [];
+    const open = async (port: number, onClose: () => void, data?: string) => {
+      const socket = net.connect(port, '127.0.0.1'); socket.on('error', () => {}); socket.on('close', onClose);
+      await new Promise(resolve => socket.once('connect', resolve));
+      if (data) socket.write(data);
+      sockets.push(socket);
+    };
+    const pending = runScannerLoopbackFlow(value => value, 'synthetic-state', controller.signal, { port: 0, openExternal: async redirect => {
+      const port = Number(new URL(redirect).port);
+      await open(port, () => { silentClosed = true; });
+      await open(port, () => { halfOpenClosed = true; }, 'GET /auth/callback HTTP/1.1\r\nHost: 127.0.0.1\r\n');
+      await (await fetch(redirect + '?state=synthetic-state&' + (reason === 'success' ? 'code=synthetic-code' : 'error=access_denied'))).text();
+    } });
+    if (reason === 'success') await expect(pending).resolves.toMatchObject({ code: 'synthetic-code' });
+    else await expect(pending).rejects.toThrow(/cancelled/);
+    try {
+      await vi.waitFor(() => { expect(silentClosed).toBe(true); expect(halfOpenClosed).toBe(true); });
+    } finally { sockets.forEach(socket => socket.destroy()); }
+  });
+
+  // Breaks if a browser that stops reading the error page can hold the listener: the wait is bounded, and short.
+  it('drops a connection whose error page never finishes once the grace period is over', async () => {
+    const watch = watchNextListener({ stall: true });
+    try {
+      const controller = new AbortController(); let closed = false; let client: net.Socket | undefined;
+      const pending = runScannerLoopbackFlow(value => value, 'synthetic-state', controller.signal, { port: 0, openExternal: async redirect => {
+        const url = new URL(redirect);
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        client = net.connect(Number(url.port), '127.0.0.1'); client.on('error', () => {}); client.on('close', () => { closed = true; });
+        client.write('GET ' + url.pathname + '?state=synthetic-state&error=access_denied HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n');
+      } });
+      await expect(pending).rejects.toThrow(/cancelled/);
+      vi.advanceTimersByTime(RESPONSE_FLUSH_GRACE_MS - 1);
+      for (let i = 0; i < 5; i += 1) await new Promise(resolve => setImmediate(resolve));
+      expect(closed).toBe(false);
+      vi.advanceTimersByTime(1);
+      await vi.waitFor(() => expect(closed).toBe(true));
+    } finally { watch.restore(); vi.useRealTimers(); }
   });
 
   // Regression: silently choosing another local callback would bypass the dedicated client's exact registration.

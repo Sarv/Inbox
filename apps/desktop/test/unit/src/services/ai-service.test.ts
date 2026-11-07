@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { classifyAIError } from '@sarvinbox/core/ai-error';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { addProvider, getDefaultProvider, loadAISettings, makeAICompletion, parseSearchQuery, pruneOrphanedOAuthProviders, removeOAuthProvidersForAccount } from '../../../../src/services/ai-service';
+import { addProvider, aiProvidersUsingSignIn, getDefaultProvider, loadAISettings, makeAICompletion, parseSearchQuery, pruneOrphanedOAuthProviders, removeOAuthProvidersForAccount, removeProvider, syncAIProviderToMain } from '../../../../src/services/ai-service';
 
 // removeOAuthProvidersForAccount is the fix for the "delete account → app
 // beachballs" bug: the Sarv account is BOTH mailbox AND LLM provider, so when the
@@ -86,6 +86,56 @@ describe('Gemini HTTP failures carry their status', () => {
     expect(request.url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-model:generateContent');
     expect(JSON.stringify(request)).not.toContain('key-123');
     expect(provider.apiKey).toBe('');
+  });
+});
+
+describe('syncAIProviderToMain', () => {
+  const stubMain = (over: Record<string, unknown> = {}) => {
+    const api = {
+      ai: { setProviderConfigured: vi.fn().mockResolvedValue({ success: true }), ...over },
+      agent: { setAIConfig: vi.fn().mockResolvedValue({ success: true }), clearAIConfig: vi.fn().mockResolvedValue({ success: true }) },
+    };
+    Object.assign((globalThis as any).window.electronAPI, api);
+    return api;
+  };
+
+  // Breaks: main keeps using the removed provider until the next restart.
+  it('tells main to forget when no provider is left', async () => {
+    const api = stubMain();
+    await syncAIProviderToMain();
+    expect(api.ai.setProviderConfigured).toHaveBeenCalledWith(false);
+    expect(api.agent.clearAIConfig).toHaveBeenCalledOnce();
+    expect(api.agent.setAIConfig).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a provider that exists has its copy dropped on an ordinary sync.
+  it('pushes the default provider, and forgets nothing, when there is one', async () => {
+    addProvider('sarv', '', 'sarv-model', { authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: 'me@sarv.com' });
+    const api = stubMain();
+    await syncAIProviderToMain();
+    expect(api.agent.setAIConfig).toHaveBeenCalledWith(expect.objectContaining({ oauthEmail: 'me@sarv.com' }));
+    expect(api.agent.clearAIConfig).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a provider removed during the first await is pushed back to main.
+  it('reads the provider after the wait, not before it', async () => {
+    const provider = addProvider('sarv', '', 'sarv-model', { authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: 'me@sarv.com' });
+    const api = stubMain({ setProviderConfigured: vi.fn(async () => { removeProvider(provider.id); return { success: true }; }) });
+    await syncAIProviderToMain();
+    expect(api.agent.setAIConfig).not.toHaveBeenCalled();
+    expect(api.agent.clearAIConfig).toHaveBeenCalledOnce();
+  });
+});
+
+describe('aiProvidersUsingSignIn', () => {
+  // Breaks: the remove dialog warns about the wrong sign-in, or misses a case variant.
+  it('finds the OAuth providers on exactly this sign-in, whatever the case', () => {
+    addProvider('sarv', '', 'one', { authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: 'Me@Sarv.com' });
+    addProvider('sarv', '', 'two', { authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: 'other@sarv.com' });
+    addProvider('gemini', 'k', 'three');
+    expect(aiProvidersUsingSignIn('sarv', 'me@sarv.com').map((p) => p.model)).toEqual(['one']);
+    expect(aiProvidersUsingSignIn('', 'me@sarv.com')).toEqual([]);
+    expect(aiProvidersUsingSignIn('sarv', '')).toEqual([]);
   });
 });
 

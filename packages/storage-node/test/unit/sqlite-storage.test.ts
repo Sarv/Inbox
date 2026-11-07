@@ -332,10 +332,8 @@ describe('SQLiteStorage before initialize()', () => {
 // and a legacy PLAINTEXT DB that gets rekeyed in place on first keyed open —
 // the in-place migration is irreversible, so it has to leave every row readable.
 //
-// NOTE: the fallback SQLite engine used by these tests has NO cipher (see
-// test-support/test-db.ts — `key=`/`rekey=` are inert pragmas there), so this
-// asserts only that the keyed code path runs and preserves data. It does NOT
-// prove at-rest encryption works.
+// These run on the real cipher build (test-support/test-db.ts has no fallback
+// engine any more). The settings themselves are proved in db-encryption.test.ts.
 describe('SQLiteStorage encryption config', () => {
   let dir: string;
 
@@ -361,6 +359,75 @@ describe('SQLiteStorage encryption config', () => {
     await keyed.initialize();
     expect((await keyed.getFolders()).map((f) => f.path).sort()).toEqual(['INBOX', 'Sent']);
     await keyed.close();
+  });
+
+  /**
+   * Keys a mailbox the way every release before the cipher pin did: `new Database`,
+   * then `key`, with no cipher pragma. Written out so it cannot follow the helper.
+   */
+  const KEY = 'a'.repeat(32) + 'b'.repeat(32);
+  function openLikeBeforeThePin(path: string): InstanceType<typeof TestDatabaseCtor> {
+    const db = new TestDatabaseCtor(path);
+    db.pragma(`key='${KEY}'`);
+    return db;
+  }
+
+  // Breaks an existing user's mailbox on the first launch after the cipher pin. The
+  // file is the real thing: full schema, every migration, written through the old
+  // key sequence, then opened by initialize() as the app does at startup.
+  it('opens a mailbox encrypted before the cipher pin and keeps its mail', async () => {
+    const dbPath = join(dir, 'existing.db');
+    const old = openLikeBeforeThePin(dbPath);
+    old.exec('CREATE TABLE written_before_the_pin (v TEXT)');
+    old.prepare('INSERT INTO written_before_the_pin (v) VALUES (?)').run('kept');
+    old.close();
+
+    const storage = new SQLiteStorage({ dbPath, key: KEY });
+    await storage.initialize();
+    await storage.syncFolders([makeFolder('f-inbox', 'INBOX')]);
+    await storage.insertEmail(makeEmail({ id: 'after-pin' }));
+    await storage.close();
+
+    const reopened = openLikeBeforeThePin(dbPath);
+    expect(reopened.prepare('SELECT v FROM written_before_the_pin').get()).toEqual({ v: 'kept' });
+    expect(reopened.prepare('SELECT id FROM emails').all()).toEqual([{ id: 'after-pin' }]);
+    reopened.close();
+  });
+
+  // Breaks multi-account: both mailboxes attach one contact directory, so a contact
+  // written through one must read through the other after both are pinned.
+  it('shares one encrypted contact directory between two pinned accounts', async () => {
+    const first = new SQLiteStorage({ dbPath: join(dir, 'acct1.db'), key: KEY });
+    await first.initialize();
+    await first.upsertContact({ email: 'both@example.test', name: 'Both' });
+
+    const second = new SQLiteStorage({ dbPath: join(dir, 'acct2.db'), key: KEY });
+    await second.initialize();
+    expect((await second.getContactByEmail('both@example.test'))?.name).toBe('Both');
+
+    await first.close();
+    await second.close();
+  });
+
+  // Breaks CLAUDE.md's rule that an unreadable store is not an empty one. A wrong key
+  // has to reject initialize(), where the swallowing reads downstream cannot turn it
+  // into an empty mailbox, and it must leave the file for the right key: a locked
+  // keychain is transient and the next launch has to find everything still there.
+  it('rejects a wrong key at open, and the right key still opens the mailbox', async () => {
+    const dbPath = join(dir, 'locked.db');
+    const good = new SQLiteStorage({ dbPath, key: KEY });
+    await good.initialize();
+    await good.syncFolders([makeFolder('f-inbox', 'INBOX')]);
+    await good.close();
+
+    const wrong = new SQLiteStorage({ dbPath, key: 'c'.repeat(64) });
+    await expect(wrong.initialize()).rejects.toThrow(/file is not a database/);
+    expect(wrong.isInitialized()).toBe(false);
+
+    const retry = new SQLiteStorage({ dbPath, key: KEY });
+    await retry.initialize();
+    expect((await retry.getFolders()).map((f) => f.path)).toEqual(['INBOX']);
+    await retry.close();
   });
 });
 

@@ -8,7 +8,13 @@ import { addValidatedProvider, loadAISettings, testProvider } from '../../../../
 import { checkAIConnection, loadSarvAIConnection, makeAIConnection, type OnboardingAIConnection } from '../../../../../src/services/onboarding-ai-connection';
 import { act, cleanup, fire, render, settle, toggle, typeInto, type Mounted } from '../../../../helpers/render';
 
-vi.mock('../../../../../src/services/ai-consent', () => ({ setAiConsent: vi.fn(), SARV_AI_DISCLOSURE: 'Sarv processes new mail from every connected account.' }));
+// Changed deliberately (CASA I-7): the component now builds the non-Sarv
+// disclosure with ai-consent's providerAIDisclosure, so the real one is kept;
+// only the consent write and the Sarv text are still stubbed.
+vi.mock('../../../../../src/services/ai-consent', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../../src/services/ai-consent')>()),
+  setAiConsent: vi.fn(), SARV_AI_DISCLOSURE: 'Sarv processes new mail from every connected account.',
+}));
 vi.mock('../../../../../src/services/ai-service', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../../../src/services/ai-service')>();
   return { ...actual, loadAISettings: vi.fn(() => ({ providers: [] })), addValidatedProvider: vi.fn(), testProvider: vi.fn() };
@@ -95,6 +101,33 @@ describe('AI onboarding', () => {
     expect(testProvider).toHaveBeenCalledWith(expect.objectContaining({ model: 'demo-model', apiKey: 'synthetic-test-key' }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(setAiConsent).toHaveBeenLastCalledWith('granted');
     expect(onComplete).toHaveBeenLastCalledWith({ enabled: true, providerName: 'OpenAI', modelName: 'Demo model' });
+  });
+
+  // CASA I-7: the consent the user ticks says what actually happens. Breaks:
+  // the OpenAI consent stops saying new mail is sent as it arrives, a Custom
+  // provider's consent hides the server mail goes to, or Sarv's text is lost.
+  const consentText = (view: Mounted) => view.find('input[type="checkbox"]')!.closest('label')!.textContent || '';
+  it('discloses, per provider, that new messages go to it as they arrive', async () => {
+    const openai = render(<Harness />);
+    await configureOpenAI(openai);
+    expect(consentText(openai)).toContain('to OpenAI as they arrive, for every connected account');
+    expect(consentText(openai)).not.toContain('(');
+    cleanup();
+
+    vi.mocked(checkAIConnection).mockImplementationOnce(async (connection) => ({ ...connection, verified: true, manualModel: true, models: [] }));
+    const custom = render(<Harness />);
+    fire(button(custom, 'Custom provider'), 'click');
+    typeInto(custom.find('input[placeholder="My AI server"]'), 'Company AI');
+    typeInto(custom.find('input[type="url"]'), 'https://llm.example.net:8443/v1');
+    typeInto(custom.find('input[type="password"]'), 'synthetic-test-key');
+    fire(button(custom, 'Check connection'), 'click');
+    await settle();
+    expect(consentText(custom)).toContain('to Company AI (llm.example.net:8443) as they arrive');
+    cleanup();
+
+    const sarvView = render(<Harness stage="model" preferSarv preferSarvEmail="demo@sarv.example" />);
+    await settle();
+    expect(consentText(sarvView)).toContain('Sarv processes new mail from every connected account.');
   });
 
   // Sarv email OAuth is an existing connection, never another browser login.

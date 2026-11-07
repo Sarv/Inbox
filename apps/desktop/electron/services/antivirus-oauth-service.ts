@@ -3,6 +3,7 @@ import http from 'node:http';
 import { generatePkcePair, generateState, type AntivirusSetupStatus } from '@sarvinbox/core';
 
 import { setLoopbackCallbackHeaders } from '../utils/loopback-callback-headers';
+import { closeLoopbackServer, trackLoopbackResponse, type AnsweringResponses } from '../utils/loopback-server-close';
 
 import type { AntivirusScanService } from './antivirus-scan-service';
 import { hasControlCharacters, object } from './antivirus-transport';
@@ -33,7 +34,9 @@ export function runScannerLoopbackFlow(
     if (signal.aborted) { reject(cancelled()); return; }
     let settled = false;
     let redirectUri = '';
+    const answering: AnsweringResponses = new Map();
     const server = http.createServer((request, response) => {
+      trackLoopbackResponse(answering, response);
       setLoopbackCallbackHeaders(response);
       response.setHeader('Content-Type', 'text/plain; charset=utf-8');
       let callback: URL;
@@ -61,8 +64,10 @@ export function runScannerLoopbackFlow(
       if (settled) return;
       settled = true;
       signal.removeEventListener('abort', abort);
-      server.close();
-      if (error) { server.closeAllConnections(); reject(error); }
+      // Settling happens inside the handler that just wrote the page the browser is
+      // waiting for, so this must not cut that page off. See closeLoopbackServer.
+      closeLoopbackServer(server, answering);
+      if (error) reject(error);
       else resolve({ code: code!, redirectUri });
     };
     const abort = () => finish(cancelled());

@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 
 import { useOAuthSignIn } from '../../hooks/useOAuthSignIn';
 import { useReauthSessions } from '../../hooks/useReauthSessions';
+import { aiProvidersUsingSignIn } from '../../services/ai-service';
 import { useEmailStore } from '../../store/email-store';
 import { accountHost, isAccountEmailDuplicated, effectiveSmtpConfig } from '../../store/helpers';
 import { findReauthSession } from '../../utils/reauth-sessions';
@@ -15,6 +16,7 @@ import { SmtpConfigForm } from '../SmtpConfigForm';
 import { Tooltip } from '../Tooltip';
 import { VaultPasswordField } from '../VaultPasswordField';
 
+import { RemovalAccessNote, RevokeFailedNotice, revokeFailureWorthNoticing } from './AccountRemovalNotes';
 import { AliasEditor } from './AliasEditor';
 import type { SettingsTabProps } from './types';
 
@@ -38,6 +40,8 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
   const [showSmtpForm, setShowSmtpForm] = useState(false);
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
+  // An account was removed but its provider did not confirm the revocation.
+  const [revokeFailed, setRevokeFailed] = useState<{ email: string; provider: 'gmail' | 'sarv' } | null>(null);
   const [showSmtpRemoveConfirm, setShowSmtpRemoveConfirm] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   // Which account the popup is showing. Kept separate from activeAccountId so the
@@ -262,11 +266,19 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
   const handleImapDisconnect = async () => {
     // Remove the account the popup is showing (falls back to the active one).
     const targetId = detailsAccountId || activeAccountId;
+    const target = accounts.find((a) => a.id === targetId);
     try {
       // OAuth sign-out (local token delete + revocation at the provider) happens
       // in main as part of accounts:remove, for whichever account is removed.
-      if (targetId) await removeAccountById(targetId);
-      else await disconnect();
+      if (targetId) {
+        const revocation = await removeAccountById(targetId);
+        // Google and Sarv are the providers that revoke. If it didn't happen,
+        // the grant may still be live there, so the user is told.
+        const provider = target?.imapConfig?.oauthProvider;
+        if (revocation === 'failed' && target && revokeFailureWorthNoticing(provider)) {
+          setRevokeFailed({ email: target.email, provider });
+        }
+      } else await disconnect();
       setImapForm({ host: 'imap.gmail.com', port: '993', username: '', password: '', security: 'ssl' });
     } catch (err) {
       setImapError((err as Error).message || 'Failed to disconnect');
@@ -339,6 +351,7 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
         </div>
       </div>
       {showAddAccount && <AddAccountModal onClose={() => setShowAddAccount(false)} />}
+      {revokeFailed && <RevokeFailedNotice {...revokeFailed} onDismiss={() => setRevokeFailed(null)} />}
 
       {/* Remove-account confirmation — destructive, so confirm first and spell
           out that sending (SMTP) + locally cached mail go with it. */}
@@ -346,9 +359,13 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
         <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" onClick={() => setShowRemoveConfirm(false)}>
           <div className="w-full max-w-sm rounded-lg border border-border bg-background p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-lg font-semibold mb-2">Remove account?</h2>
-            <p className="text-sm text-muted-foreground mb-5">
+            <p className="text-sm text-muted-foreground mb-3">
               This disconnects <span className="font-medium text-foreground">{detailAccount?.email || imapConfig?.username}</span> and removes its sending (SMTP) settings. Locally cached mail for this account will be cleared. You can add it again anytime.
             </p>
+            <RemovalAccessNote
+              oauthProvider={dIsOAuth ? (dOauthProvider ?? 'oauth') : undefined}
+              powersAI={!!dOauthProvider && !!detailAccount?.email && aiProvidersUsingSignIn(dOauthProvider, detailAccount.email).length > 0}
+            />
             <div className="flex items-center justify-end gap-2">
               <button onClick={() => setShowRemoveConfirm(false)} className="px-3 py-1.5 text-sm rounded-md border border-border hover:bg-muted/50">Cancel</button>
               <button

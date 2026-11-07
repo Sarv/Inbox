@@ -78,9 +78,15 @@ describe('isReleaseBundle', () => {
   it('reads the mode in the form vite inlines, and the build defines it', () => {
     const devMode = readFileSync(new URL('../../../../electron/utils/dev-mode.ts', import.meta.url), 'utf8');
     expect(devMode).toContain("return process.env.SARVINBOX_BUILD_MODE === 'production';");
-    expect(buildDefines('production', {}, '0.0.0')['process.env.SARVINBOX_BUILD_MODE']).toBe('"production"');
+    // Changed deliberately (CASA I-3): the defines moved from vite.config.ts into
+    // vite/build-defines.ts and are now split per bundle, so the old text match
+    // on vite.config.ts and the "at least 3 shared maps" count no longer apply.
+    // dev-mode.ts runs in MAIN, so what must hold is: main's map carries the
+    // mode, and vite.config.ts hands that map to the main entry.
+    const mainDefines = buildDefines('main', { env: {}, mode: 'production', appVersion: '0.0.0' });
+    expect(mainDefines['process.env.SARVINBOX_BUILD_MODE']).toBe(JSON.stringify('production'));
     const viteConfig = readFileSync(new URL('../../../../vite.config.ts', import.meta.url), 'utf8');
-    expect(viteConfig.match(/define: buildDefines\(mode\)/g)!.length).toBeGreaterThanOrEqual(3);
+    expect(viteConfig).toMatch(/entry: 'electron\/main\.ts',(?:(?!entry: )[\s\S])*define: definesFor\('main', mode\)/);
   });
 });
 

@@ -4,6 +4,7 @@ import {
   buildSarvEdgeBaseUrl,
   listCaiModels,
   listCaiProviders,
+  listCaiZones,
   loadZoneSelection,
   pickRecommendedModel,
   pickRecommendedProvider,
@@ -19,23 +20,30 @@ import {
 // and sat behind an "AI inactive" banner forever. These tests pin the contract
 // that a missing zone is survivable end to end.
 
-const requestedUrls: string[] = [];
+// The catalog is fetched by MAIN (`oauth:sarvCatalog`): the renderer never
+// holds the Sarv token, which is also the Sarv mailbox's XOAUTH2 credential
+// (CASA I-2). Changed deliberately (CASA I-2): these tests used to stub the
+// renderer's own `fetch` + `oauth.getAccessToken`; that path no longer exists,
+// so they stub the IPC call instead. What each pins is unchanged — the request
+// and error-parsing halves moved to core's sarv-catalog.test.ts and main's
+// sarv-catalog-service.test.ts.
+
+type CatalogRequest = { kind: string; email: string; providerCode?: string; zoneCode?: string };
+type CatalogAnswer = { ok: true; body: unknown } | { ok: false; status: number; code: string; message: string };
+
+const catalogRequests: CatalogRequest[] = [];
+const fetchSpy = vi.fn();
 
 const installEnv = () => {
-  requestedUrls.length = 0;
+  catalogRequests.length = 0;
+  fetchSpy.mockReset();
+  (globalThis as any).fetch = fetchSpy;
   (globalThis as any).window = {
     location: { origin: 'http://localhost' },
-    electronAPI: {
-      oauth: {
-        getAccessToken: vi.fn().mockResolvedValue({
-          success: true,
-          data: { accessToken: 'test-token' },
-        }),
-      },
-    },
+    electronAPI: { oauth: { sarvCatalog: vi.fn(async () => ({ ok: true, body: [] })) } },
   };
-  // getJson logs each request (renderer console is tee'd to app.log); keep the
-  // test output readable.
+  // loadZoneSelection logs its non-fatal failure (renderer console is tee'd to
+  // app.log); keep the test output readable.
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 };
@@ -45,19 +53,11 @@ const warnings = () =>
   (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
     .map((args) => args.map(String).join(' '));
 
-/** Stub `fetch` with a per-URL-substring responder, recording every URL. */
-const stubFetch = (routes: Array<[string, { status?: number; body: unknown }]>) => {
-  (globalThis as any).fetch = vi.fn(async (url: string) => {
-    requestedUrls.push(url);
-    const match = routes.find(([fragment]) => url.includes(fragment));
-    const status = match?.[1].status ?? 200;
-    const body = JSON.stringify(match?.[1].body ?? []);
-    return {
-      ok: status >= 200 && status < 300,
-      status,
-      json: async () => JSON.parse(body),
-      text: async () => body,
-    } as unknown as Response;
+/** Answer the catalog IPC per list kind, recording every request. */
+const stubCatalog = (answers: Partial<Record<string, CatalogAnswer>>) => {
+  (globalThis as any).window.electronAPI.oauth.sarvCatalog = vi.fn(async (request: CatalogRequest) => {
+    catalogRequests.push(request);
+    return answers[request.kind] ?? { ok: true, body: [] };
   });
 };
 
@@ -69,29 +69,28 @@ afterEach(() => {
 });
 
 describe('loadZoneSelection', () => {
-  it('picks the default zone when the account has zones', () => {
+  it('picks the default zone when the account has zones', async () => {
     // The multi-zone/org case must keep working exactly as before.
-    stubFetch([
-      ['/oauth/v1/zones', { body: [
+    stubCatalog({
+      zones: { ok: true, body: [
         { code: 'jpr1', name: 'Jaipur' },
         { code: 'blr1', name: 'Bengaluru', is_default: true },
-      ] }],
-    ]);
-
-    return loadZoneSelection('https://ai.sarv.com', 'advik.d@sarv.com').then((selection) => {
-      expect(selection.zoneCode).toBe('blr1');
-      expect(selection.zones).toHaveLength(2);
+      ] },
     });
+
+    const selection = await loadZoneSelection('advik.d@sarv.com');
+
+    expect(selection.zoneCode).toBe('blr1');
+    expect(selection.zones).toHaveLength(2);
+    expect(catalogRequests).toEqual([{ kind: 'zones', email: 'advik.d@sarv.com' }]);
   });
 
   it('resolves to an empty selection on a 403 instead of rejecting', async () => {
     // THE regression: if this ever throws again, an account with credits but no
     // organization loses the whole LLM picker and AI silently stays off.
-    stubFetch([
-      ['/oauth/v1/zones', { status: 403, body: { detail: { error: 'missing org_id claim' } } }],
-    ]);
+    stubCatalog({ zones: { ok: false, status: 403, code: 'missing org_id claim', message: 'missing org_id claim' } });
 
-    const selection = await loadZoneSelection('https://ai.sarv.com', 'advik.d@sarv.com');
+    const selection = await loadZoneSelection('advik.d@sarv.com');
 
     expect(selection).toEqual({ zones: [], zoneCode: '' });
   });
@@ -100,14 +99,9 @@ describe('loadZoneSelection', () => {
     // Non-fatal must not mean invisible: this catch is why weeks of app.log held
     // `/oauth/v1/zones → 403` and not one word about the cause, leaving "the AI
     // stopped working" undiagnosable from the log.
-    stubFetch([
-      [
-        '/oauth/v1/zones',
-        { status: 403, body: { detail: { error: 'insufficient_scope', message: 'llm:view required' } } },
-      ],
-    ]);
+    stubCatalog({ zones: { ok: false, status: 403, code: 'insufficient_scope', message: 'llm:view required' } });
 
-    await loadZoneSelection('https://ai.sarv.com', 'advik.d@sarv.com');
+    await loadZoneSelection('advik.d@sarv.com');
 
     expect(warnings().join('\n')).toContain('zone lookup failed');
     expect(warnings().join('\n')).toContain('llm:view required');
@@ -116,9 +110,9 @@ describe('loadZoneSelection', () => {
   it('resolves to an empty selection when the account simply has no zones', async () => {
     // A successful-but-empty response is the same survivable state as a 403 —
     // no zone code, no error.
-    stubFetch([['/oauth/v1/zones', { body: [] }]]);
+    stubCatalog({ zones: { ok: true, body: [] } });
 
-    await expect(loadZoneSelection('https://ai.sarv.com', 'advik.d@sarv.com')).resolves.toEqual({
+    await expect(loadZoneSelection('advik.d@sarv.com')).resolves.toEqual({
       zones: [],
       zoneCode: '',
     });
@@ -126,96 +120,96 @@ describe('loadZoneSelection', () => {
 
   it('resolves to an empty selection when the token itself cannot be minted', async () => {
     // Transient IPC/token failure must not be fatal either — the providers
-    // fetch is what surfaces a genuinely unusable account.
-    (globalThis as any).window.electronAPI.oauth.getAccessToken = vi
-      .fn()
-      .mockResolvedValue({ success: false, error: 'no account' });
-    stubFetch([]);
+    // fetch is what surfaces a genuinely unusable account. Permanent (signed
+    // out) and transient (OAuth server unreachable) both stay non-fatal here.
+    stubCatalog({ zones: { ok: false, status: 0, code: 'sign_in_required', message: 'No OAuth account for sarv:advik.d@sarv.com' } });
+    await expect(loadZoneSelection('advik.d@sarv.com')).resolves.toEqual({ zones: [], zoneCode: '' });
 
-    await expect(loadZoneSelection('https://ai.sarv.com', 'advik.d@sarv.com')).resolves.toEqual({
-      zones: [],
-      zoneCode: '',
-    });
-    expect(globalThis.fetch).not.toHaveBeenCalled();
+    stubCatalog({ zones: { ok: false, status: 0, code: 'token_unavailable', message: 'Cannot reach OAuth server' } });
+    await expect(loadZoneSelection('advik.d@sarv.com')).resolves.toEqual({ zones: [], zoneCode: '' });
+
+    // Even the IPC call itself rejecting (main refused the sender) is survivable.
+    (globalThis as any).window.electronAPI.oauth.sarvCatalog = vi.fn(async () => { throw new Error('Refused IPC'); });
+    await expect(loadZoneSelection('advik.d@sarv.com')).resolves.toEqual({ zones: [], zoneCode: '' });
   });
 });
 
-describe('catalog requests without a zone', () => {
-  it('omits zone_code entirely when the zone code is empty', async () => {
-    // The unscoped fetch is what makes a zone-less account work: an empty
-    // `zone_code=` would be sent as a real filter and could match nothing.
-    stubFetch([['/oauth/v1/llm/providers', { body: [{ code: 'sarv_partners', name: 'Sarv' }] }]]);
+describe('catalog requests go through main, carrying no URL and no token', () => {
+  // THE I-2 regression: breaks if the renderer fetches the catalog itself
+  // again (with a bearer it would have to hold), or chooses where main sends it.
+  it('asks main by kind and account, with no URL, token or fetch of its own', async () => {
+    stubCatalog({ providers: { ok: true, body: [{ code: 'sarv_partners', name: 'Sarv' }] } });
 
-    await listCaiProviders('https://ai.sarv.com', 'advik.d@sarv.com', '');
+    await listCaiProviders('advik.d@sarv.com', '');
+    await listCaiModels('advik.d@sarv.com', 'sarv_partners', 'blr1');
+    await listCaiZones('advik.d@sarv.com');
 
-    expect(requestedUrls[0]).toBe('https://ai.sarv.com/oauth/v1/llm/providers');
-    expect(requestedUrls[0]).not.toContain('zone_code');
+    expect(catalogRequests).toEqual([
+      { kind: 'providers', email: 'advik.d@sarv.com', zoneCode: '' },
+      { kind: 'models', email: 'advik.d@sarv.com', providerCode: 'sarv_partners', zoneCode: 'blr1' },
+      { kind: 'zones', email: 'advik.d@sarv.com' },
+    ]);
+    expect(JSON.stringify(catalogRequests)).not.toMatch(/https?:|Bearer|token/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('catalog payload normalisation', () => {
+  // Breaks: a server that answers `{ data: [...] }` or uses `id` instead of
+  // `code` empties the pickers.
+  it('unwraps wrapped lists and normalises id/code and names', async () => {
+    stubCatalog({
+      providers: { ok: true, body: { data: [{ id: 'p1', display_name: 'Partner' }] } },
+      models: { ok: true, body: { models: [{ id: 'm1', name: 'Model', provider_id: 'p1', supports_streaming: true }] } },
+      zones: { ok: true, body: { zones: [{ id: 'z1', api_domain: 'https://z1.sarv.com' }] } },
+    });
+
+    await expect(listCaiProviders('a@sarv.com')).resolves.toEqual([{ code: 'p1', name: 'Partner' }]);
+    await expect(listCaiModels('a@sarv.com', 'p1')).resolves.toEqual([
+      { code: 'm1', display_name: 'Model', provider_code: 'p1', supports_streaming: true },
+    ]);
+    await expect(listCaiZones('a@sarv.com')).resolves.toEqual([
+      { code: 'z1', name: null, country: null, city: null, api_domain: 'https://z1.sarv.com', is_default: false },
+    ]);
   });
 
-  it('still scopes to the zone when one is available', async () => {
-    // The org case must not regress into always-unscoped.
-    stubFetch([['/oauth/v1/llm/models', { body: [{ code: 'gpt-oss-120b' }] }]]);
-
-    await listCaiModels('https://ai.sarv.com', 'advik.d@sarv.com', 'sarv_partners', 'blr1');
-
-    expect(requestedUrls[0]).toContain('provider_code=sarv_partners');
-    expect(requestedUrls[0]).toContain('zone_code=blr1');
+  // An unexpected shape is an empty list, not a crash.
+  it('treats a non-list answer as empty', async () => {
+    stubCatalog({ providers: { ok: true, body: { unexpected: true } } });
+    await expect(listCaiProviders('a@sarv.com')).resolves.toEqual([]);
+    stubCatalog({ providers: { ok: true, body: null } });
+    await expect(listCaiProviders('a@sarv.com')).resolves.toEqual([]);
   });
 });
 
 describe('failed catalog requests', () => {
   // A 403 on the catalog is three different problems with three different
   // fixes — insufficient_scope (re-authorize for llm:view), cai_account_required
-  // (no CAI account behind the login) and invalid_token. Logging only the status
-  // makes them indistinguishable, and the AI just looks "off".
-  it('logs the error code and message alongside the status', async () => {
-    stubFetch([
-      [
-        '/oauth/v1/llm/providers',
-        {
-          status: 403,
-          body: { detail: { error: 'insufficient_scope', error_description: 'llm:view required' } },
-        },
-      ],
-    ]);
+  // (no CAI account behind the login) and invalid_token. The error the UI shows
+  // must carry the server's reason, and its code and status for the caller.
+  it('rejects with the server message, code and status', async () => {
+    stubCatalog({ providers: { ok: false, status: 403, code: 'insufficient_scope', message: 'llm:view required' } });
 
-    await expect(
-      listCaiProviders('https://ai.sarv.com', 'advik.d@sarv.com', ''),
-    ).rejects.toThrow(/llm:view required/);
+    const err = await listCaiProviders('advik.d@sarv.com', '').catch((e) => e);
 
-    const line = warnings().join('\n');
-    expect(line).toContain('403');
-    expect(line).toContain('code=insufficient_scope');
-    expect(line).toContain('llm:view required');
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toBe('llm:view required');
+    expect(err).toMatchObject({ status: 403, code: 'insufficient_scope' });
   });
 
   // A permanent auth failure and a transient upstream one must stay tellable
-  // apart in the log, or a retryable blip reads as "your account has no AI".
-  it('logs a transient upstream failure with its own status', async () => {
-    stubFetch([['/oauth/v1/llm/providers', { status: 503, body: { detail: 'upstream unavailable' } }]]);
+  // apart, or a retryable blip reads as "your account has no AI".
+  it('keeps a transient upstream failure distinct from a permanent one', async () => {
+    stubCatalog({ providers: { ok: false, status: 503, code: '503', message: 'upstream unavailable' } });
+    await expect(listCaiProviders('advik.d@sarv.com', '')).rejects.toMatchObject({ status: 503, message: 'upstream unavailable' });
 
-    await expect(
-      listCaiProviders('https://ai.sarv.com', 'advik.d@sarv.com', ''),
-    ).rejects.toThrow(/upstream unavailable/);
+    stubCatalog({ providers: { ok: false, status: 0, code: 'sign_in_required', message: 'Token refresh failed (400): invalid_grant' } });
+    await expect(listCaiProviders('advik.d@sarv.com', '')).rejects.toMatchObject({
+      status: 0, code: 'sign_in_required', message: 'Token refresh failed (400): invalid_grant',
+    });
 
-    expect(warnings().join('\n')).toContain('503');
-  });
-
-  // The body is not always JSON (a gateway HTML error page); the log line must
-  // still name the status rather than blowing up in the logging itself.
-  it('logs a non-JSON error body without throwing in the logger', async () => {
-    (globalThis as any).fetch = vi.fn(async () => ({
-      ok: false,
-      status: 502,
-      json: async () => ({}),
-      text: async () => '<html>bad gateway</html>',
-    })) as unknown as typeof fetch;
-
-    await expect(
-      listCaiProviders('https://ai.sarv.com', 'advik.d@sarv.com', ''),
-    ).rejects.toThrow(/Sarv API 502/);
-
-    expect(warnings().join('\n')).toContain('code=502');
+    stubCatalog({ providers: { ok: false, status: 0, code: 'token_unavailable', message: 'Cannot reach OAuth server' } });
+    await expect(listCaiProviders('advik.d@sarv.com', '')).rejects.toMatchObject({ code: 'token_unavailable' });
   });
 });
 
