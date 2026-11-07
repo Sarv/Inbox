@@ -224,6 +224,13 @@ Established shared helpers (extend this list as you add more):
   IMAP/SMTP connection is secured: 'ssl' | 'starttls' (upgrade REQUIRED) | 'none'
   (explicit opt-out); legacy configs resolve from `secure`, OAuth never to 'none'.
   Use it in clients and account forms instead of reading `secure`.
+- `createLogBudget()` — `packages/core/src/extensions/runtime/log-budget.ts`. How
+  many lines a stranger's code may have the main process write. Use it for any
+  new path from extension code into the logger, which is a synchronous write.
+- `readOsSandboxState(probe)` — `apps/desktop/electron/services/os-sandbox-state.ts`.
+  Whether a renderer really is in the OS sandbox: `sandbox: true` keeps reading true
+  under `--no-sandbox`. Use it before trusting that layer, and treat anything but
+  `active` as not there.
 - `conversationStarTargetIds(rows, starring, folders)` —
   `packages/core/src/utils/conversation-membership.ts`. Which messages a
   conversation-level star writes to: the LATEST message when starring, every
@@ -249,6 +256,16 @@ Established shared helpers (extend this list as you add more):
   Whether the OS key store really protects saved secrets on this device (false on
   Linux `basic_text`). Use it for any renderer wording that says a secret is
   "saved securely" or "in the keychain", instead of asking `secureCreds` again.
+- `messageBytes(value)` / `MAX_MESSAGE_BYTES` / `createFloodBudget()` —
+  `packages/core/src/extensions/runtime/flood-budget.ts`. How large a value from
+  extension code is, measured without stringifying it, and how much an extension may
+  send. **Measure before `JSON.stringify` on anything a stranger sized**: in Electron 44
+  stringifying one flat string of about 256 MB is a fatal V8 error ("Zone Allocation
+  failed") that ends the app, and no try/catch sees it.
+- `isScannerExtensionAvailable(manager, id)` —
+  `apps/desktop/electron/services/attachment-download-protection.ts`. Whether a scanner
+  extension can be used for scanning: on, loaded, granted. Scanning is the host's work,
+  so do not ask whether its code is running.
 - `isPublicAddress(ip)` / `checkPublicHttpsUrl(url, { site })` —
   `packages/core/src/utils/public-destination.ts`. The rules for a fetch whose URL
   a stranger chose (mail content, a sender's DNS): public addresses only (NAT64

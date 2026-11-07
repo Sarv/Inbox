@@ -16,13 +16,12 @@ import { ExtensionScreenshots, ExtensionSurfaces, type ScreenshotItem } from './
 /**
  * The consent step before anything from the registry is installed.
  *
- * An extension runs in a separate process as full Node code, with the same
- * access to the user's files and mail data as the app itself, so the only thing
- * standing between "a stranger published this" and "it can read every message
- * you have" is this dialog. Its permissions gate only the app APIs it can call,
- * not what its code can do. The dialog therefore ALWAYS says so, whatever the
- * extension asks for, and states the permissions in plain language, riskiest
- * first, never pre-selected or collapsed.
+ * An extension's code runs in a sandbox with no access to the user's files and no
+ * network of its own, so what it can reach is what it is granted here, and the only
+ * thing standing between "a stranger published this" and "it can read every message
+ * you have" is this dialog. The dialog therefore ALWAYS says so, whatever the
+ * extension asks for, and states the permissions in plain language, riskiest first,
+ * never pre-selected or collapsed.
  *
  * What the user sees here is sent back to the main process on confirm and
  * re-checked against the registry: if the extension's permissions changed

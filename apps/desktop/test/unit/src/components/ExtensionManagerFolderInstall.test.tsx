@@ -12,7 +12,7 @@ import { act, cleanup, render, type Mounted } from '../../../helpers/render';
  * straight to the folder picker and installs whatever is chosen — no checksum,
  * no permission prompt, every permission its manifest lists granted and the
  * extension switched on — without the user ever being told that an extension
- * runs as full code with the app's access to their files and mail data. The
+ * runs in a sandbox, and can do what its permissions allow, mail included. The
  * registry path has always had a consent screen; this one had none.
  */
 
@@ -75,8 +75,9 @@ describe('ExtensionManager install from folder', () => {
     await click(button(view, 'Install from folder'));
 
     const text = dialog(view)?.textContent ?? '';
-    expect(text).toContain('runs as full code on your computer');
-    expect(text).toContain('same access to your files and mail data as Sarv Inbox itself');
+    expect(text).toContain('runs in a sandbox');
+    expect(text).toContain('cannot read your files or reach the internet by itself');
+    expect(text).toContain('sending your mail elsewhere');
     expect(text).toContain('gets every permission its manifest lists');
     expect(api.selectAndInstall).not.toHaveBeenCalled();
   });

@@ -1,0 +1,1 @@
+{"id":"victim","name":"Victim","version":"1.0.0","description":"holds a secret","author":"t","main":"index.js","engines":{"sarvinbox":">=0.1.0"},"permissions":["email:read","storage:local"]}

@@ -220,7 +220,7 @@ describe('antivirus worker bridge', () => {
     const pair = createInProcessChannelPair();
     const received: Array<{ type: string; ok?: boolean; error?: { message: string } }> = [];
     pair.sandbox.onMessage((message) => received.push(message as typeof received[number]));
-    const bridge = new ExtensionBridge({ channel: pair.host, hooks: {
+    const bridge = new ExtensionBridge({ channel: pair.host, extensionId: 'scanner', hooks: {
       getContext: () => context, onWorkflowRegistered: vi.fn(),
       onWorkflowUnregistered: vi.fn(), onSandboxClosed: vi.fn(),
     } });

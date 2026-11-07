@@ -11,6 +11,7 @@ import {
   setAttachmentOperationProtection,
   attachmentScanRequired,
   downloadScanners,
+  isScannerExtensionAvailable,
   writeProtectedAttachment,
   type AttachmentDownloadDependencies,
   type DownloadScanner,
@@ -114,14 +115,14 @@ describe('attachment download protection', () => {
     expect(f.deps.resolveLegacy).not.toHaveBeenCalled();
   });
 
+  // Fail-closed, and saying which of the two it is: "lacks permission" sent people looking
+  // in the wrong place when the extension's folder was what was broken.
   it.each([
-    { active: false, granted: true },
-    { active: true, granted: false },
-  ])('blocks an enabled scanner when %j', async (flags) => {
+    [{ active: false, granted: true }, /could not be loaded/],
+    [{ active: true, granted: false }, /does not have permission/],
+  ])('blocks an enabled scanner when %j', async (flags, message) => {
     const f = fixture([{ id: 'clamav-scan', scanner: true, enabled: true, ...flags }]);
-    await expect(f.service.download('message', 'account', 'sample.txt')).rejects.toThrow(
-      /unavailable or lacks/
-    );
+    await expect(f.service.download('message', 'account', 'sample.txt')).rejects.toThrow(message);
     expect(f.deps.openSetup).toHaveBeenCalledWith('clamav-scan');
     expect(f.deps.scan).not.toHaveBeenCalled();
     expect(f.deps.resolveLegacy).not.toHaveBeenCalled();
@@ -696,12 +697,41 @@ describe('download scanner recognition', () => {
         getAll: () => [{ id, enabled: true, grantedPermissions }],
         getLoaded: () => (manifest ? { manifest } : undefined),
       }),
-      getHost: () => ({ isActive: () => false }),
     } as unknown as Parameters<typeof downloadScanners>[0];
     expect(downloadScanners(manager)).toEqual([
-      { id, enabled: true, active: false, scanner: true, granted: grantedPermissions.length > 0 },
+      { id, enabled: true, active: Boolean(manifest), scanner: true, granted: grantedPermissions.length > 0 },
     ]);
     expect(attachmentScanRequired(manager)).toBe(true);
+  });
+
+  // Scanning is the host's work. Tying it to the extension's code blocked every attachment
+  // for anyone whose sandbox could not run, on Linux under --no-sandbox or after any crash,
+  // while the scanner itself was fine. No `getHost` here: this must not even ask.
+  it('counts a scanner whose code is not running as available', () => {
+    const manager = {
+      getRegistry: () => ({
+        getAll: () => [{ id: 'clamav-scan', enabled: true, grantedPermissions: ['security:scan-attachments'] }],
+        get: () => ({ id: 'clamav-scan', enabled: true, grantedPermissions: ['security:scan-attachments'] }),
+        getLoaded: () => ({ manifest: { permissions: ['security:scan-attachments'] } }),
+      }),
+    } as unknown as Parameters<typeof downloadScanners>[0];
+
+    expect(downloadScanners(manager)[0].active).toBe(true);
+    expect(isScannerExtensionAvailable(manager, 'clamav-scan')).toBe(true);
+  });
+
+  // Fail-closed where it is really unavailable: off, or its folder gone.
+  it.each([
+    ['turned off', { enabled: false }, { manifest: {} }],
+    ['not installed', undefined, { manifest: {} }],
+    ['with its folder gone', { enabled: true }, undefined],
+  ])('does not count a scanner as available when %s', (_name, installed, loaded) => {
+    const manager = {
+      getRegistry: () => ({ get: () => installed, getLoaded: () => loaded }),
+    } as unknown as Parameters<typeof downloadScanners>[0];
+
+    expect(isScannerExtensionAvailable(manager, 'clamav-scan')).toBe(false);
+    expect(isScannerExtensionAvailable(null, 'clamav-scan')).toBe(false);
   });
 
   it('does not require scanning for unrelated or disabled extensions', () => {
@@ -713,7 +743,6 @@ describe('download scanner recognition', () => {
         ],
         getLoaded: () => ({ manifest: { permissions: [] } }),
       }),
-      getHost: () => ({ isActive: () => true }),
     } as unknown as Parameters<typeof downloadScanners>[0];
     expect(attachmentScanRequired(manager)).toBe(false);
     expect(attachmentScanRequired(null)).toBe(false);

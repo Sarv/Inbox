@@ -67,14 +67,21 @@ import { describeDevSessionReset, resetDevSessionCaches } from './services/dev-s
 import { installEmailImageRequestHandlers } from './services/email-image-requests';
 import { describeStall, startEventLoopMonitor } from './services/event-loop-monitor';
 import { createExtensionAIBackend } from './services/extension-ai-backend';
+import {
+  createExtensionCrashGuard,
+  heldBackNotice,
+  setExtensionCrashGuard,
+  watchForCleanExit,
+} from './services/extension-crash-guard';
 import { createExtensionMailBackend } from './services/extension-mail-backend';
 import { installSystemExtensions } from './services/extension-marketplace';
+import { createExtensionNetworkBackend } from './services/extension-network-backend';
 import {
   PANEL_SCHEME_PRIVILEGES,
   registerPanelProtocol,
 } from './services/extension-panel-protocol';
-import { createSandboxChannel } from './services/extension-runtime';
-import { createExtensionUIBackend } from './services/extension-ui-backend';
+import { createSandboxChannel, SANDBOX_SCHEME_PRIVILEGES } from './services/extension-runtime';
+import { createExtensionUIBackend, noteWindowGone } from './services/extension-ui-backend';
 import { startExtensionWorkflowRunner, stopExtensionWorkflowRunner } from './services/extension-workflow-runner';
 import { getExternalOpenService } from './services/external-open-service';
 import { wireFolderCountBroadcast } from './services/folder-count-broadcast';
@@ -261,7 +268,7 @@ if (!localDataBootstrapOnly) initSentryMain();
 // Electron REPLACES the per-privilege scheme lists on every call rather than
 // merging them, so a separate registration here would silently strip the
 // attachment scheme's privileges (see the note above).
-protocol.registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES, PANEL_SCHEME_PRIVILEGES]);
+protocol.registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES, PANEL_SCHEME_PRIVILEGES, SANDBOX_SCHEME_PRIVILEGES]);
 const logger = createLogger('main');
 
 // Give every outbound connection from the main process a fair chance at its
@@ -587,6 +594,7 @@ function createWindow(): void {
   });
 
   mainWindow.on('closed', () => {
+    noteWindowGone();
     removeNativeDownloadGuard();
     setMainWindow(null);
   });
@@ -818,6 +826,20 @@ async function initializeExtensionManager(): Promise<void> {
   // system extensions, which are simply installed for the user on first run.
   // That keeps one code path for a shipped extension and a user-installed one.
   const aiBackend = createExtensionAIBackend();
+  const uiBackend = createExtensionUIBackend();
+
+  // The backstop for an extension that takes the whole app down: see the file for what
+  // counts and why. A dev run restarts by signal all day, so only a release build has it.
+  const crashGuard = isReleaseBundle()
+    ? createExtensionCrashGuard({
+        file: join(extensionsBaseDir, 'extension-crash-guard.json'),
+        appVersion: app.getVersion(),
+      })
+    : null;
+  if (crashGuard) {
+    setExtensionCrashGuard(crashGuard);
+    watchForCleanExit(crashGuard, { app, powerMonitor, process });
+  }
 
   const extensionManager = new ExtensionManager({
     extensionsBaseDir,
@@ -826,20 +848,35 @@ async function initializeExtensionManager(): Promise<void> {
     // own, so an extension subscribing to `email:synced` heard nothing the sync
     // pipeline ever published — the events existed, on a different bus.
     eventBus: getEventBus(),
-    uiBackend: createExtensionUIBackend(),
+    uiBackend,
     // Reading and changing mail on the extension's own schedule, each method
     // gated on the permission the reader approved at install time.
     mailBackend: createExtensionMailBackend(),
+    // The extension's only way out to the network, gated on `network:fetch`.
+    networkBackend: createExtensionNetworkBackend(),
     securityBackend: createAntivirusDesktopBackend(),
-    // Extension code runs in its own process, not this one. Main keeps the
-    // database key, the credential vault and the IMAP connections; the sandbox
-    // gets a message port and has to ask for everything else.
+    // Each extension's code runs in a confined renderer of its own, not this
+    // process. Main keeps the database key, the credential vault and the IMAP
+    // connections; a sandbox gets a message port and has to ask for everything else.
     createChannel: createSandboxChannel,
   });
 
   try {
-    await extensionManager.initialize();
+    await extensionManager.initialize({
+      decideHold: (idsWithCode) => crashGuard?.decide(idsWithCode) ?? false,
+    });
     setExtensionManager(extensionManager);
+
+    const heldBack = extensionManager.getHeldBack();
+    if (heldBack.length > 0) {
+      const names = heldBack.map((id) => extensionManager.getExtensionInfo(id)?.manifest.name ?? id);
+      uiBackend.reportProblem?.('sarv-inbox', {
+        id: 'extensions-held-back',
+        title: 'Extensions did not start',
+        body: heldBackNotice(names),
+      });
+    }
+
     // Only after the manager is registered: the runner reads it through the
     // shared accessor on every event, and starting first would drop whatever
     // arrived in between.

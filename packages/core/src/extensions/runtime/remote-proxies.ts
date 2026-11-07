@@ -105,6 +105,8 @@ export function createRemoteExports(
 ): Record<string, unknown> {
   const exports: Record<string, unknown> = {};
   for (const name of exportNames) {
+    // These names come from the sandbox: not a way to swap this object's prototype.
+    if (typeof name !== 'string' || name === '__proto__') continue;
     exports[name] = (...args: unknown[]): Promise<unknown> =>
       bridge.invoke<unknown>(extensionId, 'export.call', [name, args]);
   }

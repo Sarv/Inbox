@@ -122,7 +122,7 @@ function reportRejections(emailId: string, plan: ReturnType<typeof planWorkflowE
   }
 }
 
-async function runOne(message: QueuedMessage, extensionIndex: Map<string, string>): Promise<void> {
+async function runOne(message: QueuedMessage): Promise<void> {
   const manager = getExtensionManager();
   if (!manager) return;
 
@@ -137,6 +137,9 @@ async function runOne(message: QueuedMessage, extensionIndex: Map<string, string
   const results = await manager.processEmail(email, undefined, undefined, message.stage);
   if (results.size === 0) return;
 
+  // Built per message, not per drain: an extension can start while a backlog drains, as
+  // one past the startup wait does, and its results must not be dropped until it ends.
+  const extensionIndex = buildExtensionIndex();
   const outcomes: WorkflowOutcome[] = [];
   for (const [workflowId, result] of results) {
     const extensionId = extensionIndex.get(workflowId);
@@ -172,7 +175,6 @@ async function drain(): Promise<void> {
   // call and the next can cost nothing, so a count-based yield holds the thread
   // for however long the expensive ones happen to take.
   const maybeYield = createLoopYielder();
-  const extensionIndex = buildExtensionIndex();
 
   try {
     while (pending.size > 0) {
@@ -182,7 +184,7 @@ async function drain(): Promise<void> {
 
       await maybeYield();
       try {
-        await runOne(message, extensionIndex);
+        await runOne(message);
       } catch (error) {
         logger.error(`Extension workflows failed for ${message.emailId}:`, error);
       }

@@ -9,9 +9,15 @@
  * allowed to do.
  *
  * The bridge is transport-agnostic on purpose. It is handed an
- * `ExtensionChannel` and never learns whether the other end is a
- * `utilityProcess` or an in-memory pair, which is what lets the tests drive the
- * real engine instead of a stand-in.
+ * `ExtensionChannel` and never learns whether the other end is a confined Web
+ * Worker or an in-memory pair, which is what lets the tests drive the real
+ * engine instead of a stand-in.
+ *
+ * One bridge serves one extension, and that is what makes it a boundary. The
+ * extension shares a thread with the engine on the far side, so it can post
+ * anything on its port: a reply to a call it was never asked, or a host call in
+ * another extension's name. Its pending calls are its own, and the extension a
+ * host call is checked against comes from this object, never from the message.
  */
 
 import type { PipelineEvent } from '../../pipeline/types';
@@ -20,6 +26,8 @@ import { withTimeout } from '../../utils/timeout';
 import type { ExtensionContextImpl } from '../extension-api';
 import type { AntivirusScanSubmitOptions, ExtensionUINotification } from '../types';
 
+import { createFloodBudget, type FloodBudget } from './flood-budget';
+import { createLogBudget, MAX_EXTENSION_LOG_LINE, type LogBudget } from './log-budget';
 import {
   deserializeError,
   serializeError,
@@ -27,11 +35,13 @@ import {
   type HostCallMethod,
   type HostToSandboxMessage,
   type SandboxActivationRequest,
+  type SandboxCloseDetails,
   type SandboxInvokeTarget,
   type SandboxSyncState,
   type SandboxToHostMessage,
   type WorkflowDescriptor,
 } from './protocol';
+import { isKnownNodeApi } from './unsupported-node-api';
 
 /**
  * How long a single call into the sandbox may take before it is abandoned.
@@ -43,6 +53,52 @@ import {
  */
 export const DEFAULT_INVOKE_TIMEOUT_MS = 120_000;
 
+/**
+ * How long an extension's own `deactivate()` may take.
+ *
+ * Far shorter than a call that may be waiting on an AI completion, because
+ * something is waiting for this one: the user's click on the switch, or the app
+ * trying to quit. Its sandbox is closed either way.
+ */
+export const DEACTIVATE_TIMEOUT_MS = 5_000;
+
+/**
+ * How long host calls may run before the main process gets a turn.
+ *
+ * Measured: an extension calling `storage.set` in a loop froze the main thread for
+ * 17 seconds, because the default backend does its file work synchronously and
+ * queued port messages run one after another. Sharing the thread out keeps the app
+ * responsive while the extension merely waits longer for its answers.
+ */
+export const HOST_CALL_SLICE_MS = 8;
+
+/** Host calls waiting their turn, beyond which more are refused rather than held. */
+export const MAX_QUEUED_HOST_CALLS = 5_000;
+
+/**
+ * What one extension may leave behind in main: each of these is kept for as long as it
+ * runs, and the extension chooses how many and how long. Measured: without them, workflow
+ * registrations carrying 5 MB ids ran main out of memory in 5 seconds. Far more than any
+ * real extension wants, and going past one is not a mistake to answer politely, so it
+ * stops the extension.
+ */
+export const MAX_WORKFLOWS_PER_EXTENSION = 64;
+/** Across a run, not at once, or registering and dropping in a loop would never end. */
+export const MAX_WORKFLOW_REGISTRATIONS = 1_024;
+export const MAX_SUBSCRIPTIONS_PER_EXTENSION = 64;
+export const MAX_EXPORTS_PER_EXTENSION = 256;
+/** An id, an event type or a name: short things that end up in logs and adapters. */
+export const MAX_IDENTIFIER_LENGTH = 128;
+export const MAX_DESCRIPTION_LENGTH = 1_000;
+/** A label, in one change: labels are written into the mail database's tags. */
+export const MAX_LABEL_LENGTH = 128;
+export const MAX_LABELS_PER_CHANGE = 32;
+
+/** What the user reads when one of those limits stops an extension. */
+const OVER_LIMITS_REASON = 'This extension asked for far more than extensions may keep and was stopped.';
+const FLOOD_REASON = 'This extension sent far too many messages to the app and was stopped.';
+const FLOOD_BYTES_REASON = 'This extension sent far too much data to the app and was stopped.';
+
 const logger = createLogger('extension-bridge');
 
 export interface ExtensionBridgeHooks {
@@ -52,13 +108,17 @@ export interface ExtensionBridgeHooks {
   onWorkflowRegistered(extensionId: string, descriptor: WorkflowDescriptor): void;
   /** A workflow the extension withdrew. */
   onWorkflowUnregistered(extensionId: string, fullId: string): void;
-  /** The sandbox went away — every extension it held is no longer running. */
-  onSandboxClosed(): void;
+  /** The sandbox went away, so the extension in it is no longer running. */
+  onSandboxClosed(reason?: string, details?: SandboxCloseDetails): void;
+  /** The extension failed for want of a Node API the sandbox does not have. */
+  onUnsupportedApi?(extensionId: string, api: string): void;
 }
 
 export interface ExtensionBridgeOptions {
   channel: ExtensionChannel;
   hooks: ExtensionBridgeHooks;
+  /** The one extension this channel belongs to. Every message is taken as from it. */
+  extensionId: string;
   /** Override for tests that assert the timeout path without waiting for it. */
   invokeTimeoutMs?: number;
 }
@@ -74,29 +134,45 @@ interface PendingCall {
   reject: (error: Error) => void;
 }
 
+/** An id, a name or an event type: a non-empty string of a sensible length. */
+function isShortText(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_IDENTIFIER_LENGTH;
+}
+
 export class ExtensionBridge {
   private readonly channel: ExtensionChannel;
   private readonly hooks: ExtensionBridgeHooks;
+  private readonly extensionId: string;
   private readonly invokeTimeoutMs: number;
+  private readonly logBudget: LogBudget = createLogBudget();
+  private readonly floodBudget: FloodBudget = createFloodBudget();
+  private readonly workflowIds = new Set<string>();
+  private workflowRegistrations = 0;
 
   private readonly pending = new Map<string, PendingCall>();
   /** Live event subscriptions per extension, so deactivation detaches them. */
   private readonly subscriptions = new Map<string, Map<string, () => void>>();
   private nextId = 0;
   private closed = false;
+  private closeReason: string | undefined;
+  private readonly hostCallQueue: (() => void)[] = [];
+  private drainingHostCalls = false;
+  /** A refused impersonation is logged once: the sender can repeat it forever. */
+  private warnedAboutIdentity = false;
   private readonly ready: Promise<void>;
   private markReady: () => void = () => undefined;
 
   constructor(options: ExtensionBridgeOptions) {
     this.channel = options.channel;
     this.hooks = options.hooks;
+    this.extensionId = options.extensionId;
     this.invokeTimeoutMs = options.invokeTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
     this.ready = new Promise<void>((resolve) => {
       this.markReady = resolve;
     });
 
     this.channel.onMessage((raw) => this.receive(raw as SandboxToHostMessage));
-    this.channel.onClose(() => this.handleClose());
+    this.channel.onClose((reason, details) => this.handleClose(reason, details));
   }
 
   /** Resolves once the sandbox has announced itself. */
@@ -127,7 +203,11 @@ export class ExtensionBridge {
     this.detachSubscriptions(extensionId);
     if (this.closed) return;
     const requestId = this.newId('deact');
-    await this.awaitReply<void>(requestId, { type: 'deactivate', requestId, extensionId });
+    await this.awaitReply<void>(
+      requestId,
+      { type: 'deactivate', requestId, extensionId },
+      Math.min(DEACTIVATE_TIMEOUT_MS, this.invokeTimeoutMs)
+    );
   }
 
   /** Call into extension code and wait for its answer. */
@@ -169,7 +249,20 @@ export class ExtensionBridge {
     if (this.closed) return;
     this.post({ type: 'shutdown' });
     this.handleClose();
-    this.channel.close();
+    await this.channel.close();
+  }
+
+  /**
+   * Stop the sandbox now, for a reason the user is told.
+   *
+   * For an extension that has broken a rule, or one already known not to answer: there is
+   * no point asking it to wind down.
+   */
+  async terminate(reason: string, details: SandboxCloseDetails = { transient: false }): Promise<void> {
+    if (this.closed) return;
+    this.handleClose(reason, details);
+    if (this.channel.kill) this.channel.kill(reason);
+    await this.channel.close();
   }
 
   private newId(prefix: string): string {
@@ -182,10 +275,15 @@ export class ExtensionBridge {
   }
 
   /** Send a request and resolve when its matching reply arrives. */
-  private awaitReply<T>(requestId: string, message: HostToSandboxMessage): Promise<T> {
+  private awaitReply<T>(
+    requestId: string,
+    message: HostToSandboxMessage,
+    timeoutMs: number = this.invokeTimeoutMs
+  ): Promise<T> {
     if (this.closed) {
-      return Promise.reject(new Error('Extension sandbox is not running'));
+      return Promise.reject(new Error(this.closeReason ?? 'Extension sandbox is not running'));
     }
+    this.floodBudget.noteCall();
     const call = new Promise<T>((resolve, reject) => {
       this.pending.set(requestId, {
         resolve: resolve as (value: unknown) => void,
@@ -195,8 +293,8 @@ export class ExtensionBridge {
     });
     return withTimeout(
       call,
-      this.invokeTimeoutMs,
-      `Extension sandbox did not answer within ${this.invokeTimeoutMs}ms`
+      timeoutMs,
+      `Extension sandbox did not answer within ${timeoutMs}ms`
     ).finally(() => {
       this.pending.delete(requestId);
     });
@@ -210,12 +308,37 @@ export class ExtensionBridge {
     else pending.reject(error ?? new Error('Extension call failed'));
   }
 
+  /** Whether this is a reply main is actually waiting for. Nothing else was asked for. */
+  private isSolicited(message: SandboxToHostMessage): boolean {
+    switch (message?.type) {
+      case 'activated':
+      case 'deactivated':
+      case 'failed':
+      case 'invoke-reply':
+        return this.pending.has(message.requestId);
+      default:
+        return false;
+    }
+  }
+
   private receive(message: SandboxToHostMessage): void {
+    if (this.closed) return;
+    const verdict = this.floodBudget.noteMessage(message, this.isSolicited(message));
+    if (verdict !== 'ok') {
+      void this.terminate(verdict === 'too-large' ? FLOOD_BYTES_REASON : FLOOD_REASON);
+      return;
+    }
+
     switch (message?.type) {
       case 'ready':
         this.markReady();
         break;
       case 'activated':
+        if (!this.pending.has(message.requestId)) break;
+        if (!this.acceptActivation(message.workflows, message.exportNames)) {
+          this.breakRule();
+          break;
+        }
         this.settle(message.requestId, true, {
           workflows: message.workflows,
           exportNames: message.exportNames,
@@ -236,27 +359,119 @@ export class ExtensionBridge {
         );
         break;
       case 'host-call':
-        void this.serveHostCall(message.requestId, message.extensionId, message.method, message.args);
+        // Refused, not corrected: a sandbox naming someone else is not confused.
+        if (message.extensionId !== this.extensionId) {
+          this.refuseImpersonation(message.requestId, message.extensionId);
+          break;
+        }
+        this.queueHostCall(message.requestId, message.method, message.args);
         break;
       case 'log':
-        this.writeExtensionLog(message.extensionId, message.level, message.message);
+        this.writeExtensionLog(message.level, message.message);
+        break;
+      case 'unsupported-api':
+        if (isKnownNodeApi(message.api)) this.hooks.onUnsupportedApi?.(this.extensionId, message.api);
         break;
       default:
         break;
     }
   }
 
+  /** The extension went past something it was told it may keep. Not its to argue. */
+  private breakRule(): void {
+    logger.warn(`[Extension:${this.extensionId}] went over a limit on what an extension may keep`);
+    void this.terminate(OVER_LIMITS_REASON);
+  }
+
+  /** Whether a workflow's description is the shape and size main is willing to hold. */
+  private isAcceptableWorkflow(descriptor: unknown): descriptor is WorkflowDescriptor {
+    if (!descriptor || typeof descriptor !== 'object') return false;
+    const { id, name, description, fullId } = descriptor as Record<string, unknown>;
+    return (
+      isShortText(id) &&
+      isShortText(name) &&
+      fullId === `${this.extensionId}.${id}` &&
+      (description === undefined ||
+        (typeof description === 'string' && description.length <= MAX_DESCRIPTION_LENGTH))
+    );
+  }
+
+  /** The first report of what the extension registered, checked before main adopts any. */
+  private acceptActivation(workflows: unknown, exportNames: unknown): boolean {
+    if (!Array.isArray(workflows) || !Array.isArray(exportNames)) return false;
+    if (workflows.length > MAX_WORKFLOWS_PER_EXTENSION) return false;
+    if (exportNames.length > MAX_EXPORTS_PER_EXTENSION) return false;
+    if (!exportNames.every(isShortText)) return false;
+    if (!workflows.every((workflow) => this.isAcceptableWorkflow(workflow))) return false;
+    for (const workflow of workflows as WorkflowDescriptor[]) this.workflowIds.add(workflow.fullId);
+    this.workflowRegistrations += workflows.length;
+    return true;
+  }
+
+  /**
+   * Host calls run in the order they came, a slice at a time. Each is only started
+   * here, so a backend doing real asynchronous work still overlaps with the next.
+   */
+  private queueHostCall(requestId: string, method: HostCallMethod, args: unknown[]): void {
+    if (this.hostCallQueue.length >= MAX_QUEUED_HOST_CALLS) {
+      this.post({
+        type: 'host-reply',
+        requestId,
+        ok: false,
+        error: { name: 'Error', message: 'Too many calls at once: wait for some to finish' },
+      });
+      return;
+    }
+    this.hostCallQueue.push(() => {
+      void this.serveHostCall(requestId, this.extensionId, method, args);
+    });
+    if (!this.drainingHostCalls) void this.drainHostCalls();
+  }
+
+  private async drainHostCalls(): Promise<void> {
+    this.drainingHostCalls = true;
+    let sliceStart = Date.now();
+    while (this.hostCallQueue.length > 0 && !this.closed) {
+      this.hostCallQueue.shift()?.();
+      if (Date.now() - sliceStart >= HOST_CALL_SLICE_MS) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        sliceStart = Date.now();
+      }
+    }
+    this.hostCallQueue.length = 0;
+    this.drainingHostCalls = false;
+  }
+
+  private refuseImpersonation(requestId: string, claimed: unknown): void {
+    if (!this.warnedAboutIdentity) {
+      this.warnedAboutIdentity = true;
+      logger.warn(
+        `[Extension:${this.extensionId}] refused a call made in the name of ${String(claimed).slice(0, 100)}`
+      );
+    }
+    this.post({
+      type: 'host-reply',
+      requestId,
+      ok: false,
+      error: { name: 'Error', message: 'A sandbox can only call for its own extension' },
+    });
+  }
+
   /**
    * Extension logs are re-emitted through the app's logger, tagged with the
    * extension they came from, so `app.log` carries one stream rather than two
    * and a misbehaving extension is attributable.
+   *
+   * Budgeted and capped: each line is a synchronous write on the main thread,
+   * and a loop in an extension must not be able to spend main's time.
    */
-  private writeExtensionLog(
-    extensionId: string,
-    level: 'debug' | 'info' | 'warn' | 'error',
-    message: string
-  ): void {
-    const line = `[Extension:${extensionId}] ${message}`;
+  private writeExtensionLog(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
+    const verdict = this.logBudget.take();
+    if (verdict.dropped > 0) {
+      logger.warn(`[Extension:${this.extensionId}] ${verdict.dropped} log lines dropped: too many`);
+    }
+    if (!verdict.allowed) return;
+    const line = `[Extension:${this.extensionId}] ${String(message).slice(0, MAX_EXTENSION_LOG_LINE)}`;
     if (level === 'error') logger.error(line);
     else if (level === 'warn') logger.warn(line);
     else if (level === 'info') logger.info(line);
@@ -283,7 +498,10 @@ export class ExtensionBridge {
       const value = await this.dispatchHostCall(context, extensionId, method, args);
       this.post({ type: 'host-reply', requestId, ok: true, value });
     } catch (error) {
-      this.post({ type: 'host-reply', requestId, ok: false, error: serializeError(error) });
+      // No stack: its paths would name where the app is installed, and on most
+      // machines the user's home directory, to code that has no other way to learn it.
+      const { name, message } = serializeError(error);
+      this.post({ type: 'host-reply', requestId, ok: false, error: { name, message } });
     }
   }
 
@@ -338,6 +556,9 @@ export class ExtensionBridge {
         return context.mail.move(args[0] as string, args[1] as string);
       case 'mail.trash':
         return context.mail.trash(args[0] as string);
+      case 'network.fetch':
+        // The plain-data form: the reading methods are put back on the far side.
+        return context.fetchForExtension(args[0], args[1]);
       case 'ui.notify':
         context.ui.notify(args[0] as ExtensionUINotification);
         return undefined;
@@ -354,17 +575,40 @@ export class ExtensionBridge {
         return this.subscribe(context, extensionId, args as [string, string, boolean]);
       case 'events.unsubscribe':
         return this.unsubscribe(extensionId, args[0] as string);
-      case 'events.emit':
-        context.events.emit(args[0] as PipelineEvent);
+      case 'workflow.register': {
+        const descriptor = args[0] as WorkflowDescriptor;
+        this.requireOwnWorkflowId(descriptor?.fullId);
+        this.workflowRegistrations += 1;
+        if (
+          !this.isAcceptableWorkflow(descriptor) ||
+          this.workflowRegistrations > MAX_WORKFLOW_REGISTRATIONS ||
+          (!this.workflowIds.has(descriptor.fullId) &&
+            this.workflowIds.size >= MAX_WORKFLOWS_PER_EXTENSION)
+        ) {
+          this.breakRule();
+          throw new Error(OVER_LIMITS_REASON);
+        }
+        this.workflowIds.add(descriptor.fullId);
+        this.hooks.onWorkflowRegistered(extensionId, descriptor);
         return undefined;
-      case 'workflow.register':
-        this.hooks.onWorkflowRegistered(extensionId, args[0] as WorkflowDescriptor);
-        return undefined;
+      }
       case 'workflow.unregister':
+        this.requireOwnWorkflowId(args[0]);
+        this.workflowIds.delete(args[0] as string);
         this.hooks.onWorkflowUnregistered(extensionId, args[0] as string);
         return undefined;
       default:
         throw new Error(`Unknown host call '${method as string}'`);
+    }
+  }
+
+  /**
+   * A workflow id names its extension, and adapters are keyed by that name. Taken
+   * on trust, it would let one extension retire or replace another's workflow.
+   */
+  private requireOwnWorkflowId(fullId: unknown): void {
+    if (typeof fullId !== 'string' || !fullId.startsWith(`${this.extensionId}.`)) {
+      throw new Error(`A workflow id must start with '${this.extensionId}.'`);
     }
   }
 
@@ -384,6 +628,11 @@ export class ExtensionBridge {
   ): Promise<void> {
     const [emailId, changes] = args;
     if (typeof emailId !== 'string' || !emailId) throw new Error('mail: an email id is required');
+    const tags = [...(changes?.add ?? []), ...(changes?.remove ?? [])];
+    if (tags.length > MAX_LABELS_PER_CHANGE) throw new Error('mail: too many labels in one change');
+    if (tags.some((tag) => typeof tag !== 'string' || tag.length > MAX_LABEL_LENGTH)) {
+      throw new Error(`mail: a label may be at most ${MAX_LABEL_LENGTH} characters`);
+    }
 
     for (const tag of changes?.add ?? []) {
       if (tag === 'read') await context.mail.markRead(emailId);
@@ -415,6 +664,14 @@ export class ExtensionBridge {
     extensionId: string,
     [eventType, subscriptionId, once]: [string, string, boolean]
   ): void {
+    if (
+      !isShortText(eventType) ||
+      !isShortText(subscriptionId) ||
+      context.subscriptions.length >= MAX_SUBSCRIPTIONS_PER_EXTENSION
+    ) {
+      this.breakRule();
+      throw new Error(OVER_LIMITS_REASON);
+    }
     const forward = (event: PipelineEvent) => {
       // Deliberately not awaited by the bus: an extension handler must not be
       // able to hold up the pipeline that published the event. Failures are
@@ -469,10 +726,11 @@ export class ExtensionBridge {
    * ingest pipeline on a process that is never going to answer — the failure
    * mode this whole boundary exists to prevent.
    */
-  private handleClose(): void {
+  private handleClose(reason?: string, details?: SandboxCloseDetails): void {
     if (this.closed) return;
     this.closed = true;
-    const error = new Error('Extension sandbox stopped');
+    this.closeReason = reason;
+    const error = new Error(reason ?? 'Extension sandbox stopped');
     for (const [requestId, pending] of this.pending) {
       this.pending.delete(requestId);
       pending.reject(error);
@@ -483,6 +741,6 @@ export class ExtensionBridge {
     // Unblocks anything awaiting `whenReady()` on a sandbox that died during
     // startup; the activate that follows fails fast on `closed`.
     this.markReady();
-    this.hooks.onSandboxClosed();
+    this.hooks.onSandboxClosed(reason, details);
   }
 }

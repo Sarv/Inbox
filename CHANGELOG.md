@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Extensions now run in a sandbox.** An installed extension can no longer read
+  your files or reach the internet by itself. It can only do what the permissions
+  you approved allow, and each extension is kept apart from the others, so one
+  that hangs or crashes is stopped without affecting the rest. **Extensions that
+  rely on Node stop working** until they are updated: a card and Settings,
+  Extensions name what such an extension needs, and its stored data and your
+  approvals are kept for when an update arrives. **That includes Sarv's own Email
+  Summarization 1.1.0**: use Update on its row in Settings, Extensions once 1.1.1
+  is offered. Until then the extension reports the problem and Summarize uses the
+  app's built-in summary.
+- **A crash at startup can no longer lock you out.** If Sarv Inbox closes
+  unexpectedly while starting extensions on two launches in a row, the next launch
+  starts without them, tells you which were held back, and Settings, Extensions has
+  the button to turn them back on. Nothing they stored and nothing you approved is
+  touched. Quitting, updating and shutting down never count.
+- **Antivirus scanning no longer depends on the extension's code running.** On a
+  computer that cannot start extension code, attachments are still scanned, and
+  setup stays reachable. If the scanner itself is unavailable, attachments stay
+  blocked, and the message now says why.
+- **AppImage on Linux.** Extensions now work in an AppImage wherever Linux allows the
+  sandbox. On Ubuntu 24.04 and later it does not by default, so extensions stay off
+  there, with a card recommending the `.deb` or `.rpm`. The rest of the app is
+  unaffected.
+- **Extensions have limits.** An extension may keep 25 MB, and 5 MB in one value. Data
+  already over that stays readable and is never deleted; only new writes are refused.
 - **Windows downloads are signed by Sarv.** The installer, the app and its
   components are now digitally signed by SARV WEBS PRIVATE LIMITED, so Windows
   names the company as the publisher instead of "Unknown publisher". From this

@@ -361,6 +361,47 @@ describe('electron-builder configuration', () => {
     }
   });
 
+  // The extension Worker and its preload load from inside the archive: main reads the one
+  // and Electron loads the other by path, and both work under app.asar (measured). Unpacked
+  // they would sit outside the asar's integrity check, editable on disk, in the one renderer
+  // that runs third-party code. And they must exist where main looks: vite names its output
+  // after the entry, so renaming an entry is a Worker that never starts, in packaged builds.
+  it('keeps the extension sandbox scripts inside the archive, under the names main reads', () => {
+    const require_ = createRequire(require.resolve('app-builder-lib/package.json'));
+    const { minimatch } = require_('minimatch') as {
+      minimatch: (target: string, pattern: string) => boolean;
+    };
+    const unpack = buildConfig['asarUnpack'] as string[];
+    const files = buildConfig['files'] as string[];
+    const viteConfig = readFileSync(fileURLToPath(new URL('../../vite.config.ts', import.meta.url)), 'utf8');
+    const runtime = readFileSync(
+      fileURLToPath(new URL('../../electron/services/extension-runtime.ts', import.meta.url)),
+      'utf8'
+    );
+
+    for (const name of ['extension-sandbox-guest', 'extension-sandbox-preload']) {
+      const packaged = `dist-electron/${name}.js`;
+      expect(unpack.some((pattern) => minimatch(packaged, pattern)), packaged).toBe(false);
+      expect(files.some((pattern) => minimatch(packaged, pattern)), packaged).toBe(true);
+      expect(viteConfig).toContain(`entry: 'electron/extension-sandbox/${name}.ts'`);
+      expect(runtime).toContain(`join(__dirname, '${name}.js')`);
+    }
+  });
+
+  // electron-builder's default AppImage desktop entry is `Exec=AppRun --no-sandbox %U`, which
+  // would refuse extensions on machines where the sandbox works perfectly well. Empty lets
+  // AppRun decide, and it adds the switch only where `unshare -Ur true` fails. The name of
+  // the setting is checked against electron-builder's own source: it validates config, but
+  // an option it stops reading would quietly bring the default back.
+  it('does not write --no-sandbox into the AppImage desktop entry', () => {
+    const source = readFileSync(
+      join(dirname(require.resolve('app-builder-lib/package.json')), 'out/targets/appimage/AppImageTarget.js'),
+      'utf8'
+    );
+    expect(source).toContain('this.options.executableArgs');
+    expect((buildConfig['appImage'] as { executableArgs: string[] }).executableArgs).toEqual([]);
+  });
+
   // Every release artifact the publish job globs must have a target that
   // actually produces it. A target quietly dropped here means a platform
   // silently vanishes from the release page.

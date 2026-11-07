@@ -762,10 +762,16 @@ export async function installFromRegistry(
       await manager.uninstallExtension(entry.id);
     }
 
-    const installed = await manager.installExtension(staging);
-    if (previous) await restoreReaderChoices(manager, previous);
-    logger.info(`Installed ${installed.id} v${installed.version} from ${entry.sourceUrl}`);
-    return { id: installed.id, version: installed.version };
+    try {
+      const installed = await manager.installExtension(staging);
+      logger.info(`Installed ${installed.id} v${installed.version} from ${entry.sourceUrl}`);
+      return { id: installed.id, version: installed.version };
+    } finally {
+      // In a `finally`: a new version that fails to start is still installed, and failing
+      // to start must not also cost the reader their settings, or switch back on something
+      // they had turned off. Harmless if the install itself failed: nothing is registered.
+      if (previous) await restoreReaderChoices(manager, previous);
+    }
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }

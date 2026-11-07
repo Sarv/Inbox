@@ -1,13 +1,13 @@
 /**
  * The wire protocol between the main process and the extension sandbox.
  *
- * Extension code does not run in the main process. It runs in a separate
- * sandbox — one shared process for every extension, not one each — and reaches
- * the app only through the messages defined here. That boundary is the whole
- * point: an extension that throws, spins, or leaks takes its own process with
- * it and leaves mail sync, IMAP connections and the window untouched.
+ * Extension code does not run in the main process. Each extension runs in a
+ * sandbox of its own and reaches the app only through the messages defined
+ * here. That boundary is the whole point: an extension that throws, spins, or
+ * leaks takes its own sandbox with it and leaves mail sync, IMAP connections,
+ * the window and every other extension untouched.
  *
- * Two rules hold the design together:
+ * Three rules hold the design together:
  *
  *  1. **Permission checks live in main, always.** The sandbox mirrors the
  *     granted set so an authoring mistake fails fast and synchronously where it
@@ -18,12 +18,19 @@
  *     functions, no class instances, no `Error` objects — errors travel as
  *     `SerializedError` and are rebuilt on arrival, so a stack survives the
  *     trip and `instanceof Error` still holds where extensions catch it.
+ *  3. **Nothing a sandbox sends is believed about who sent it.** The engine on
+ *     the far side shares a thread with the extension, which can post anything
+ *     it likes on that port. So main binds one channel to one extension and
+ *     reads the sender from the channel. The `extensionId` fields below only
+ *     route inside the sandbox.
  */
 
 import type { PipelineEvent } from '../../pipeline/types';
 import type { EmailRecord } from '../../types/models';
 import type {
   ExtensionManifest,
+  ExtensionNetworkResponse,
+  ExtensionNetworkResult,
   ExtensionPermission,
   ExtensionWorkflowResult,
 } from '../types';
@@ -51,6 +58,24 @@ export function deserializeError(serialized: SerializedError): Error {
   // would only ever point at this function.
   if (serialized.stack) error.stack = serialized.stack;
   return error;
+}
+
+/**
+ * Put the reading methods back on a network result.
+ *
+ * Main answers with plain data, because that is what crosses the boundary. The
+ * body has already arrived whole, so these are ordinary calls, named as `fetch`
+ * names them so an extension moving off `fetch` changes as little as it can.
+ */
+export function networkResponseFrom(result: ExtensionNetworkResult): ExtensionNetworkResponse {
+  const { body, ...rest } = result;
+  const text = (): string => new TextDecoder().decode(body);
+  return {
+    ...rest,
+    bytes: () => body,
+    text,
+    json: <T,>(): T => JSON.parse(text()) as T,
+  };
 }
 
 /**
@@ -102,6 +127,7 @@ export type HostCallMethod =
   | 'mail.applyLabels'
   | 'mail.move'
   | 'mail.trash'
+  | 'network.fetch'
   | 'security.getTargets'
   | 'security.getSetup'
   | 'security.openSetup'
@@ -114,7 +140,6 @@ export type HostCallMethod =
   | 'ui.openMessage'
   | 'events.subscribe'
   | 'events.unsubscribe'
-  | 'events.emit'
   | 'workflow.register'
   | 'workflow.unregister';
 
@@ -142,11 +167,35 @@ export interface SandboxSyncState {
   settings: Record<string, unknown>;
 }
 
+/**
+ * Which extension a sandbox is being started for.
+ *
+ * One sandbox runs one extension, so the channel factory is told which. Paths
+ * here are real and stay on the host's side of the boundary: nothing absolute
+ * is sent into the sandbox (see `SandboxActivationRequest`).
+ */
+export interface SandboxTarget {
+  extensionId: string;
+  /** Absolute path of the extension's installed folder. */
+  rootDir: string;
+  /** Absolute path of the module to load, inside `rootDir`. */
+  entryPoint: string;
+}
+
 /** Everything the sandbox needs to bring one extension up. */
 export interface SandboxActivationRequest {
   extensionId: string;
   manifest: ExtensionManifest;
+  /**
+   * The module to load, relative to the extension's folder with `/` separators
+   * on every platform. Relative because an absolute path would tell confined
+   * code where the user's home directory is.
+   */
   entryPoint: string;
+  /**
+   * What `context.storagePath` reads. Not a real directory: confined code has
+   * no filesystem to use it with, and the real one would name the user's home.
+   */
   storagePath: string;
   grantedPermissions: ExtensionPermission[];
   state: SandboxSyncState;
@@ -169,6 +218,8 @@ export type HostToSandboxMessage =
   | { type: 'host-reply'; requestId: string; ok: boolean; value?: unknown; error?: SerializedError }
   /** A push refreshing the values the sandbox has to answer synchronously. */
   | { type: 'sync-state'; extensionId: string; state: Partial<SandboxSyncState> }
+  /** Are you still running? Answered with `pong` from the sandbox's own event loop. */
+  | { type: 'ping'; nonce: number }
   | { type: 'shutdown' };
 
 /** Messages the sandbox sends back to the main process. */
@@ -198,7 +249,15 @@ export type SandboxToHostMessage =
       extensionId: string;
       level: 'debug' | 'info' | 'warn' | 'error';
       message: string;
-    };
+    }
+  /** The answer to `ping`, echoing its nonce. */
+  | { type: 'pong'; nonce: number }
+  /**
+   * The extension failed because it used a Node API the sandbox does not have.
+   * Main tells the user: an extension written for the old full-Node runtime
+   * must not simply stop doing anything.
+   */
+  | { type: 'unsupported-api'; extensionId: string; api: string };
 
 /** The pipeline event handed to a sandbox subscription. */
 export interface DispatchedEvent {
@@ -218,12 +277,32 @@ export interface SerializedWorkflowCall {
  * A duplex message channel, in the smallest shape both ends need.
  *
  * Deliberately not Electron's `MessagePort` or Node's `worker_threads` port:
- * the same sandbox engine has to run over a `utilityProcess` in the app and
+ * the same sandbox engine has to run over a Web Worker's port in the app and
  * over an in-memory pair in the tests, and neither should know which it got.
  */
 export interface ExtensionChannel {
   post(message: unknown): void;
   onMessage(handler: (message: unknown) => void): void;
-  onClose(handler: () => void): void;
-  close(): void;
+  /**
+   * Called once, when the other end is gone. `reason`, when the transport knows
+   * one, is said to the user as is: "stopped responding and was stopped". `details`
+   * says whether it is worth starting the extension again.
+   */
+  onClose(handler: (reason?: string, details?: SandboxCloseDetails) => void): void;
+  /** Close it. A transport with something to tear down resolves once that is done. */
+  close(): void | Promise<void>;
+  /**
+   * End it now, whatever it is doing, for a reason the user is told. Left out by a
+   * transport with nothing to kill, such as an in-memory pair.
+   */
+  kill?(reason: string): void;
+}
+
+/** How a sandbox ended, for deciding what happens next. */
+export interface SandboxCloseDetails {
+  /**
+   * It crashed, or the operating system took it away, and may well run if started again.
+   * False when it was stopped on purpose: a hang, a flood, a broken rule.
+   */
+  transient: boolean;
 }

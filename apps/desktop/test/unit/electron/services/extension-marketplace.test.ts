@@ -9,8 +9,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 /**
  * Installing an extension published on GitHub.
  *
- * What this protects: an extension runs as full code in the extension process
- * with real access to the user's mail, and the app's only defences are a pinned
+ * What this protects: an extension gets real access to the user's mail through the
+ * permissions it is granted, and the app's only defences here are a pinned
  * SHA-256, a size cap, an archive allowlist and a permission prompt the user
  * actually saw. Each
  * of those is one `if` away from being decoration, and a regression in any of
@@ -972,6 +972,23 @@ describe('installFromRegistry', () => {
     expect(h.disabled).toEqual(['otp-code']);
     // Nothing to carry, so nothing should have been written.
     expect(h.settingsWrites).toEqual([]);
+  });
+
+  // Regression: a new version that failed to start threw past the restore, so an update
+  // cost the reader their settings and switched back on what they had turned off, on top
+  // of whatever made it fail. The install happened either way; the choices must follow it.
+  it('still restores the reader choices when the new version fails to start', async () => {
+    h.installed = [{ id: 'otp-code', version: '0.9.0', enabled: false, settings: { a: 1 } }];
+    h.installThrows = 'This extension uses Node\'s "fs"';
+    const archive = archiveFor();
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    await expect(installFromRegistry('otp-code', ['email:read', 'ui:notify'])).rejects.toThrow('"fs"');
+
+    expect(h.settingsWrites).toEqual([{ id: 'otp-code', settings: { a: 1 } }]);
+    expect(h.disabled).toEqual(['otp-code']);
   });
 
   // Regression: a first install has no previous choices to restore, and writing

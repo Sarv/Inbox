@@ -9,12 +9,14 @@ import { createLogger, parsePanelRequest, toPanelMessage } from '@sarvinbox/core
 import { ipcMain, dialog } from 'electron';
 
 import { getAntivirusScanService } from '../services/antivirus-scan-service';
+import { getExtensionCrashGuard } from '../services/extension-crash-guard';
 import {
   fetchCatalog,
   getExtensionsConfig,
   getRegistryEntry,
   installFromRegistry,
 } from '../services/extension-marketplace';
+import { takeHeldProblems } from '../services/extension-ui-backend';
 import { getExtensionManager, getMainWindow, getStorage } from '../shared';
 
 const logger = createLogger('extension-handlers');
@@ -328,6 +330,30 @@ export function registerExtensionHandlers(): void {
   });
 
   // ========== Panels ==========
+
+  /**
+   * Cards about extensions that are not working, raised before the window was
+   * listening. Asked for once by the card stack when it mounts.
+   */
+  ipcMain.handle('extensions:takeHeldProblems', () => takeHeldProblems());
+
+  /**
+   * The extensions whose code was not started this launch because the app kept dying while
+   * starting extensions. Their approvals and data are untouched; this is only code.
+   */
+  ipcMain.handle('extensions:getHeldBack', () => getExtensionManager()?.getHeldBack() ?? []);
+
+  /** The reader turned them back on. If they bring the app down again, they are held again. */
+  ipcMain.handle('extensions:startHeldBack', async () => {
+    try {
+      getExtensionCrashGuard()?.release();
+      await getExtensionManager()?.startHeldBack();
+      return { success: true };
+    } catch (error) {
+      logger.error('[Extensions] Start held-back error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
 
   /**
    * Every panel the app should offer right now.

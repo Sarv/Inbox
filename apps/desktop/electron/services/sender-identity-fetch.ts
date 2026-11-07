@@ -150,10 +150,10 @@ export interface SenderIdentityFetchOptions {
   request?: HttpsRequest;
 }
 
-const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+export const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /** One header from Node's lower-cased map, joined the way WHATWG `Headers.get` joins repeats. */
-function headerValue(headers: IncomingHttpHeaders, name: string): string | null {
+export function headerValue(headers: IncomingHttpHeaders, name: string): string | null {
   const value = headers[name.toLowerCase()];
   if (value === undefined) return null;
   return Array.isArray(value) ? value.join(', ') : value;
@@ -202,7 +202,7 @@ function sendRequest(send: HttpsRequest, target: Extract<DestinationCheck, { ok:
  * connection. A connection that closes before the body is complete is an
  * error, as it was through Chromium.
  */
-function readCapped(res: IncomingMessage, cap: number): Promise<Buffer> {
+export function readCapped(res: IncomingMessage, cap: number): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -249,12 +249,11 @@ export function senderIdentityFetch(options: SenderIdentityFetchOptions): FetchL
         // A private DNS answer is not refused for good: see the header.
         if (e instanceof RefusedDestinationError) logRefusal(current, e.reason);
         throw e;
-        throw e;
       }
 
       const status = res.statusCode ?? 0;
       const location = headerValue(res.headers, 'location');
-      if (REDIRECTS.has(status) && location !== null) {
+      if (REDIRECT_STATUSES.has(status) && location !== null) {
         req.destroy();
         if (redirects >= MAX_REDIRECTS) return refused(current, 'too-many-redirects');
         try {

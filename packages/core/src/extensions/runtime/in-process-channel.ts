@@ -6,9 +6,10 @@
  * - Tests drive the real sandbox engine over this instead of a stand-in, so
  *   what the suite exercises is the code that ships. A mock of the sandbox
  *   would prove only that the mock agrees with itself.
- * - Headless contexts (the CLI, a non-Electron embedder) have no
- *   `utilityProcess` to fork, and running extensions in-process there is the
- *   same trade the desktop app used to make everywhere.
+ * - Headless contexts (the CLI, a non-Electron embedder) have no renderer to
+ *   confine anything in, and running extensions in-process there is the same
+ *   trade the desktop app used to make everywhere. The desktop app itself never
+ *   runs extension code this way.
  *
  * Delivery is asynchronous on purpose. A synchronous hand-off would let a
  * sandbox reply land inside the caller's own `post()` stack frame, so a bug
