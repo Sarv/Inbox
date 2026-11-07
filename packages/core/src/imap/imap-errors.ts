@@ -8,7 +8,7 @@
 // isConnectionError, since a quota/throttle error is not a socket failure and
 // must be backed off, not reconnected.
 
-import { isOAuthTokenError, isTerminalOAuthError } from '../oauth/oauth-errors';
+import { isTerminalOAuthError, oauthTokenErrorOf } from '../oauth/oauth-errors';
 
 type AnyErr = Error & {
   code?: string;
@@ -208,7 +208,11 @@ export function isAuthError(error: unknown): boolean {
   // distinction that matters is by ERROR CODE: a refresh cut short by a closing
   // laptop lid or a network blip must NOT latch this, or a sleeping machine
   // would stop reconnecting until the user signed in again.
-  if (isOAuthTokenError(error)) return isTerminalOAuthError(error);
+  //
+  // The IMAP client re-throws that failure under its own OAUTH_REFRESH_FAILED,
+  // so the token layer's error is usually on `cause`, not the error itself.
+  const tokenError = oauthTokenErrorOf(error);
+  if (tokenError !== undefined) return isTerminalOAuthError(tokenError);
   const m = haystack(error);
   return (
     m.includes('invalid credentials') ||

@@ -4,6 +4,7 @@ import {
   isOAuthServerUnreachableError,
   isOAuthTokenError,
   isTerminalOAuthError,
+  oauthTokenErrorOf,
 } from '../../../src/oauth/oauth-errors';
 import { OAuthError } from '../../../src/oauth/types';
 
@@ -126,6 +127,49 @@ describe('isTerminalOAuthError', () => {
     expect(isTerminalOAuthError(null)).toBe(false);
     expect(isTerminalOAuthError(undefined)).toBe(false);
     expect(isTerminalOAuthError('invalid_grant')).toBe(false);
+  });
+
+  // A layer that re-throws a refresh failure under its own code (the IMAP
+  // client's OAUTH_REFRESH_FAILED) is judged by the token error on its `cause`,
+  // not by its own text. Breaks if the wrapper's text wins: the connect handler
+  // misses a replayed REAUTH_REQUIRED whose reason carries no "(400)", or reads
+  // a busy provider as a dead grant.
+  const wrapped = (cause: unknown, message = 'OAuth token refresh failed') =>
+    Object.assign(new Error(message), { code: 'OAUTH_REFRESH_FAILED', cause });
+
+  it('judges a wrapped token error by its cause', () => {
+    expect(isTerminalOAuthError(wrapped(new OAuthError('needs sign-in', 'REAUTH_REQUIRED')))).toBe(true);
+    expect(isTerminalOAuthError(wrapped(coded('TOKEN_DESTINATION_REFUSED')))).toBe(true);
+    expect(isTerminalOAuthError(wrapped(coded('TOKEN_REFRESH_TIMEOUT'), 'OAuth token refresh failed (400)'))).toBe(false);
+    expect(isTerminalOAuthError(wrapped(coded('TOKEN_REFRESH_FAILED', 'Token refresh failed (503): unavailable')))).toBe(false);
+  });
+
+  // A wrapper with no token-layer cause keeps today's behaviour exactly.
+  it('reads a wrapper without a token-layer cause as before', () => {
+    expect(isTerminalOAuthError(wrapped(new Error('socket hang up'), 'Token refresh failed (400): invalid_grant'))).toBe(true);
+    expect(isTerminalOAuthError(wrapped(undefined))).toBe(false);
+  });
+});
+
+describe('oauthTokenErrorOf', () => {
+  // The one place that decides which error a classifier should read. Breaks:
+  // a wrapper hides the token layer's code and the auth latch never fires.
+  it('returns a token error itself, or the token error a wrapper carries', () => {
+    const own = coded('TOKEN_REFRESH_FAILED');
+    expect(oauthTokenErrorOf(own)).toBe(own);
+    expect(oauthTokenErrorOf(Object.assign(new Error('wrapped'), { cause: own }))).toBe(own);
+  });
+
+  // Only ONE level, and only a cause from the token layer. Breaks: an
+  // arbitrary error chain is read through a classifier that matches "(400)".
+  it('returns undefined for anything else', () => {
+    expect(oauthTokenErrorOf(new Error('Command failed (400)'))).toBeUndefined();
+    expect(oauthTokenErrorOf(Object.assign(new Error('wrapped'), { cause: new Error('socket hang up') }))).toBeUndefined();
+    expect(oauthTokenErrorOf(Object.assign(new Error('outer'), {
+      cause: Object.assign(new Error('middle'), { cause: coded('REAUTH_REQUIRED') }),
+    }))).toBeUndefined();
+    expect(oauthTokenErrorOf(null)).toBeUndefined();
+    expect(oauthTokenErrorOf(undefined)).toBeUndefined();
   });
 });
 

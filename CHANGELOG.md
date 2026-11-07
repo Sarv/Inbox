@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contents into the log. A PGP key the system keychain will not open now says
   so, and asks you to unlock the keychain or allow Sarv Inbox to use it.
 
+### Fixed
+- After you change your Google or Microsoft password, Sarv Inbox stops
+  reconnecting with the old sign-in at once and asks you to sign in again.
+  Before, it could keep retrying the revoked sign-in in the background for up
+  to 45 minutes. A brief network drop still reconnects on its own.
+
 ## [1.4.10] - 2026-10-30
 
 ### Added
