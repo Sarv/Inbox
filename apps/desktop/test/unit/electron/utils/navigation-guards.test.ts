@@ -1,4 +1,4 @@
-import { ATTACHMENT_SCHEME } from '@sarvinbox/core';
+import { ATTACHMENT_SCHEME, panelAssetUrl } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import { installNavigationGuards, type GuardedNavigation } from '../../../../electron/utils/navigation-guards';
@@ -16,8 +16,13 @@ function harness() {
   const contents = { on: vi.fn((name: string, fn: (event: GuardedNavigation) => void) => { listeners.set(name, fn); }) };
   const deps = { openExternal: vi.fn(async () => {}), warn: vi.fn() };
   installNavigationGuards(contents as never, APP, deps);
-  const fire = (name: 'will-navigate' | 'will-frame-navigate', url: unknown, isMainFrame?: boolean) => {
-    const event = { url, isMainFrame, preventDefault: vi.fn() } as unknown as GuardedNavigation & { preventDefault: ReturnType<typeof vi.fn> };
+  const fire = (
+    name: 'will-navigate' | 'will-frame-navigate',
+    url: unknown,
+    isMainFrame?: boolean,
+    from?: Pick<GuardedNavigation, 'frame' | 'initiator'>,
+  ) => {
+    const event = { url, isMainFrame, ...from, preventDefault: vi.fn() } as unknown as GuardedNavigation & { preventDefault: ReturnType<typeof vi.fn> };
     listeners.get(name)!(event);
     return event;
   };
@@ -55,6 +60,58 @@ describe('installNavigationGuards', () => {
     const url = `${ATTACHMENT_SCHEME}://attachment/email-1/report.pdf`;
     expect(fire('will-frame-navigate', url, true).preventDefault).toHaveBeenCalledOnce();
     expect(fire('will-frame-navigate', url, false).preventDefault).not.toHaveBeenCalled();
+  });
+
+  describe('extension panels', () => {
+    const PANEL = panelAssetUrl('clamav-scan', 'panel/index.html');
+    const OTHER = panelAssetUrl('other-ext', 'panel/index.html');
+    /** A WebFrameMain whose render frame is gone: Electron's getters throw. */
+    const disposed = {
+      get url(): string {
+        throw new Error('Render frame was disposed before WebFrameMain could be accessed');
+      },
+    };
+
+    // Breaks: no panel loads. The frame guard must hand the policy the frame
+    // that set the iframe's src, or the app's own panel load is refused.
+    it('lets the app load a panel into an iframe', () => {
+      const { fire, deps } = harness();
+      const event = fire('will-frame-navigate', PANEL, false, { frame: { url: '' }, initiator: { url: APP } });
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(deps.warn).not.toHaveBeenCalled();
+    });
+
+    // Breaks: a panel navigates itself into another extension's page.
+    it('blocks a panel moving itself to another extension', () => {
+      const { fire, deps } = harness();
+      const event = fire('will-frame-navigate', OTHER, false, { frame: { url: PANEL }, initiator: { url: PANEL } });
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      expect(deps.warn).toHaveBeenCalledWith(expect.stringContaining('Blocked frame-level'), OTHER);
+    });
+
+    // Breaks: a panel replaces the window. The main frame gets the top-level
+    // rules even when the app itself started the navigation.
+    it('blocks a panel in the main frame on both events', () => {
+      const { fire } = harness();
+      expect(fire('will-frame-navigate', PANEL, true, { frame: { url: APP }, initiator: { url: APP } }).preventDefault).toHaveBeenCalledOnce();
+      expect(fire('will-navigate', PANEL).preventDefault).toHaveBeenCalledOnce();
+    });
+
+    // Breaks: a disposed frame's throwing getter escapes the guard before
+    // preventDefault, and the navigation goes ahead unchecked.
+    it('blocks when the frame and initiator cannot be read', () => {
+      const { fire } = harness();
+      expect(fire('will-frame-navigate', PANEL, false, { frame: disposed, initiator: disposed }).preventDefault).toHaveBeenCalledOnce();
+      expect(fire('will-frame-navigate', PANEL, false, { frame: null, initiator: null }).preventDefault).toHaveBeenCalledOnce();
+    });
+
+    // Breaks: one unreadable field sinks the other. A panel following its own
+    // link is decided by the frame alone when the initiator is gone.
+    it('reads the frame even when the initiator is unreadable', () => {
+      const { fire } = harness();
+      const next = panelAssetUrl('clamav-scan', 'panel/details.html');
+      expect(fire('will-frame-navigate', next, false, { frame: { url: PANEL }, initiator: disposed }).preventDefault).not.toHaveBeenCalled();
+    });
   });
 
   // The URL is read from the event object. Breaks: if Electron stops sending

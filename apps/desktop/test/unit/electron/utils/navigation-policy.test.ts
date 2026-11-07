@@ -1,4 +1,4 @@
-import { ATTACHMENT_SCHEME } from '@sarvinbox/core';
+import { ATTACHMENT_SCHEME, PANEL_SCHEME, panelAssetUrl } from '@sarvinbox/core';
 import { describe, it, expect } from 'vitest';
 
 import { classifyNavigation } from '../../../../electron/utils/navigation-policy';
@@ -145,6 +145,91 @@ describe('classifyNavigation', () => {
     // the app, or everything. Neither: only the entry itself.
     it('does not let the dev rule (same host) admit files', () => {
       expect(classifyNavigation('file:///Users/me/x.html', 'file:///', 'top')).toBe('block');
+    });
+  });
+
+  // Extension panels: ExtensionPanelFrame points an iframe at
+  // sarv-extension://<extension-id>/..., served by extension-panel-protocol.ts.
+  describe('extension panels', () => {
+    const PANEL = panelAssetUrl('clamav-scan', 'panel/index.html');
+    const DETAILS = panelAssetUrl('clamav-scan', 'panel/details.html');
+    /** The app setting a fresh iframe's src, as Electron 44 reports it. */
+    const FROM_APP = { frameUrl: '', initiatorUrl: `${DEV_ORIGIN}/` };
+    /** The panel following one of its own links. */
+    const FROM_PANEL = { frameUrl: PANEL, initiatorUrl: PANEL };
+
+    // Breaks: no extension panel can load. The frame guard refused the panel
+    // iframe ("Blocked frame-level navigation") and the ClamAV panel stayed blank.
+    it('lets the app load a panel into a frame', () => {
+      expect(classifyNavigation(PANEL, DEV_ORIGIN, 'frame', FROM_APP)).toBe('allow');
+      expect(
+        classifyNavigation(PANEL, PROD_APP, 'frame', { frameUrl: '', initiatorUrl: `${PROD_APP}#/inbox` })
+      ).toBe('allow');
+    });
+
+    // Breaks: a window-level navigation to a panel replaces the whole app with
+    // an extension's page. Frame scope only, even when the app asks.
+    it('refuses a panel at the top level', () => {
+      expect(classifyNavigation(PANEL, DEV_ORIGIN, 'top', FROM_APP)).toBe('block');
+      expect(classifyNavigation(PANEL, PROD_APP, 'top')).toBe('block');
+    });
+
+    // Breaks: a scheme that merely starts like the panel one rides its allowance.
+    it.each([
+      'sarv-extensions://clamav-scan/panel/index.html',
+      'sarv-extension-evil://clamav-scan/panel/index.html',
+      'xsarv-extension://clamav-scan/panel/index.html',
+    ])('blocks the lookalike scheme %s', (url) => {
+      expect(classifyNavigation(url, DEV_ORIGIN, 'frame', FROM_APP)).toBe('block');
+    });
+
+    // Breaks: a panel with more than one page cannot follow its own links.
+    it('lets a panel move between its own pages', () => {
+      expect(classifyNavigation(DETAILS, DEV_ORIGIN, 'frame', FROM_PANEL)).toBe('allow');
+      // With no initiator to read, what the frame shows now decides alone.
+      expect(classifyNavigation(PANEL, DEV_ORIGIN, 'frame', { frameUrl: DETAILS })).toBe('allow');
+    });
+
+    // Breaks: a panel navigates itself into another extension's page (Chromium
+    // allows it), which then runs under the first extension's grants: the
+    // renderer attributes the frame's requests to the extension it pointed it at.
+    it.each([panelAssetUrl('other-ext', 'panel/index.html'), `${PANEL_SCHEME}://sdk/sarv.js`])(
+      'refuses a panel navigating itself to %s',
+      (url) => {
+        expect(classifyNavigation(url, DEV_ORIGIN, 'frame', FROM_PANEL)).toBe('block');
+      }
+    );
+
+    // Breaks: a link in an email body or an attachment frame loads an
+    // extension's page into the reading pane. Only the app puts a panel in a frame.
+    it.each(['about:srcdoc', `${ATTACHMENT_SCHEME}://attachment/email-1/report.pdf`])(
+      'refuses a panel page in a %s frame',
+      (frameUrl) => {
+        expect(classifyNavigation(PANEL, DEV_ORIGIN, 'frame', { frameUrl, initiatorUrl: frameUrl })).toBe(
+          'block'
+        );
+      }
+    );
+
+    // Breaks: a navigation whose source is unknown (a disposed frame) or only
+    // looks like the app is treated as the app's own and admitted.
+    it('refuses a panel when the source is unknown or only looks like the app', () => {
+      expect(classifyNavigation(PANEL, DEV_ORIGIN, 'frame')).toBe('block');
+      expect(
+        classifyNavigation(PANEL, DEV_ORIGIN, 'frame', { initiatorUrl: 'http://localhost:5173.evil.example/' })
+      ).toBe('block');
+      expect(
+        classifyNavigation(PANEL, PROD_APP, 'frame', { initiatorUrl: 'file:///Users/me/Downloads/invoice.html' })
+      ).toBe('block');
+    });
+
+    // Breaks: the app can no longer re-point a frame that already shows a panel
+    // (a re-render that reuses the iframe). The app chose the new extension.
+    it('lets the app re-point a panel frame at another extension', () => {
+      const other = panelAssetUrl('other-ext', 'panel/index.html');
+      expect(
+        classifyNavigation(other, DEV_ORIGIN, 'frame', { frameUrl: PANEL, initiatorUrl: `${DEV_ORIGIN}/` })
+      ).toBe('allow');
     });
   });
 

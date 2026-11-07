@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contents into the log. A PGP key the system keychain will not open now says
   so, and asks you to unlock the keychain or allow Sarv Inbox to use it.
 
+### Fixed
+- **Extension panels now open.** The window's navigation guard refused every
+  extension panel, so a panel such as the ClamAV scanner's stayed blank. A
+  panel now loads where the app places it and can follow links between its own
+  pages. It still cannot replace the app window, move to another extension's
+  pages, or be opened by a link in an email.
+
 ## [1.4.10] - 2026-10-30
 
 ### Added
