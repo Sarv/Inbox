@@ -81,6 +81,16 @@ const logger = createLogger('oauth-service');
 const REFRESH_MIN_REMAINING_SEC = 300;
 const REFRESH_AT_FRACTION = 0.75;
 
+// A forced refresh recovers a token the server refused although our clock still
+// called it valid (skew, idle ageing, a server-side reissue). A token minted
+// less than this long ago cannot be any of those: its successor carries the same
+// grant and audience and is refused the same way, while every refresh spends the
+// refresh token (and, on a rotating provider, replaces it). Within this window a
+// force is ignored and the normal gate decides. Measured 2026-11-07: a 401 on
+// every Sarv catalog call ("Token audience does not match this service") forced
+// 9 refreshes in one minute.
+const FORCED_REFRESH_MIN_AGE_SEC = 60;
+
 /**
  * Load OAuth client IDs from env at startup. Call once from main.ts.
  */
@@ -402,8 +412,10 @@ export async function getValidAccessToken(
   // `forceRefresh` bypasses the proactive expiry gate — used to recover from a
   // 401 where the resource server rejected a token our local clock still
   // thought was valid (clock skew, server-side revocation-then-reissue, or a
-  // token that aged out while the app sat idle and made no calls).
-  if (!forceRefresh && !shouldRefresh(account)) {
+  // token that aged out while the app sat idle and made no calls). Not for a
+  // token minted moments ago (FORCED_REFRESH_MIN_AGE_SEC).
+  const forced = forceRefresh && !mintedWithin(account, FORCED_REFRESH_MIN_AGE_SEC);
+  if (!forced && !shouldRefresh(account)) {
     if (!account.accessToken || account.accessToken.trim() === '') {
       // Stored token is blank — treat as if the account never completed
       // sign-in. Forcing the caller to re-authorize beats sending an
@@ -496,10 +508,9 @@ export async function getValidAccessToken(
 
     // Observability: does this provider ROTATE the refresh token? A rotating
     // provider returns a NEW refresh_token on each refresh (sliding window);
-    // Sarv does NOT today (30-day static token, no refresh_token in the refresh
-    // response). Logging it makes the behaviour verifiable at runtime and flags
-    // a silent policy change if Sarv ever starts rotating. Low-frequency (once
-    // per ~10-min token cycle).
+    // Sarv does (seen in the dev log on 2026-11-07: "ROTATED" on every refresh).
+    // Logging it makes the behaviour verifiable at runtime and flags a silent
+    // policy change. Low-frequency (once per ~10-min token cycle).
     const rotated = !!tokens.refresh_token && tokens.refresh_token !== account.refreshToken;
     logger.info(
       `[OAuth] ${providerId}:${email} refreshed — refresh_token ${
@@ -637,6 +648,16 @@ export function msUntilRefresh(account: OAuthAccount): number {
 
 function shouldRefresh(account: OAuthAccount): boolean {
   return msUntilRefresh(account) <= 0;
+}
+
+/**
+ * Whether the stored access token was minted less than `seconds` ago, by our
+ * own clock: `updatedAt` is written only at sign-in and on each refresh. A clock
+ * that stepped backwards reads as "just minted", which only defers a force to
+ * the normal gate.
+ */
+function mintedWithin(account: OAuthAccount, seconds: number): boolean {
+  return Math.floor(Date.now() / 1000) - account.updatedAt < seconds;
 }
 
 /**
