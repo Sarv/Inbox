@@ -14,5 +14,9 @@
 # must never rewrite their line endings.
 packages/core/test/unit/pgp/fixtures/** -text
 
+# BIMI certificate fixture: the certificate's logotype hash covers logo.svg's
+# exact bytes.
+packages/core/test/unit/utils/fixtures/bimi/** -text
+
 # Generated — collapse in diffs / exclude from language stats
 pnpm-lock.yaml linguist-generated=true

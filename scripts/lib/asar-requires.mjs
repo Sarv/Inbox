@@ -29,6 +29,30 @@ import { builtinModules } from 'node:module';
  */
 const REQUIRE_PATTERN = /\b(?:require|(?<!\.)import)\(\s*["'`](@?[a-z0-9][\w.-]*(?:\/[\w.@-]+)*)["'`]\s*\)/gi;
 
+/**
+ * What vite bundles in place of an OPTIONAL peer dependency that was not
+ * installed at build time: a module that throws
+ *   Could not resolve "<peer>" imported by "<package>". Is it installed?
+ * when it is first loaded. No require() of the peer survives, so the walk
+ * below cannot see it, and the build prints nothing. BIMI's Verified Mark
+ * check shipped that way from 2026-09-21 (@peculiar/x509 and reflect-metadata
+ * undeclared): every certificate failed, and no sender got the verified tick.
+ */
+const UNRESOLVED_PEER_PATTERN =
+  /Could not resolve "(@?[a-z0-9][\w.-]*(?:\/[\w.@-]+)*)" imported by "(@?[a-z0-9][\w.-]*(?:\/[\w.@-]+)*)"\. Is it installed\?/gi;
+
+/**
+ * Optional peers the app leaves out on purpose, keyed by the package that
+ * declares them. A stub for one of these throws only if its feature is
+ * called, and nothing in the app calls it. Each entry needs its reason.
+ */
+export const OPTIONAL_PEERS_LEFT_OUT = Object.freeze({
+  // Only mailguard's verifyAuthentication() loads mailauth, to re-run SPF,
+  // DKIM and DMARC over DNS. Inbox reads the receiving server's
+  // Authentication-Results instead and never calls it.
+  '@sarv-in/mailguard': Object.freeze(['mailauth']),
+});
+
 const BUILTINS = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
 
 /** Electron's own modules, provided by the runtime rather than node_modules. */
@@ -69,6 +93,24 @@ export function requiredPackagesOf(source) {
   return [...new Set(names)].sort();
 }
 
+/**
+ * Every optional peer `source` carries vite's throwing stand-in for, other
+ * than the ones left out on purpose.
+ * @param {string} source JavaScript source.
+ * @param {Readonly<Record<string, readonly string[]>>} [leftOut]
+ * @returns {Array<{ name: string, importer: string }>} Sorted by importer, then name.
+ */
+export function unresolvedPeersOf(source, leftOut = OPTIONAL_PEERS_LEFT_OUT) {
+  const found = new Map();
+  for (const [, specifier, importer] of source.matchAll(UNRESOLVED_PEER_PATTERN)) {
+    const name = packageNameOf(specifier);
+    if (Object.hasOwn(leftOut, importer) && leftOut[importer].includes(name)) continue;
+    found.set(`${importer}\0${name}`, { name, importer });
+  }
+  // Code-point order, like the sorted names elsewhere here, not a locale's.
+  return [...found.keys()].sort().map((key) => found.get(key));
+}
+
 /** @param {string} file */
 const isScript = (file) => /\.(c|m)?js$/.test(file);
 
@@ -97,7 +139,12 @@ export function owningPackageOf(file) {
  * @param {string[]} files Every file in the archive, `/`-separated, no leading slash.
  * @param {(file: string) => string} read Contents of one of those files.
  * @param {string[]} [entryDirs] Where the app's own code lives.
- * @returns {{ missing: Array<{ name: string, requiredBy: string }>, reached: string[], packed: string[] }}
+ * @returns {{
+ *   missing: Array<{ name: string, requiredBy: string }>,
+ *   unresolved: Array<{ name: string, importer: string, file: string }>,
+ *   reached: string[],
+ *   packed: string[],
+ * }} `unresolved`: optional peers the app's bundles carry a throwing stand-in for.
  */
 export function analyseRequires(files, read, entryDirs = ['dist-electron']) {
   const packed = [...new Set(files.filter((file) => file.startsWith('node_modules/')).map(owningPackageOf))]
@@ -127,5 +174,13 @@ export function analyseRequires(files, read, entryDirs = ['dist-electron']) {
     }
   }
 
-  return { missing, reached: [...reached].sort(), packed };
+  /** @type {Array<{ name: string, importer: string, file: string }>} */
+  const unresolved = [];
+  for (const file of entryScripts) {
+    for (const peer of unresolvedPeersOf(read(file))) {
+      if (!unresolved.some((u) => u.name === peer.name && u.importer === peer.importer)) unresolved.push({ ...peer, file });
+    }
+  }
+
+  return { missing, unresolved, reached: [...reached].sort(), packed };
 }

@@ -24,7 +24,16 @@
  * the whole policy stays unit-testable with a fake resolver and fetch, and the
  * main process hands in Chromium's `net.fetch`. Nothing here caches; the
  * caller does (see domain-identity-store.ts).
+ *
+ * The certificate half runs on the library's OPTIONAL peer dependencies —
+ * `@peculiar/x509` (with `reflect-metadata` loaded first, which the library
+ * does itself) and `asn1js` — so they are dependencies of this package. When
+ * one is missing nothing throws: every certificate lands as "logo, certificate
+ * not verified" and no sender ever gets the tick. {@link vmcVerifierUnavailable}
+ * is how a caller finds that out instead.
  */
+import { extractLogotypeEvidence, validateVmc } from '@sarv-in/mailguard/brand';
+
 export {
   BIMI_SELECTOR,
   BIMI_EVIDENCE_MAX_BYTES,
@@ -64,3 +73,21 @@ export type {
   FetchedBytes,
   FetchBoundedOptions,
 } from '@sarv-in/mailguard/brand';
+
+/**
+ * Why this build cannot verify a Verified Mark Certificate, or null when it can.
+ *
+ * Each library call loads its optional peer before it looks at its input, and
+ * throws only when that peer cannot be loaded: `validateVmc` needs
+ * `@peculiar/x509`, `extractLogotypeEvidence` needs `asn1js`. Given nothing to
+ * check, both otherwise answer at once without touching the network.
+ */
+export async function vmcVerifierUnavailable(): Promise<string | null> {
+  try {
+    await validateVmc('', '', new Uint8Array(0));
+    await extractLogotypeEvidence(new Uint8Array(0));
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}

@@ -1,8 +1,9 @@
-import type { BimiLookup, FaviconResult } from '@sarvinbox/core';
+import { lookupBimi as realLookupBimi, setLogSink, type BimiLookup, type FaviconResult, type LogLevel } from '@sarvinbox/core';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
+  probe: vi.fn(async (): Promise<string | null> => null),
   blobs: new Map<string, Buffer>(),
   runtimes: [] as Array<[string, { storage: unknown; syncEngine: null; smtpClient: null }]>,
   sent: [] as Array<{ channel: string; payload: unknown }>,
@@ -19,7 +20,14 @@ vi.mock('../../../../electron/services/core-db', () => ({
   setBlob: (k: string, v: Buffer) => { h.blobs.set(k, v); },
 }));
 vi.mock('../../../../electron/services/net-fetch', () => ({ chromiumFetch: vi.fn() }));
+// Only the startup probe is faked, so the scheduler's report can be watched;
+// the lookup, the logger and the rest of core are real.
+vi.mock('@sarvinbox/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@sarvinbox/core')>()),
+  vmcVerifierUnavailable: () => h.probe(),
+}));
 
+import { VMC_DOMAIN, VMC_VERIFIED, vmcLookupOptions } from '../../../../../../packages/core/test/unit/utils/fixtures/bimi/vmc-fixture';
 import { DomainIdentityStore } from '../../../../electron/services/domain-identity-store';
 import {
   SenderIdentityService,
@@ -27,10 +35,13 @@ import {
   identityFromRow,
   lookupDomain,
   normalizeSenderIdentityPolicy,
+  reportVmcVerifier,
   resetSenderIdentityPolicyCache,
   senderDomain,
   senderIdentityTick,
   setSenderIdentityPolicy,
+  startSenderIdentityScheduler,
+  stopSenderIdentityScheduler,
   type SenderIdentityPolicy,
 } from '../../../../electron/services/sender-identity-service';
 
@@ -363,5 +374,81 @@ describe('senderIdentityTick', () => {
     h.runtimes = [['acct-1', { storage: { getRecentSenderDomains: async () => ['a.example'] }, syncEngine: null, smtpClient: null }]];
     expect(await senderIdentityTick(svc)).toBe(0);
     expect(lookupBimi).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The verified tick end to end in the main process: the REAL lookup (core,
+ * then mailguard, then @peculiar/x509) over core's throwaway certificate
+ * fixture, cached by the real store and shaped for the renderer, which draws
+ * the tick from `bimi.status === 'verified'` on mail that passed DMARC.
+ *
+ * REGRESSION (shipped 2026-09-21, found 2026-11-03): with the certificate
+ * library not installed, this same lookup answers "logo" with "Certificate not
+ * verified: … needs the optional peer dependency", and no sender gets the tick.
+ */
+describe('the verified tick on a real certificate', () => {
+  it('caches a certificate that chains to a pinned root as verified', async () => {
+    const { svc, lookupBimi } = harness();
+    lookupBimi.mockImplementation((domain) => realLookupBimi(domain, vmcLookupOptions()));
+
+    svc.getForAddress(`news@${VMC_DOMAIN}`);
+    await svc.refresh(VMC_DOMAIN);
+
+    expect(svc.getForAddress(`news@${VMC_DOMAIN}`)).toMatchObject({
+      pending: false,
+      bimi: { status: 'verified', organization: VMC_VERIFIED.organization, issuer: VMC_VERIFIED.issuer, dmarcPolicy: 'reject' },
+    });
+  });
+});
+
+/**
+ * A build that cannot verify certificates must say so where someone looks:
+ * the lookup itself turns the failure into an ordinary "logo" answer.
+ */
+describe('reportVmcVerifier', () => {
+  let records: Array<{ level: LogLevel; name: string; message: string }>;
+  beforeEach(() => {
+    records = [];
+    h.probe.mockClear();
+    setLogSink((level, name, message) => { records.push({ level, name, message }); });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => { setLogSink(null); });
+  const errors = () => records.filter((r) => r.level === 'error');
+
+  // A healthy build must not cry wolf at every launch.
+  it('stays quiet when the verifier is available', async () => {
+    expect(await reportVmcVerifier(async () => null)).toBe(true);
+    expect(errors()).toEqual([]);
+  });
+
+  // THE regression's symptom, reported: six weeks of no ticks and no log line.
+  it('logs one error naming why when the verifier is missing', async () => {
+    const reason = "Verifying a BIMI certificate needs the optional peer dependency '@peculiar/x509', which is not installed.";
+    expect(await reportVmcVerifier(async () => reason)).toBe(false);
+    expect(errors()).toEqual([{ level: 'error', name: 'sender-identity', message: expect.stringContaining(reason) }]);
+    expect(errors()[0].message).toContain('no sender gets the verified tick');
+  });
+
+  // Called with `void` at startup: a probe that throws must become the report,
+  // never an unhandled rejection.
+  it('reports a probe that throws instead of rejecting', async () => {
+    expect(await reportVmcVerifier(async () => { throw new Error('probe broke'); })).toBe(false);
+    expect(errors()[0]?.message).toContain('probe broke');
+  });
+
+  // The wiring: without it the report exists and nothing ever calls it.
+  it('runs once when the scheduler starts', async () => {
+    h.probe.mockResolvedValueOnce('asn1js is not installed');
+    try {
+      startSenderIdentityScheduler();
+      startSenderIdentityScheduler(); // already running: no second check
+      await vi.waitFor(() => expect(errors()).toHaveLength(1));
+      expect(errors()[0].message).toContain('asn1js is not installed');
+      expect(h.probe).toHaveBeenCalledTimes(1);
+    } finally {
+      stopSenderIdentityScheduler();
+    }
   });
 });

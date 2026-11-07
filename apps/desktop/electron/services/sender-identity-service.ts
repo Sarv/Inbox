@@ -30,6 +30,7 @@ import {
   lookupBimi,
   normalizeAllowDomain,
   normalizeSenderIdentityPolicy,
+  vmcVerifierUnavailable,
   type BimiLookup,
   type BimiStatus,
   type FaviconResult,
@@ -402,8 +403,31 @@ export async function senderIdentityTick(svc: SenderIdentityService = getSenderI
   }
 }
 
+/**
+ * Say once, as an error, when this build cannot verify a Verified Mark
+ * Certificate. The lookup itself does not fail for it: every certificate then
+ * lands as "logo, certificate not verified", which looks exactly like a brand
+ * that has none, and no sender ever gets the tick. Shipped builds did that
+ * unnoticed from 2026-09-21, because the library's optional peers were not
+ * declared. Resolves true when the verifier is available.
+ */
+export async function reportVmcVerifier(
+  probe: () => Promise<string | null> = vmcVerifierUnavailable,
+): Promise<boolean> {
+  let reason: string | null;
+  try {
+    reason = await probe();
+  } catch (e) {
+    reason = (e as Error)?.message ?? String(e);
+  }
+  if (reason === null) return true;
+  logger.error(`[SenderIdentity] Verified Mark Certificates cannot be checked in this build, so no sender gets the verified tick: ${reason}`);
+  return false;
+}
+
 export function startSenderIdentityScheduler(): void {
   if (tickInterval) return;
+  void reportVmcVerifier();
   firstTimeout = setTimeout(() => void senderIdentityTick(), IDENTITY_FIRST_TICK_MS);
   tickInterval = setInterval(() => void senderIdentityTick(), IDENTITY_TICK_MS);
   firstTimeout.unref?.();
