@@ -14,6 +14,7 @@
  * This is the only copy of the catalog request and its error parsing.
  */
 import { fetchWithBearerRetry, isBearerUnavailableError, type BearerResolver } from '../utils/bearer-retry';
+import { trimTrailingSlashes } from '../utils/trailing-slash';
 
 import { isSignInRequiredError } from './oauth-errors';
 
@@ -61,7 +62,7 @@ export function sarvCatalogUrl(apiBaseUrl: string, query: SarvCatalogQuery): str
   if (query.kind === 'models' && query.providerCode) params.set('provider_code', query.providerCode);
   if (query.kind !== 'zones' && query.zoneCode) params.set('zone_code', query.zoneCode);
   const qs = params.toString();
-  return `${apiBaseUrl.replace(/\/+$/, '')}${CATALOG_PATHS[query.kind]}${qs ? `?${qs}` : ''}`;
+  return `${trimTrailingSlashes(apiBaseUrl)}${CATALOG_PATHS[query.kind]}${qs ? `?${qs}` : ''}`;
 }
 
 /** The human text of a FastAPI field, whichever of its shapes it took. */

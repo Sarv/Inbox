@@ -70,8 +70,13 @@ export function isOAuthMailHostAllowed(
 /** Every Sarv AI (LLM) request lives at or under this path on an edge host. */
 const SARV_LLM_PATH = '/edge/v1/llm';
 
-/** A zone's edge host is `<zone>-ai-edge.sarv.com`, the zone being one label. */
-const SARV_EDGE_HOST_SUFFIX = '-ai-edge.sarv.com';
+/**
+ * A zone's edge host is `<zone>-ai-edge.sarv.com`, the zone being one label: one
+ * label under `.sarv.com` (matched with its leading dot, so no other domain can
+ * end in it), and that label is the zone plus `-ai-edge`.
+ */
+const SARV_DOMAIN_SUFFIX = '.sarv.com';
+const SARV_EDGE_LABEL_SUFFIX = '-ai-edge';
 
 /**
  * Whether a Sarv OAuth bearer may be sent to the AI endpoint `url`.
@@ -110,7 +115,8 @@ export function isSarvAIEndpointAllowed(url: string | undefined | null): boolean
   }
   if (parsed.protocol !== 'https:' || parsed.port !== '') return false;
   const host = normalizeHost(parsed.hostname);
-  if (!host.endsWith(SARV_EDGE_HOST_SUFFIX)) return false;
-  const zone = host.slice(0, -SARV_EDGE_HOST_SUFFIX.length);
-  return zone !== '' && !zone.includes('.');
+  if (!host.endsWith(SARV_DOMAIN_SUFFIX)) return false;
+  const label = host.slice(0, -SARV_DOMAIN_SUFFIX.length);
+  if (label.includes('.') || !label.endsWith(SARV_EDGE_LABEL_SUFFIX)) return false;
+  return label.length > SARV_EDGE_LABEL_SUFFIX.length;
 }

@@ -1,3 +1,5 @@
+import { trimTrailingSlashes } from '../utils/trailing-slash';
+
 /** Contact links must be destinations, never share buttons, tracking pixels or login pages. */
 export function normalizeContactUrl(raw: string): string | null {
   const text = raw.trim().replace(/&amp;/gi, '&').replace(/[\]),.;|]+$/, '');
@@ -15,7 +17,7 @@ export function normalizeContactUrl(raw: string): string | null {
   if (/\.(?:gif|png|jpg|jpeg|svg|webp|pdf|docx?|xlsx?|pptx?)$/i.test(url.pathname)) return null;
   url.search = '';
   url.hash = '';
-  return url.toString().replace(/\/+$/, '');
+  return trimTrailingSlashes(url.toString());
 }
 
 export type ContactLinkKind = 'linkedinPersonal' | 'linkedinCompany' | 'twitter' | 'github' | 'other' | 'website';
@@ -25,7 +27,7 @@ export function contactLinkKind(raw: string): ContactLinkKind | null {
   if (!normalized) return null;
   const url = new URL(normalized);
   const host = url.hostname.toLowerCase().replace(/^www\./, '');
-  const path = url.pathname.replace(/\/+$/, '');
+  const path = trimTrailingSlashes(url.pathname);
   if (host === 'linkedin.com' || /^[a-z]{2}\.linkedin\.com$/.test(host)) {
     if (/^\/(?:in|pub)\/[^/]+(?:\/[^/]+)*$/i.test(path)) return 'linkedinPersonal';
     if (/^\/(?:company|school)\/[^/]+$/i.test(path)) return 'linkedinCompany';

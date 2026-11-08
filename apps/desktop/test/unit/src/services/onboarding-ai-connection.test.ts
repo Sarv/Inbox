@@ -509,7 +509,7 @@ describe('restoring an explicitly edited Sarv connection', () => {
     vi.mocked(loadZoneSelection).mockResolvedValue({ zones, zoneCode: 'default' });
     vi.mocked(listCaiProviders).mockResolvedValue(backends);
     // Changed deliberately (CASA I-2): the catalog calls no longer take a base URL — main fetches from its own configured Sarv API.
-    vi.mocked(listCaiModels).mockImplementation(async (_email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', display_name: 'Saved model', provider_code: backend || '' }] : [{ code: 'recommended-model', provider_code: backend || '' }]);
+    vi.mocked(listCaiModels).mockImplementation(async (_email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', display_name: 'Saved model', provider_code: backend }] : [{ code: 'recommended-model', provider_code: backend || '' }]);
     const restored = await loadSarvAIConnection(edit(), signal(), { email: 'selected@example.com' });
     expect(listCaiProviders).toHaveBeenLastCalledWith('selected@example.com', 'saved-region');
     expect(restored).toMatchObject({ model: 'saved-model', sarv: { zoneCode: 'saved-region', providerCode: 'saved-backend' } });
@@ -522,7 +522,7 @@ describe('restoring an explicitly edited Sarv connection', () => {
   it('searches catalogs for a legacy saved model when its old backend name does not match', async () => {
     vi.mocked(listCaiProviders).mockResolvedValue(backends);
     // Changed deliberately (CASA I-2): the catalog calls no longer take a base URL — main fetches from its own configured Sarv API.
-    vi.mocked(listCaiModels).mockImplementation(async (_email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', provider_code: backend || '' }] : [{ code: 'different-model', provider_code: backend || '' }]);
+    vi.mocked(listCaiModels).mockImplementation(async (_email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', provider_code: backend }] : [{ code: 'different-model', provider_code: backend || '' }]);
     const previous = edit(); previous.savedSarvProvider.name = 'Legacy custom name';
     const restored = await loadSarvAIConnection(previous, signal(), { email: 'selected@example.com' });
     expect(restored.sarv?.providerCode).toBe('saved-backend'); expect(restored.model).toBe('saved-model');

@@ -56,6 +56,7 @@ import type { SpamAssessment, SpamReason } from '@sarv-in/mailguard/verdict';
 
 import { CircuitBreakers, type CircuitBreakerOptions } from './circuit-breaker';
 import { logger } from './logger';
+import { trimTrailingSlashes } from './trailing-slash';
 
 /** The zones the local provider asks by default, and how to read their answers. */
 export { BLOCKLISTS as DEFAULT_DNSBL_LISTS };
@@ -493,7 +494,7 @@ export class SarvReputationProvider implements ReputationProvider {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), this.deps.timeoutMs ?? 10_000) : null;
     try {
-      const res = await this.deps.fetch(`${this.deps.endpoint.replace(/\/+$/, '')}/v1/reputation/lookup`, {
+      const res = await this.deps.fetch(`${trimTrailingSlashes(this.deps.endpoint)}/v1/reputation/lookup`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ ips: query.ips, domains: query.domains }),
@@ -531,7 +532,7 @@ export class SarvReputationProvider implements ReputationProvider {
     }
     if (!token) return false;
     try {
-      const res = await this.deps.fetch(`${this.deps.endpoint.replace(/\/+$/, '')}/v1/reputation/report`, {
+      const res = await this.deps.fetch(`${trimTrailingSlashes(this.deps.endpoint)}/v1/reputation/report`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ domain: report.domain, ip: report.ip, verdict: report.verdict }),
