@@ -35,6 +35,7 @@ import {
   type ExtractedSignals,
   type ContactEnrichment,
 } from '@sarvinbox/core/contact-enrichment';
+import { htmlToPlainText } from '@sarvinbox/core/html-text';
 import { createLogger } from '@sarvinbox/core/logger';
 
 import { AI_ASSIST_CHANGED_EVENT, isAIAssistEnabled } from './agent-settings';
@@ -278,7 +279,9 @@ async function runEnrichment(opts: EnrichContactOptions): Promise<EnrichContactR
   const perEmail: ExtractedSignals[] = [];
   for (const e of emails) {
     const body: string = e.miningText || e.cleanBody || e.plainBody || e.textBody || '';
-    const htmlFallback = body.length < 50 && e.htmlBody ? stripHtml(e.htmlBody) : '';
+    // The HTML body as text — the same conversion that fills `cleanBody` for
+    // an HTML-only mail, so the miner reads what a stored body would hold.
+    const htmlFallback = body.length < 50 && e.htmlBody ? htmlToPlainText(e.htmlBody) : '';
     // Prefer the HTML fallback whenever the plain body is too short to
     // carry a signature (< 50 chars) — `body || htmlFallback` only used
     // the fallback when body was the empty string exactly.
@@ -436,27 +439,6 @@ async function runEnrichment(opts: EnrichContactOptions): Promise<EnrichContactR
 }
 
 /**
- * Minimal HTML → text: strip tags and collapse whitespace. Only used
- * as a fallback when the email record has no clean_body cached.
- */
-function stripHtml(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-/**
  * Wire up to the `contact-enrichment:run-batch` IPC from the scheduler.
  * Processes the list serially with a short throttle between contacts
  * — we never run two LLM calls in parallel (the user asked explicitly
@@ -480,7 +462,10 @@ export function installEnrichmentBatchListener(): void {
   if (!api?.contactEnrichment?.onRunBatch) return;
 
   batchListenerInstalled = true;
-  const sessionId = `${Date.now()}-${Math.random()}`;
+  // Names this renderer load to main, so a reload is told apart from the page
+  // that held the batch lock. An identifier, not a secret, but a UUID is unique
+  // by construction where a timestamp plus Math.random() was only probably so.
+  const sessionId = globalThis.crypto.randomUUID();
   let lastReady: boolean | undefined;
   let lastProviderRevision: string | undefined;
   const syncReadiness = () => {

@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import { HtmlToMarkdown, convertHtmlToMarkdown, htmlToMarkdown } from '../../../src/parser/html-to-markdown';
 
+import { OUTLOOK_REPLY_HTML } from './fixtures/outlook-reply';
+
 // HTML→Markdown is what turns a marketing/reply email body into the compact text
 // the LLM and the chat view read. The invariants: real content survives, the
-// noise turndown would otherwise inline (style/script/comments) is stripped
-// first, email-specific shapes (reply blockquotes, mailto links, signature
+// noise (style/script/comments) is dropped by the parser, not by source
+// regexes, email-specific shapes (reply blockquotes, mailto links, signature
 // blocks) get their intended markdown, and a converter failure degrades to plain
 // text instead of throwing.
 
@@ -43,6 +45,31 @@ describe('HtmlToMarkdown.convert — basics', () => {
     expect(md).not.toContain('color:red');
     expect(md).not.toContain('alert');
     expect(md).not.toContain('outlook only');
+  });
+
+  // Breaks: an end tag spelled `</script >` (valid HTML) slipped past the old
+  // source regex, which then ran on to the NEXT `</SCRIPT>` and deleted the
+  // real paragraph in between.
+  it('drops script and style content whatever the end tag spelling', () => {
+    const md = converter.convert(
+      '<script>steal()</script ><style>p{color:red}</style ><p>after</p><SCRIPT>x()</SCRIPT>',
+    );
+    expect(md).toBe('after');
+  });
+
+  // Breaks: cutting `<script>…</script>` out of the SOURCE assembled a new
+  // `<script>` from the fragments around it, which swallowed the paragraph
+  // after it — raw `<p>` markup reached the Markdown as text.
+  it('does not assemble a script element out of nested fragments', () => {
+    const md = converter.convert('<scr<script>ipt>alert(1)</scr</script>ipt><p>after</p>');
+    expect(md).toContain('after');
+    expect(md).not.toMatch(/<\/?(script|p)\b/i);
+  });
+
+  // Breaks: a comment closed with `--!>` (browsers accept it) left the old
+  // regex hunting for the NEXT `-->`, deleting the real content in between.
+  it('ends a comment at --!> as a browser does, keeping what follows', () => {
+    expect(converter.convert('<!-- a --!><p>visible</p><!-- b -->')).toBe('visible');
   });
 
   it('turns non-breaking spaces into ordinary spaces', () => {
@@ -174,20 +201,76 @@ describe('HtmlToMarkdown.convert — email-specific rules', () => {
     expect(md).toContain('line1');
     expect(md).toContain('  indented');
   });
+
+  // Breaks: ordinary Outlook mail changes shape. This is the exact output the
+  // regex-preprocessing version produced; moving style/script/comment removal
+  // into the parser must not alter it.
+  it('converts a representative Outlook reply exactly as before', () => {
+    expect(converter.convert(OUTLOOK_REPLY_HTML)).toBe([
+      'Hi Priya,',
+      '',
+      'The quote for **Q3 renewal** is below & the tag is <draft>.',
+      '',
+      '**Item**',
+      '',
+      '**Price**',
+      '',
+      'Licences',
+      '',
+      '$1,200',
+      '',
+      'Shown everywhere else',
+      '',
+      'Questions? ravi@vendor.example or [the quote page](https://vendor.example/quote/42).',
+      '',
+      '---',
+      'Regards,',
+      '',
+      'Ravi Menon',
+      '',
+      'Vendor Ltd',
+    ].join('\n'));
+  });
 });
 
 describe('HtmlToMarkdown.convert — failure fallback', () => {
-  // A converter crash must not lose the message: the fallback strips tags and
-  // decodes the common entities so the text is still usable.
-  it('falls back to stripped plain text when turndown throws', () => {
+  const failingConverter = () => {
     const failing = new HtmlToMarkdown();
     (failing as unknown as { turndown: { turndown: () => string } }).turndown.turndown = () => {
       throw new Error('turndown blew up');
     };
+    return failing;
+  };
 
-    const out = failing.convert('<p>Tom&nbsp;&amp;&nbsp;Jerry said &lt;hi&gt; &quot;now&quot; &#39;ok&#39;</p>');
+  // A converter crash must not lose the message: the fallback strips tags and
+  // decodes the common entities so the text is still usable.
+  it('falls back to stripped plain text when turndown throws', () => {
+    const out = failingConverter().convert('<p>Tom&nbsp;&amp;&nbsp;Jerry said &lt;hi&gt; &quot;now&quot; &#39;ok&#39;</p>');
     expect(out).toBe('Tom & Jerry said <hi> "now" \'ok\'');
     expect(out).not.toContain('<p>');
+  });
+
+  // Breaks: the fallback's regex chain decoded `&amp;` before `&quot;` and
+  // `&#39;`, so text the reader saw as "&quot;" came out as a bare quote.
+  it('decodes entities exactly once', () => {
+    expect(failingConverter().convert('<p>&amp;quot;x&amp;quot; &amp;#39;y&amp;#39; &amp;lt;b&amp;gt;</p>'))
+      .toBe('&quot;x&quot; &#39;y&#39; &lt;b&gt;');
+  });
+
+  // Breaks: the fallback removed only tags, so script and style code reached
+  // the text, and Outlook's conditional blocks leaked what they hide.
+  it('drops script, style and comment content', () => {
+    expect(failingConverter().convert(
+      '<style>p{color:red}</style><p>shown</p><script>steal()</script ><!--[if mso]><p>outlook only</p><![endif]-->',
+    )).toBe('shown');
+  });
+
+  // Breaks: a body that is a long run of `<` AND crashes Turndown pinned the
+  // thread — the fallback's `<[^>]*>` was quadratic (about 4 s for 100,000).
+  it('stays linear on a run of "<"', () => {
+    const started = performance.now();
+    failingConverter().convert(`<p>x</p>${'<'.repeat(100_000)}`);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 });
 

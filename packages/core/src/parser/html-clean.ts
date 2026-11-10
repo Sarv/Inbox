@@ -25,6 +25,7 @@
 // prompt. sanitize-html is used for its robust tokenizer, not as an
 // XSS filter.
 
+import { decodeHTML } from 'entities';
 import sanitizeHtml from 'sanitize-html';
 
 // Structural/text tags worth keeping so the LLM sees document shape.
@@ -39,28 +40,6 @@ const ALLOWED_TAGS = [
   'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'mark',
   'sub', 'sup', 'small', 'hr', 'a',
 ];
-
-/** Decode the most common HTML entities — exhaustive enough for emails. */
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/gi, "'")
-    .replace(/&#x([0-9a-f]+);/gi, (_m, code) => {
-      const n = parseInt(code, 16);
-      if (!Number.isFinite(n) || n < 0 || n > 0x10ffff) return _m;
-      try { return String.fromCodePoint(n); } catch { return _m; }
-    })
-    .replace(/&#(\d+);/g, (_m, code) => {
-      const n = parseInt(code, 10);
-      if (!Number.isFinite(n) || n < 0 || n > 0x10ffff) return _m;
-      try { return String.fromCodePoint(n); } catch { return _m; }
-    });
-}
 
 /**
  * Turn a single `<img>` tag into either an empty string (tracker pixels
@@ -130,9 +109,14 @@ export function cleanEmailHtmlForLLM(html: string, options: CleanEmailHtmlOption
     disallowedTagsMode: 'discard',
   });
 
-  // 3. Decode entities that sanitize-html re-encodes (&amp;, &nbsp;, …) so
-  //    the LLM reads plain text.
-  s = decodeEntities(s);
+  // 3. Undo sanitize-html's output escaping so the LLM reads plain text. Its
+  //    parser has already decoded every entity the sender wrote, then it
+  //    re-escapes only & < > (and " in attributes), so ONE decoding pass gives
+  //    back exactly the text the reader sees. The hand-rolled chain this
+  //    replaces decoded &amp; first and then ran the others over its output:
+  //    a sender's `&amp;lt;script&amp;gt;` — shown to the reader as the literal
+  //    text "&lt;script&gt;" — reached the prompt as a `<script>` tag.
+  s = decodeHTML(s);
 
   // 4. Collapse whitespace. Keep paragraph-style breaks (blank lines)
   //    but compress runs of spaces and 3+ blank lines.

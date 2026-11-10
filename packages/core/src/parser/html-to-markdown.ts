@@ -2,6 +2,7 @@
 
 import TurndownService from 'turndown';
 
+import { htmlToPlainText } from '../utils/html-text';
 import { logger } from '../utils/logger';
 
 /**
@@ -39,6 +40,15 @@ export class HtmlToMarkdown {
       linkReferenceStyle: 'full',
       br: '\n',
     });
+
+    // <style>/<script> are code, not content: drop the element and its text.
+    // Done on the parsed DOM (domino in Node, DOMParser in the renderer), not by
+    // regex on the source: a regex missed `</script >`, and cutting
+    // `<script>…</script>` out of `<scr<script>…</script>ipt>` assembled a NEW
+    // `<script>` from the leftovers. Comments need no rule — Turndown only
+    // emits text and element nodes, so the parser's comment nodes (Outlook
+    // conditionals included) never reach the output.
+    this.turndown.remove(['style', 'script']);
 
     // Add custom rules for email-specific elements
     this.addEmailRules();
@@ -84,12 +94,10 @@ export class HtmlToMarkdown {
     // and wrapping every line of HTML source mangled multi-line tags
     // (attribute continuation lines) and <pre> content.
 
-    // Remove style and script tags
-    processed = processed.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-    processed = processed.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-
-    // Remove HTML comments
-    processed = processed.replace(/<!--[\s\S]*?-->/g, '');
+    // NOTE: <style>, <script> and comments are NOT cut out here — they are
+    // dropped after parsing (see the constructor). A comment regex that missed
+    // a `--!>` closer ran on to the NEXT comment's `-->` and deleted the real
+    // content between the two.
 
     return processed;
   }
@@ -188,18 +196,14 @@ export class HtmlToMarkdown {
   }
 
   /**
-   * Strip HTML tags (fallback for errors)
+   * Plain text when Turndown throws: the shared HTML → text conversion, with
+   * non-breaking spaces made ordinary as the Markdown path does. It replaces a
+   * regex chain that decoded `&amp;` before `&quot;`/`&#39;` (so `&amp;quot;`
+   * came out as `"`, not the `&quot;` the reader saw) and whose `<[^>]*>` was
+   * quadratic on a run of `<`.
    */
   private stripHtml(html: string): string {
-    return html
-      .replace(/<[^>]*>/g, '')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .trim();
+    return htmlToPlainText(html).replace(/\u00a0/g, ' ').trim();
   }
 
   /**

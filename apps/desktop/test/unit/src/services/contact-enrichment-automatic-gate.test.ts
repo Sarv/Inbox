@@ -33,6 +33,54 @@ beforeEach(() => {
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
+describe('contact enrichment — HTML-only bodies and the renderer session', () => {
+  const htmlOnly = (htmlBody: string) => contacts.recentInbound.mockResolvedValue({ success: true, data: [
+    { id: 'html-only', date: 1700000000, fromAddress: 'alice@acme.example', cleanBody: '', htmlBody },
+  ] });
+  const promptSent = () => ai.makeAICompletion.mock.calls[0][0].userPrompt as string;
+
+  // Breaks: a mail with no text body is mined from its HTML, and the old
+  // fallback missed a `</script >` end tag, so the number in tracking code was
+  // read as signature text and handed to the model as the contact's phone.
+  it('mines only the visible text of an HTML-only body', async () => {
+    htmlOnly('<p>Hello, here is our update.</p><p>Regards,<br>Alice Doe<br>Product Manager<br>Acme<br>' +
+      '<script>var support = "+1 212 555 0199";</script ><style>.sig{color:#333}</style>+1 212 555 0123</p>');
+    const service = await import('../../../../src/services/contact-enrichment-service');
+    await expect(service.enrichContact({ contactId: 'html-only', automatic: true })).resolves.toMatchObject({ ok: true });
+    expect(promptSent()).toContain('555 0123');
+    expect(promptSent()).not.toContain('555 0199');
+    expect(promptSent()).not.toContain('color:#333');
+  });
+
+  // Breaks: the double-unescape. The reader sees the literal text
+  // "&lt;alice@acme.example&gt;"; the fallback decoded `&amp;` and then `&lt;`
+  // over its own output, so the model was shown markup the sender never sent.
+  it('decodes the HTML body\'s entities once', async () => {
+    htmlOnly('<p>Hello, here is our update.</p><p>Regards,<br>Alice Doe<br>Product Manager<br>Acme<br>' +
+      'Alice &amp;lt;alice@acme.example&amp;gt;<br>+1 212 555 0123<br>https://www.linkedin.com/in/alice-doe</p>');
+    const service = await import('../../../../src/services/contact-enrichment-service');
+    await service.enrichContact({ contactId: 'html-entities', automatic: true });
+    expect(promptSent()).toContain('Alice &lt;alice@acme.example&gt;');
+    expect(promptSent()).not.toContain('<alice@acme.example>');
+  });
+
+  // Breaks: the id main uses to tell a renderer reload from the page that holds
+  // the batch lock goes back to Date.now() + Math.random() — unique only by
+  // chance, and what CodeQL reports as insecure randomness.
+  it('names the renderer session with a random UUID', async () => {
+    const uuid = '0f0e0d0c-0b0a-4908-8706-050403020100';
+    const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(uuid);
+    try {
+      const service = await import('../../../../src/services/contact-enrichment-service');
+      service.installEnrichmentBatchListener();
+      expect(setReady).toHaveBeenCalled();
+      expect(setReady.mock.calls.every(call => call[1] === uuid)).toBe(true);
+    } finally {
+      randomUUID.mockRestore();
+    }
+  });
+});
+
 describe('automatic contact enrichment opt-in', () => {
   it('properly reviews a legacy incomplete contact with an already-consumed watermark only once', async () => {
     const state = { ...contact, enrichedThroughEmailAt: 1700000000, enrichment: null as unknown, metadata: {} as Record<string, unknown> };

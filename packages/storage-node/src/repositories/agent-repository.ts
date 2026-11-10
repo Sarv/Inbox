@@ -13,7 +13,7 @@ import type {
   ContactTypeSource,
   ClassifiedContact,
 } from '@sarvinbox/core';
-import { messageIdKey, parseAddresses, parseCategorySelection } from '@sarvinbox/core';
+import { messageIdKey, parseAddresses, parseCategorySelection, stripHtmlTags } from '@sarvinbox/core';
 
 import { SHARED } from '../shared-contacts';
 
@@ -1337,7 +1337,8 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
     let casualCount = 0;
 
     for (const email of sentEmails) {
-      const body = (email.clean_body || '').replace(/<[^>]+>/g, '').trim();
+      // Tags out, lines intact: greeting and closing are read line by line.
+      const body = stripHtmlTags(email.clean_body || '').trim();
       if (!body) continue;
 
       const lines = body.split('\n').filter(l => l.trim());
