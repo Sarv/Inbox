@@ -11,5 +11,5 @@ export declare function isSeedableId(id: unknown): id is string;
 /** The seed folder and its temporary archive, both directly inside `outputDir`. Throws for an unsafe id. */
 export declare function seedPaths(outputDir: string, id: string): { target: string; archivePath: string };
 
-/** The tar `filter` for a seed: an allowlisted plain file, or the archive's root folder (`entry` is tar's ReadEntry; only its `type` is read). */
-export declare function isAllowedArchiveEntry(path: string, entry?: unknown): boolean;
+/** The archive rule the app installs with (extension-archive-rules.mjs). */
+export { isAllowedArchiveEntry } from '../electron/services/extension-archive-rules.mjs';

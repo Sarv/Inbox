@@ -3,12 +3,11 @@ import {
   PANEL_SCHEME,
   panelAssetContentType,
   parsePanelUrl,
+  readRegularFile,
   resolveWithinDir,
   SDK_HOST,
 } from '@sarvinbox/core';
 import { protocol } from 'electron';
-
-import { readRegularFile } from '../utils/read-regular-file';
 
 import { PANEL_SDK_FILENAME, PANEL_SDK_SOURCE } from './extension-panel-sdk';
 

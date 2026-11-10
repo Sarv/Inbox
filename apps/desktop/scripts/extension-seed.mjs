@@ -7,6 +7,9 @@
 
 import { isAbsolute, join, relative } from 'node:path';
 
+/** The archive rule the app installs with; a seed is unpacked by the same one. */
+export { isAllowedArchiveEntry } from '../electron/services/extension-archive-rules.mjs';
+
 /**
  * The extension id rule: lower-case letters, digits and dashes, starting with
  * a letter or digit, at most 63 characters. Ids become folder names, so this is
@@ -15,16 +18,6 @@ import { isAbsolute, join, relative } from 'node:path';
  * extension-seed.test.ts fails if the two disagree.
  */
 const EXTENSION_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
-
-/**
- * The only paths an extension archive may contribute: the manifest, its
- * compiled scripts, icon, readme and licence. The same allowlist the app
- * installs with (extension-marketplace.ts).
- */
-const ALLOWED_ENTRY = /^(?:\.\/)?(?:sarvinbox-extension\.json|dist\/[\w.-]+\.js|icon\.svg|README\.md|LICENSE)$/;
-
-/** Entry types that are plain files or folders, never links or devices. */
-const FILE_TYPES = new Set(['File', 'OldFile', 'ContiguousFile']);
 
 /** Whether `id` may name a seed folder. */
 export function isSeedableId(id) {
@@ -47,17 +40,4 @@ export function seedPaths(outputDir, id) {
     }
   }
   return { target, archivePath };
-}
-
-/**
- * The tar `filter` for a seed: an allowlisted path that is a plain file, or
- * the archive's root folder. A symbolic or hard link is refused even under an
- * allowed name: it would put a pointer to some other file on the build machine
- * into the folder electron-builder copies into the app.
- */
-export function isAllowedArchiveEntry(path, entry) {
-  const normalized = String(path).replace(/\\/g, '/');
-  const type = entry?.type;
-  if (normalized === '.' || normalized === './') return type === 'Directory';
-  return ALLOWED_ENTRY.test(normalized) && FILE_TYPES.has(type);
 }

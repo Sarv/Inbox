@@ -1,4 +1,22 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, promises as fsp, readSync, type Stats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
+
+/**
+ * Opened read-only, refusing a link at the open where the OS can (`O_NOFOLLOW`), and
+ * without waiting (`O_NONBLOCK`): a named pipe would otherwise hold the open until
+ * something writes to it. Windows has neither flag; `namesOpenedFile` covers it.
+ */
+const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0);
+
+const CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Whether the path, looked at after the open, still names the very file that was
+ * opened: a plain file (not a link) with the same device and inode.
+ */
+function namesOpenedFile(named: Stats, opened: Stats): boolean {
+  return named.isFile() && named.dev === opened.dev && named.ino === opened.ino;
+}
 
 /**
  * Read a small file this app wrote itself at a fixed path — a one-time ticket,
@@ -19,14 +37,13 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from '
  * every throw as "no valid file", never as an empty one.
  */
 export function readRegularFileSync(path: string, limits: { minBytes: number; maxBytes: number }): Buffer {
-  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+  const fd = openSync(path, OPEN_FLAGS);
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size < limits.minBytes || stat.size > limits.maxBytes) {
       throw new Error('Not a regular file of the expected size');
     }
-    const named = lstatSync(path);
-    if (named.isSymbolicLink() || named.dev !== stat.dev || named.ino !== stat.ino) {
+    if (!namesOpenedFile(lstatSync(path), stat)) {
       throw new Error('The file changed while it was being opened');
     }
     // One byte of headroom: reading past `size` is how a file that grew is seen.
@@ -41,5 +58,48 @@ export function readRegularFileSync(path: string, limits: { minBytes: number; ma
     return bytes.subarray(0, length);
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * The bytes of the plain file at `filePath`, or null when that path is anything else:
+ * a link (wherever it points), a directory, a pipe or device, or a file larger than
+ * `maxBytes`. A missing file throws, as `readFile` does. For files the app serves or
+ * imports from a folder it does not control (an extension's files, a calendar the
+ * user opened), where "not a plain file" is an answer rather than an error.
+ *
+ * Race-free in the same way as `readRegularFileSync`, which `lstat` followed by
+ * `readFile` is not (CodeQL js/file-system-race): a link put in place between the two
+ * would be followed. The read is bounded, because a file can grow after its size was read.
+ */
+export async function readRegularFile(
+  filePath: string,
+  maxBytes = Number.POSITIVE_INFINITY
+): Promise<Buffer | null> {
+  let handle: FileHandle;
+  try {
+    handle = await fsp.open(filePath, OPEN_FLAGS);
+  } catch (error) {
+    // ELOOP: O_NOFOLLOW met a link (EMLINK on FreeBSD). EISDIR: Windows will not open a folder.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'EMLINK' || code === 'EISDIR') return null;
+    throw error;
+  }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size > maxBytes) return null;
+    if (!namesOpenedFile(await fsp.lstat(filePath), opened)) return null;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const chunk = Buffer.alloc(CHUNK_BYTES);
+      const { bytesRead } = await handle.read(chunk, 0, CHUNK_BYTES, null);
+      if (bytesRead === 0) return Buffer.concat(chunks, total);
+      total += bytesRead;
+      if (total > maxBytes) return null;
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+  } finally {
+    await handle.close();
   }
 }

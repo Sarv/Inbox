@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { basename, extname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { readRegularFile } from '@sarvinbox/core';
 import emailAddresses from 'email-addresses';
 
 import type { ExternalOpenIntent } from '../../src/types/default-apps';
-import { readRegularFile } from '../utils/read-regular-file';
 
 export const MAX_EXTERNAL_ICS_BYTES = 1_048_576;
 export const MAX_EXTERNAL_OPEN_QUEUE = 20;
