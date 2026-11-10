@@ -43,6 +43,7 @@ export * from './unsubscribe';
 export * from './attachment-kind';
 export * from './bulk-mail';
 export * from './safe-path';
+export * from './regular-file';
 export * from './sealed-bytes';
 export * from './mail-parse';
 export * from './html-text';

@@ -17,7 +17,7 @@
  * WITH a key fails outright (`SQLITE_NOTADB`, "file is not a database"), and
  * rekeying a file that was never plaintext would encrypt ciphertext.
  */
-import { closeSync, existsSync, openSync, readSync, statSync } from 'fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'fs';
 
 /** Every SQLite database begins with this NUL-terminated string. */
 const SQLITE_HEADER = 'SQLite format 3';
@@ -27,16 +27,26 @@ const SQLITE_HEADER = 'SQLite format 3';
  *
  * Returns false for an absent file, an empty one, an encrypted one, and for
  * anything unreadable — every case where the caller should open with `key=`
- * rather than migrate with `rekey=`.
+ * rather than migrate with `rekey=`. That is the safe direction: a wrong
+ * `false` makes a plaintext file fail to open (loudly, `SQLITE_NOTADB`); a
+ * wrong `true` would rekey ciphertext. So every doubt answers `false`.
+ *
+ * Decided from ONE open handle: the size and the header come from the same
+ * file, never from a path looked up twice (a file swapped in between would be
+ * measured as one file and read as another). Opened with O_NONBLOCK so a FIFO
+ * at the path cannot block the open, and with it startup; it is then refused as
+ * not a regular file. A symlink is followed, as SQLite follows it when it
+ * opens the same path.
  */
 export function isExistingPlaintextDb(path: string): boolean {
+  if (!path) return false;
   try {
-    if (!path || !existsSync(path) || statSync(path).size < 16) return false;
-    const fd = openSync(path, 'r');
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK || 0));
     try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size < 16) return false;
       const buf = Buffer.alloc(16);
-      readSync(fd, buf, 0, 16, 0);
-      return buf.toString('latin1').startsWith(SQLITE_HEADER);
+      return readSync(fd, buf, 0, 16, 0) === 16 && buf.toString('latin1').startsWith(SQLITE_HEADER);
     } finally {
       closeSync(fd);
     }
