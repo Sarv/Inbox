@@ -2,8 +2,10 @@ import type { SMTPConfig } from '@sarvinbox/core';
 import { createLogger } from '@sarvinbox/core/logger';
 import { createSingleFlight } from '@sarvinbox/core/single-flight';
 
+import type { AccountRevocation } from '../../../electron/services/account-revocation';
 import { EMAIL_PROVIDERS } from '../../config/email-providers';
-import { removeOAuthProvidersForAccount, syncAIProviderToMain } from '../../services/ai-service';
+import { isAIAssistEnabled } from '../../services/agent-settings';
+import { getDefaultProvider, removeOAuthProvidersForAccount, reportAIUnhealthy, syncAIProviderToMain } from '../../services/ai-service';
 import { isOnboardingPending } from '../../services/onboarding-progress';
 import { forgetImageTrustAccount, setImageTrustAccount } from '../../utils/remote-images';
 import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, forgetLegacySecretsFor, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, vaultEntryFor, vaultHasPassword, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
@@ -909,8 +911,8 @@ const connectionSlice = (
     const { accounts, activeAccountId } = get();
     // Nothing to do if it's gone, or already being removed (guards a double-click
     // that slips past the disabled button).
-    if (!accounts.some((a) => a.id === accountId)) return;
-    if (get().deletingAccountIds.includes(accountId)) return;
+    if (!accounts.some((a) => a.id === accountId)) return undefined;
+    if (get().deletingAccountIds.includes(accountId)) return undefined;
 
     // Mark "deleting" IMMEDIATELY — before any await — and keep the row in the
     // list. Removal awaits imap/smtp.disconnect(), which can BLOCK for the whole
@@ -941,9 +943,11 @@ const connectionSlice = (
       // so the user can retry rather than being left half-removed. The main
       // handler RESOLVES with `{ success:false }` rather than rejecting, so a
       // silent false must be turned into a throw or the failure path is skipped.
+      let revocation: AccountRevocation | undefined;
       if (window.electronAPI.accounts.remove) {
         const res = await window.electronAPI.accounts.remove(accountId);
         if (res && res.success === false) throw new Error(res.error || 'Failed to remove account');
+        revocation = res?.revocation;
       } else {
         await window.electronAPI.secureCreds.delete(accountId);
       }
@@ -952,7 +956,11 @@ const connectionSlice = (
       // keeps the account, so its stored row (possibly its only copy of its
       // password) must still be there for the retry. Remaining rows are written
       // back as stored, secrets and all — see removeAccount.
-      const remaining = removeAccount(accounts, accountId);
+      //
+      // Read the list now, not at the start: the wait above can be 10 s while the
+      // provider answers about the sign-in, and a list from before it would write
+      // back an account removed meanwhile and drop one added meanwhile.
+      const remaining = removeAccount(get().accounts, accountId);
 
       // If this account also backed an OAuth AI provider (Sarv is mailbox AND
       // LLM), prune that provider now. Otherwise getDefaultProvider() keeps
@@ -963,7 +971,16 @@ const connectionSlice = (
       const oauthProvider = removedAccount?.imapConfig?.oauthProvider;
       if (oauthProvider && removedAccount?.email) {
         const pruned = removeOAuthProvidersForAccount(oauthProvider, removedAccount.email);
-        if (pruned > 0) { void syncAIProviderToMain(); }
+        if (pruned > 0) {
+          void syncAIProviderToMain();
+          // Nothing left to run AI on, so say so: AI Assist stays on and would
+          // otherwise just do nothing. Main reports only a CHANGE of availability,
+          // and it reported this one during the removal, while the provider was
+          // still here to re-push, so its report raises no banner.
+          if (!getDefaultProvider() && isAIAssistEnabled()) {
+            reportAIUnhealthy('The account you removed was the sign-in for your AI provider. Connect a provider to turn AI back on.');
+          }
+        }
       }
 
       // Forget its cached storage figure with it, so re-adding the same address
@@ -986,9 +1003,9 @@ const connectionSlice = (
       forgetLegacySecretsFor(removedAccount, remaining);
 
       // Only now that the durable wipe succeeded do we drop the row and move the
-      // active account away.
-      if (accountId === activeAccountId) {
-        const next = remaining[0];
+      // active account away, never onto another account being removed.
+      if (accountId === get().activeAccountId) {
+        const next = remaining.find((a) => !get().deletingAccountIds.includes(a.id));
         set({ accounts: remaining });
         if (next) {
           // Force a switch: activeAccountId still points at the removed one, so
@@ -1016,6 +1033,7 @@ const connectionSlice = (
       } else {
         set({ accounts: remaining });
       }
+      return revocation;
     } catch (err) {
       // Keep the account and re-enable its row with an inline error, so a failed
       // remove is recoverable instead of a stuck "Deleting…".

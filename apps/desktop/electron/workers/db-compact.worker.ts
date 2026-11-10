@@ -16,6 +16,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 
 import type { DatabasePageStats } from '@sarvinbox/core';
+import { applyDbKey } from '@sarvinbox/storage-node/db-encryption';
 import Database from 'better-sqlite3';
 
 export interface CompactWorkerInput {
@@ -143,8 +144,8 @@ export function rebuildInPlace(db: CompactableDb): RebuildOutcome {
 }
 
 /**
- * Open exactly the way `SQLiteStorage` does: a bare `new Database`, then `key`
- * as the very FIRST statement.
+ * Open exactly the way `SQLiteStorage` does: a bare `new Database`, then the
+ * shared key step before anything reads the file.
  *
  * This is not cosmetic. VACUUM rewrites every page through whatever cipher
  * settings the connection is holding, so opening with a different configuration
@@ -153,11 +154,17 @@ export function rebuildInPlace(db: CompactableDb): RebuildOutcome {
  */
 function openKeyed(dbPath: string, key: string): Database.Database {
   const db = new Database(dbPath);
-  db.pragma(`key='${key.replace(/'/g, "''")}'`);
+  try {
+    applyDbKey(db, key);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   return db;
 }
 
-function compact(input: CompactWorkerInput): CompactWorkerResult {
+/** The whole rebuild. Exported so it can be run against a real keyed file. */
+export function compact(input: CompactWorkerInput): CompactWorkerResult {
   let db: Database.Database | null = null;
   try {
     db = openKeyed(input.dbPath, input.key);

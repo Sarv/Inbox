@@ -12,11 +12,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   resolveAiKey: vi.fn(),
   fetch: vi.fn(),
+  warn: vi.fn(),
 }));
 
 vi.mock('@sarvinbox/core', async (orig) => ({
   ...(await orig<typeof import('@sarvinbox/core')>()),
-  createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
+  createLogger: () => ({ info: vi.fn(), warn: h.warn, error: vi.fn(), debug: vi.fn() }),
 }));
 vi.mock('../../../../electron/services/ai-secret-store', () => ({ resolveAiKey: h.resolveAiKey }));
 vi.mock('../../../../electron/services/net-fetch', () => ({ chromiumFetch: h.fetch }));
@@ -39,7 +40,9 @@ describe('proxyAiProviderFetch', () => {
   it('attaches the saved key for its own origin and returns the response', async () => {
     const res = await proxyAiProviderFetch(request());
     expect(h.resolveAiKey).toHaveBeenCalledWith('p1', URL_OK);
-    expect(res).toEqual({ ok: true, status: 200, statusText: '', contentType: 'application/json', body: '{"ok":true}' });
+    // Changed deliberately (CASA I-2): the result now also carries the
+    // forwarded response headers (none here).
+    expect(res).toEqual({ ok: true, status: 200, statusText: '', contentType: 'application/json', headers: {}, body: '{"ok":true}' });
     const [url, init] = h.fetch.mock.calls[0];
     expect(url).toBe(URL_OK);
     expect(init).toMatchObject({ method: 'POST', body: '{"x":1}', redirect: 'error' });
@@ -87,12 +90,43 @@ describe('proxyAiProviderFetch', () => {
     expect(h.resolveAiKey).not.toHaveBeenCalled();
   });
 
+  // Breaks: the renderer's 429 back-off falls back to blind exponential waits
+  // because retry-after (and the provider's request id) never left main.
+  it('forwards retry-after and x-request-id, and only those', async () => {
+    h.fetch.mockResolvedValue(new Response('{}', {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'retry-after': '12', 'x-request-id': 'req-9', 'set-cookie': 'a=b', server: 'x' },
+    }));
+    const res = await proxyAiProviderFetch(request());
+    expect(res).toEqual({
+      ok: true, status: 429, statusText: '', contentType: 'application/json',
+      headers: { 'retry-after': '12', 'x-request-id': 'req-9' }, body: '{}',
+    });
+  });
+
+  // Breaks: a saved-key request is sent with a Sarv sign-in, or a request that
+  // names no provider for its saved key reaches the vault.
+  it('needs a provider id for a saved-key request', async () => {
+    expect(await proxyAiProviderFetch(request({ providerId: '' }))).toMatchObject({ reason: 'invalid-request' });
+    expect(h.resolveAiKey).not.toHaveBeenCalled();
+  });
+
   it('sends no body with GET', async () => {
     await proxyAiProviderFetch(request({ method: 'GET', url: 'https://api.openai.com/v1/models' }));
     expect(h.fetch.mock.calls[0][1]).toMatchObject({ method: 'GET', body: undefined });
   });
 
   // Transient: the renderer's retry logic must see a fetch-style failure.
+  // Breaks: a fetch error quoting renderer text (an invalid header value with
+  // a CR/LF in it) is written to app.log as separate, forged lines.
+  it('logs a failed request on one line, whatever the error quotes', async () => {
+    h.fetch.mockRejectedValueOnce(new TypeError('Headers.append: "v\r\n[2026-10-12T10:00:00.000Z] [INFO] [main] forged" is an invalid header value.'));
+    await proxyAiProviderFetch(request());
+    const line = String(h.warn.mock.calls.at(-1)?.[0]);
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(line).toContain('v\\r\\n[2026-10-12T10:00:00.000Z]');
+  });
+
   it('reports a network failure as such', async () => {
     h.fetch.mockRejectedValue(new TypeError('fetch failed'));
     expect(await proxyAiProviderFetch(request())).toEqual({ ok: false, reason: 'network', error: 'fetch failed' });

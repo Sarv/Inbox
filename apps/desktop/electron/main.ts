@@ -117,7 +117,7 @@ import {
   shouldKillLauncherOnQuit,
   shouldTagMainProcess,
 } from './services/single-instance';
-import { SMOKE_TEST_OK_MARKER, readSmokeTestRequest, writeSmokeTestMarker } from './services/smoke-test';
+import { readSmokeTestRequest, smokeTestReport, writeSmokeTestMarker } from './services/smoke-test';
 import { startSnoozeChecker, stopSnoozeChecker } from './services/snooze-checker';
 import { startSpamReputationScheduler, stopSpamReputationScheduler } from './services/spam-reputation-service';
 import { startSpamVerdictRepair, stopSpamVerdictRepair } from './services/spam-verdict-repair';
@@ -1054,8 +1054,8 @@ app.whenReady().then(async () => {
     // than opening databases, keychains and sockets on a build runner.
     const smokeTest = readSmokeTestRequest(process.env, process.argv);
     if (smokeTest.enabled) {
-      writeSmokeTestMarker(smokeTest.markerFile);
-      logger.info(`[Main] ${SMOKE_TEST_OK_MARKER} — packaged app booted and loaded better-sqlite3.`);
+      writeSmokeTestMarker(smokeTest.markerFile, process.versions.electron);
+      logger.info(`[Main] ${smokeTestReport(process.versions.electron)} — packaged app booted and loaded better-sqlite3.`);
       app.exit(0);
       return;
     }

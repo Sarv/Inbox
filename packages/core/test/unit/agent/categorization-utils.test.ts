@@ -704,6 +704,31 @@ describe('callAIProvider — OpenAI-compatible transport', () => {
   });
 });
 
+// CASA audit I-7. Breaks: a provider (or anyone between) answers with a
+// redirect and the bearer, API key and mail text follow it to an address the
+// transport rule never checked — possibly over plain HTTP.
+describe('callAIProvider — redirects are refused', () => {
+  it('asks fetch to fail on a redirect for the OpenAI-compatible call, including the 401 retry', async () => {
+    const resolveBearer = vi.fn(async () => 'tok');
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ error: 'invalid_token' }, { status: 401 }))
+      .mockResolvedValueOnce(chatCompletion('ok'));
+    await callAIProvider(config({ resolveBearer, fetchImpl }), 's', 'u');
+    for (const [, init] of fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>) {
+      expect(init.redirect).toBe('error');
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks fetch to fail on a redirect for the Gemini call', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }));
+    expect(await callAIProvider(config({ type: 'gemini', model: 'gemini-test', baseUrl: undefined, fetchImpl }), 's', 'u')).toBe('ok');
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent');
+    expect(init.redirect).toBe('error');
+  });
+});
+
 describe('callAIProvider — error classification (SarvApiError)', () => {
   const failWith = async (body: unknown, init: ResponseInit) => {
     const response = typeof body === 'string'

@@ -31,7 +31,7 @@ import {
   provisionCategoryLabelsOnConnect,
   retryPipelineInitOnConnect,
 } from '../services/unified-pipeline-service';
-import { hostMismatchMessage, narrowSavedTransport, resolveVaultPassword, vaultIdCandidates, withSavedPassword, type VaultPasswordFound, type VaultPasswordResult } from '../services/vault-credentials';
+import { narrowSavedTransport, resolveVaultPassword, vaultIdCandidates, vaultRefusalMessage, withSavedPassword, type VaultPasswordFound, type VaultPasswordResult } from '../services/vault-credentials';
 import { getStorage, getSyncEngine, getMainWindow, requireSyncEngine, requireStorage, sendToWindow, getCurrentAccountId, getStorageFor, getSyncEngineFor, getIsQuitting, getSystemSuspended, setCurrentAccount } from '../shared';
 const logger = createLogger('sync-handlers');
 
@@ -79,9 +79,10 @@ function resolveVaultImapPassword(
  * can fire before the OS keychain / vault is readable, so the first read may miss
  * or throw; there's no OS "keychain ready" event to await, so we re-check on a
  * short tick and RESOLVE THE MOMENT the read succeeds (1s if it's ready in 1s, 5s
- * if 5s). A password saved for a DIFFERENT host is a settled answer too — waiting
- * can't change it. A `timeoutMs` ceiling means a genuinely-missing password
- * (needs re-auth) still settles to `none` instead of blocking forever.
+ * if 5s). A password saved for a DIFFERENT host, or with no server on record, is a
+ * settled answer too — waiting can't change it. A `timeoutMs` ceiling means a
+ * genuinely-missing password (needs re-auth) still settles to `none` instead of
+ * blocking forever.
  */
 function resolveVaultImapPasswordWaiting(
   accountId: string | undefined,
@@ -487,10 +488,11 @@ export function registerSyncHandlers(): void {
         // multi-id lookup (handles legacy account-key variants). Wait briefly for
         // the vault to become readable — at cold start this connect can beat it.
         const vaulted = await resolveVaultImapPasswordWaiting(accountId, config.username, config.host);
-        if (vaulted.status === 'host-mismatch') {
+        const refusal = vaultRefusalMessage('imap', config.host, vaulted);
+        if (refusal) {
           // Settled, not transient: retrying can't make the saved password valid
           // for a server it wasn't saved for. The user re-enters it for this host.
-          return { success: false, error: hostMismatchMessage('imap', config.host, vaulted.boundHost), retryable: false };
+          return { success: false, error: refusal, retryable: false };
         }
         if (vaulted.status === 'found') {
           // Settled too: a config asking to send the saved password more loosely
@@ -1356,9 +1358,8 @@ export function registerSyncHandlers(): void {
           // configured") while the active path found them. Wait briefly for the
           // vault at cold start (same startup race as the foreground path).
           const vaulted = await resolveVaultImapPasswordWaiting(accountId, cfg.username, cfg.host);
-          if (vaulted.status === 'host-mismatch') {
-            return { success: false, error: hostMismatchMessage('imap', cfg.host, vaulted.boundHost), retryable: false };
-          }
+          const refusal = vaultRefusalMessage('imap', cfg.host, vaulted);
+          if (refusal) return { success: false, error: refusal, retryable: false };
           if (vaulted.status === 'found') {
             const applied = withSavedPassword(cfg, 'imap', vaulted);
             if ('refusal' in applied) return { success: false, error: applied.refusal, retryable: false };

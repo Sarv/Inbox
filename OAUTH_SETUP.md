@@ -343,7 +343,8 @@ SARVINBOX_MICROSOFT_CLIENT_ID=00000000-0000-0000-0000-000000000000
 
 For release builds add the same value as the GitHub Actions secret
 `SARVINBOX_MICROSOFT_CLIENT_ID`; `.github/workflows/release.yml` passes it to the
-build and `apps/desktop/vite.config.ts` inlines it. Startup logs
+build and `apps/desktop/vite/build-defines.ts` inlines it into the main-process
+bundle. Startup logs
 `[OAuth] Microsoft client_id loaded from env` when it is picked up.
 
 ### 6. Sign in

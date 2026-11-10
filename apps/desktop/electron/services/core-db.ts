@@ -26,6 +26,7 @@ import { existsSync, copyFileSync } from 'fs';
 import { join } from 'path';
 
 import { createLogger } from '@sarvinbox/core';
+import { applyDbKey } from '@sarvinbox/storage-node/db-encryption';
 import Database from 'better-sqlite3';
 import { app } from 'electron';
 
@@ -43,11 +44,11 @@ export function getCoreDb(): Database.Database {
   if (db) return db;
   const dbPath = join(app.getPath('userData'), CORE_DB_FILE);
   const handle = new Database(dbPath);
-  // Encrypt at rest with the same key the per-account DBs use. This file is new
-  // in this version, so there is never a legacy-plaintext DB to rekey — `key=`
-  // is applied as the very first statement, before any other pragma.
+  // Encrypt at rest with the same key and settings the per-account DBs use. This
+  // file is new in this version, so there is never a legacy-plaintext DB to rekey;
+  // the key goes on before any other pragma.
   const key = getDbEncryptionKey();
-  if (key) handle.pragma(`key='${key.replace(/'/g, "''")}'`);
+  if (key) applyDbKey(handle, key);
   handle.pragma('journal_mode = WAL');
   handle.exec(`
     CREATE TABLE IF NOT EXISTS account_registry (
@@ -201,12 +202,22 @@ export function deleteAppSetting(key: string): void {
 // (safeStorage ENC1:/PLAIN1:). We just persist it as a DB row. The store owns
 // (de)serialization + the encryption; core-db is only the container.
 
+/**
+ * A blob, or null when there is none. THROWS when the store cannot be read,
+ * which `getBlob` reports as "no blob". An unreadable store and an empty one are
+ * the same value and opposite facts, so a store whose readers decide what is
+ * gone (or what to overwrite) reads with this.
+ */
+export function readBlob(key: string): Buffer | null {
+  const row = getCoreDb().prepare('SELECT data FROM core_blobs WHERE key = ?').get(key) as any;
+  const data = row?.data;
+  if (data == null) return null;
+  return Buffer.isBuffer(data) ? data : Buffer.from(data);
+}
+
 export function getBlob(key: string): Buffer | null {
   try {
-    const row = getCoreDb().prepare('SELECT data FROM core_blobs WHERE key = ?').get(key) as any;
-    const data = row?.data;
-    if (data == null) return null;
-    return Buffer.isBuffer(data) ? data : Buffer.from(data);
+    return readBlob(key);
   } catch (e) {
     logger.error('[CoreDB] getBlob failed:', key, e);
     return null;

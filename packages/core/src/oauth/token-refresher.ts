@@ -314,13 +314,59 @@ export async function refreshAccessToken(opts: {
  * Outcome of a revocation attempt. Never thrown: sign-out must finish locally
  * whatever the provider says, so the caller only needs to know what to log.
  *  - revoked:     the provider confirmed (2xx)
- *  - already-invalid: 400 — the token was already revoked or expired, which is
- *                 the state we wanted
+ *  - already-invalid: the token was already revoked or expired, which is the
+ *                 state we wanted — a 400 saying so, or a 2xx with `revoked: false`
  *  - unsupported: the provider has no revocation endpoint
- *  - failed:      network error, timeout or 5xx/429 — the grant may still be
+ *  - failed:      network error, timeout, 5xx/429 or any other refusal, or a 2xx
+ *                 that did not come from the provider — the grant may still be
  *                 live on the provider's side
  */
 export type RevokeOutcome = 'revoked' | 'already-invalid' | 'unsupported' | 'failed';
+
+/** A JSON object from `raw`, or null for anything else (not JSON, an array, `null`). */
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a 2xx from a revocation endpoint means, from its body. Google answers
+ * with an empty body or `{}`. Sarv answers `revoked: true`, or `revoked: false`
+ * for a token it no longer knows ("Token not found or already revoked"): nothing
+ * was revoked just now, so that must not read as `revoked`.
+ *
+ * Anything else confirms nothing, so the grant may still be live: a body that is
+ * not a JSON object (a captive portal or a proxy answering 200 with its own
+ * page), an `error`, or a `revoked` that is not a boolean.
+ *
+ * The body is never logged. A body that cannot be read at all rejects, which the
+ * caller reports as `failed`.
+ */
+async function revokeOutcomeOf2xx(provider: OAuthProviderConfig, res: Response): Promise<RevokeOutcome> {
+  const raw = await res.text();
+  if (raw.trim() === '') return 'revoked';
+  const body = parseJsonObject(raw);
+  if (body?.revoked === false) return 'already-invalid';
+  if (body && (body.revoked === true || (body.revoked === undefined && body.error === undefined))) return 'revoked';
+  logger.warn(`[OAuth] ${provider.id} token revocation answered ${res.status} with a body that confirms nothing — not treated as revoked`);
+  return 'failed';
+}
+
+/**
+ * What a 400 from a revocation endpoint means. RFC 7009 keeps 400 for a request
+ * the server refused, and Google uses `invalid_token` for one already revoked or
+ * expired. Any other 400 says nothing about the grant.
+ */
+async function revokeOutcomeOf400(provider: OAuthProviderConfig, res: Response): Promise<RevokeOutcome> {
+  const error = parseJsonObject(await res.text())?.error;
+  if (error === 'invalid_token' || error === 'invalid_grant') return 'already-invalid';
+  logger.warn(`[OAuth] ${provider.id} token revocation answered 400 without saying the token is invalid`);
+  return 'failed';
+}
 
 /**
  * RFC 7009 token revocation. Pass the REFRESH token: revoking it ends the
@@ -349,8 +395,8 @@ export async function revokeToken(opts: {
       },
       { signal: opts.signal, timeoutMs: opts.timeoutMs },
     );
-    if (res.ok) return 'revoked';
-    if (res.status === 400) return 'already-invalid';
+    if (res.ok) return await revokeOutcomeOf2xx(opts.provider, res);
+    if (res.status === 400) return await revokeOutcomeOf400(opts.provider, res);
     logger.warn(`[OAuth] ${opts.provider.id} token revocation answered ${res.status}`);
     return 'failed';
   } catch (err) {

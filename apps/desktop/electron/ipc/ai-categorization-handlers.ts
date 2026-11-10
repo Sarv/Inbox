@@ -9,9 +9,25 @@ import { createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { AICategorizationService } from '../services/ai-categorization-service';
-import { prepareAIProviderConfig } from '../services/ai-provider-config';
+import { isAIEndpointRefusedError, prepareAIProviderConfig, reportAIEndpointRefused } from '../services/ai-provider-config';
 import { getAICategorizationService, setAICategorizationService } from '../shared';
 const logger = createLogger('ai-categorization-handlers');
+
+/**
+ * The handlers' answer to a failed start. A refused provider address is the
+ * user's to fix, so it also goes to the Fix banner (and clears the renderer's
+ * "processing" state, which waits on that channel) and is logged without a
+ * stack; anything else is an unexpected failure.
+ */
+function startFailure(channel: string, error: unknown): { success: false; error: string } {
+  if (isAIEndpointRefusedError(error)) {
+    logger.warn(`[AI Categorization IPC] ${channel} refused: ${error.message}`);
+    reportAIEndpointRefused(error);
+  } else {
+    logger.error(`[AI Categorization IPC] ${channel} error:`, error);
+  }
+  return { success: false, error: (error as Error).message };
+}
 
 export function registerAICategorizationHandlers(): void {
   // Ensure singleton service exists
@@ -44,8 +60,7 @@ export function registerAICategorizationHandlers(): void {
 
       return { success: true };
     } catch (error) {
-      logger.error('[AI Categorization IPC] Start error:', error);
-      return { success: false, error: (error as Error).message };
+      return startFailure('Start', error);
     }
   });
 
@@ -90,8 +105,10 @@ export function registerAICategorizationHandlers(): void {
       service.startAutoProcess(await prepareAIProviderConfig(config), options);
       return { success: true };
     } catch (error) {
-      logger.error('[AI Categorization IPC] startAuto error:', error);
-      return { success: false, error: (error as Error).message };
+      // The provider the loop was using is no longer the user's choice, and
+      // the new one is refused: stop rather than keep sending to the old one.
+      if (isAIEndpointRefusedError(error)) getAICategorizationService()?.stopAutoProcess();
+      return startFailure('startAuto', error);
     }
   });
 

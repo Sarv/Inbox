@@ -108,12 +108,42 @@ describe('isSarvAIEndpointAllowed — a Sarv bearer only goes to Sarv AI', () =>
     });
   });
 
-  // Breaks: Sarv AI stops working — every zone has its own edge host.
-  it('allows https hosts under sarv.com, including per-zone edge hosts', () => {
+  // Breaks: Sarv AI stops working — every zone has its own edge host, and
+  // the LLM API's requests (chat, model list) all live under /edge/v1/llm.
+  it('allows the LLM API on every zone edge host', () => {
     expect(isSarvAIEndpointAllowed('https://jpr1-ai-edge.sarv.com/edge/v1/llm')).toBe(true);
-    expect(isSarvAIEndpointAllowed('https://blr2-ai-edge.sarv.com/edge/v1/llm')).toBe(true);
-    expect(isSarvAIEndpointAllowed('https://ai.sarv.com')).toBe(true);
-    expect(isSarvAIEndpointAllowed('https://SARV.com/x')).toBe(true);
+    expect(isSarvAIEndpointAllowed('https://blr2-ai-edge.sarv.com/edge/v1/llm/')).toBe(true);
+    expect(isSarvAIEndpointAllowed('https://jpr1-ai-edge.sarv.com/edge/v1/llm/chat/completions')).toBe(true);
+    expect(isSarvAIEndpointAllowed('https://JPR1-AI-EDGE.sarv.com./edge/v1/llm/models')).toBe(true);
+  });
+
+  // Changed deliberately (CASA I-2 review): any https host under sarv.com, on
+  // any path, used to be allowed — ai.sarv.com and sarv.com among them. Since
+  // the renderer names the URL for the AI proxy, that let a compromised window
+  // send the Sarv mailbox token to the website (inbox.sarv.com, served by
+  // GitHub Pages) or to any Sarv API route and read the answer. Breaks: the
+  // token reaches a sarv.com server or path that is not the LLM API.
+  it.each([
+    'https://ai.sarv.com',
+    'https://ai.sarv.com/oauth/v1/zones',
+    'https://SARV.com/x',
+    'https://inbox.sarv.com/edge/v1/llm/chat/completions',
+    'https://oauth.sarv.com/api/oauth/userinfo',
+    'https://jpr1-ai-edge.sarv.com/',
+    'https://jpr1-ai-edge.sarv.com/edge/v1/other',
+    'https://jpr1-ai-edge.sarv.com/edge/v1/llmx',
+    'https://jpr1-ai-edge.sarv.com/edge/v1/llm/../../admin',
+    'https://jpr1-ai-edge.sarv.com/edge/v1/llm/%2e%2e/%2e%2e/admin',
+    'https://jpr1-ai-edge.sarv.com:8443/edge/v1/llm',
+    'https://x.jpr1-ai-edge.sarv.com/edge/v1/llm',
+    'https://-ai-edge.sarv.com/edge/v1/llm',
+    'https://ai-edge.sarv.com/edge/v1/llm',
+    // Breaks: an extra host name in front of the zone label passes (CodeQL
+    // js/incomplete-url-substring-sanitization), or the bare domain does.
+    'https://evil.example-ai-edge.sarv.com/edge/v1/llm',
+    'https://sarv.com/edge/v1/llm',
+  ])('refuses the non-LLM sarv.com address %j', (url) => {
+    expect(isSarvAIEndpointAllowed(url)).toBe(false);
   });
 
   // Breaks: the Sarv token (and its email:* mailbox scopes) is POSTed to a
@@ -125,6 +155,11 @@ describe('isSarvAIEndpointAllowed — a Sarv bearer only goes to Sarv AI', () =>
     'http://jpr1-ai-edge.sarv.com/edge/v1/llm',
     'https://user:pw@jpr1-ai-edge.sarv.com/edge/v1/llm',
     'https://jpr1-ai-edge.sarv.com@evil.example/v1',
+    'https://jpr1-ai-edge.sarv.com.evil.example/edge/v1/llm',
+    // On the LLM path, so only the host check stands between these and the
+    // token: a domain that merely ends in "sarv.com" is not under sarv.com.
+    'https://evilsarv.com/edge/v1/llm',
+    'https://jpr1-ai-edgesarv.com/edge/v1/llm',
     'not a url',
     '',
   ])('refuses %j', (url) => {
@@ -143,5 +178,15 @@ describe('isSarvAIEndpointAllowed — a Sarv bearer only goes to Sarv AI', () =>
     setSarvBaseUrl({ edgeBase: 'http://localhost:8787' });
     expect(isSarvAIEndpointAllowed('http://localhost:8787/edge/v1/llm')).toBe(true);
     expect(isSarvAIEndpointAllowed('http://localhost:9999/edge/v1/llm')).toBe(false);
+    // The configured origin is held to the LLM path too.
+    expect(isSarvAIEndpointAllowed('http://localhost:8787/admin')).toBe(false);
+  });
+
+  // Breaks: the API base (ai.sarv.com in production) counts as an AI endpoint
+  // again just because it is configured. Main fetches the catalog from it at a
+  // fixed address; nothing the renderer names may get the token there.
+  it('does not treat the configured API base as an AI endpoint', () => {
+    setSarvBaseUrl({ apiBase: 'https://api.example.test' });
+    expect(isSarvAIEndpointAllowed('https://api.example.test/edge/v1/llm')).toBe(false);
   });
 });

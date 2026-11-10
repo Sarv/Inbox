@@ -6,6 +6,8 @@
 // own mail) is that person's own direct/mobile number. We mine phones from each
 // sender's signature, group by domain, and split them on that frequency signal.
 
+import { trimTrailingSlashes } from '../utils/trailing-slash';
+
 import { contactLinkKind, normalizeContactUrl } from './contact-links';
 import { normalizePhoneToE164 } from './phone-normalizer';
 import { splitByAuthor } from './quote-attribution';
@@ -156,7 +158,7 @@ export function mineLinkedIn(bodies: string[], fromAddress: string): MinedLinked
 function accumulateUrls(out: Map<string, number>, urls: string[]): void {
   const seenThisEmail = new Set<string>();
   for (const raw of urls) {
-    const url = (raw || '').trim().split(/[?#]/)[0].replace(/\/+$/, '');
+    const url = trimTrailingSlashes((raw || '').trim().split(/[?#]/)[0]);
     if (!url || seenThisEmail.has(url)) continue;
     seenThisEmail.add(url);
     out.set(url, (out.get(url) || 0) + 1);

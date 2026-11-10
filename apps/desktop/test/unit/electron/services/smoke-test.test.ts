@@ -59,19 +59,21 @@ describe('writeSmokeTestMarker', () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it('writes the marker the launcher looks for', () => {
+  // Changed deliberately (CASA I-4): the marker now also names the Electron
+  // runtime, which the launcher checks against the pinned version.
+  it('writes the marker the launcher looks for, with the Electron version', () => {
     const file = join(directory, 'ok');
-    writeSmokeTestMarker(file);
-    expect(readFileSync(file, 'utf8')).toContain(SMOKE_TEST_OK_MARKER);
+    writeSmokeTestMarker(file, '44.5.1');
+    expect(readFileSync(file, 'utf8')).toBe(`${SMOKE_TEST_OK_MARKER} electron=44.5.1\n`);
   });
 
   it('does nothing when no file was asked for', () => {
-    expect(() => writeSmokeTestMarker(null)).not.toThrow();
+    expect(() => writeSmokeTestMarker(null, '44.5.1')).not.toThrow();
   });
 
   // The exit code and the printed marker still prove the run; an unwritable
   // path must not turn a healthy build into a failed release.
   it('swallows a write that cannot happen', () => {
-    expect(() => writeSmokeTestMarker(join(directory, 'missing', 'ok'))).not.toThrow();
+    expect(() => writeSmokeTestMarker(join(directory, 'missing', 'ok'), '44.5.1')).not.toThrow();
   });
 });

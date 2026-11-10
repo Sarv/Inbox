@@ -22,15 +22,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sign in is open only while a sign-in is in progress, and release builds no
   longer take sign-in server addresses or app registrations from the
   environment they are started in.
+- **Remote images in emails no longer use cookies.** They no longer send or
+  store cookies. Contact photos looked up on Gravatar are fetched without
+  cookies too.
 - **Removing an account leaves less behind.** It now also clears cookies set by
-  remote images in emails, and any old saved credentials left in the app's
-  browser storage from earlier versions.
+  remote images in emails, the copies of those images in the app's cache, and
+  any old saved credentials left in the app's browser storage from earlier
+  versions. Images in your other accounts' mail download again the next time
+  you open them.
+- **Your mail stays readable across updates.** The encryption settings for your
+  mailboxes, contacts and app data are now stated by the app instead of left to
+  a library's defaults, so a future library update cannot make them unreadable.
+  Your existing files do not change.
+- **Passwords saved by older versions stay with their server.** A password saved
+  before passwords were tied to a server now only goes to the server recorded
+  for that account or, for a sending password with no server on record, to one
+  at the same provider. If the app is asked to use it anywhere else, it asks you
+  to enter the password again.
 - **Decryption errors give nothing away.** A PGP message that cannot be
   decrypted now always shows the same message, whatever went wrong, and so
   does importing, creating or backing up a PGP key that the encryption library
   refuses. Stored secrets that fail to open no longer echo any of their
   contents into the log. A PGP key the system keychain will not open now says
   so, and asks you to unlock the keychain or allow Sarv Inbox to use it.
+- **Your Sarv sign-in no longer reaches the app window.** The window used to
+  be handed your Sarv sign-in token so it could call Sarv AI itself. That
+  token also opens your Sarv mailbox, so a compromised window could have read
+  or sent your mail with it. Sarv AI requests and the Sarv model lists are now
+  sent by the part of the app that holds your sign-ins, and only to Sarv's own
+  AI servers. When an AI provider asks the app to slow down, the app again
+  waits as long as the provider asks before trying again.
+- **AI providers must use a secure connection.** A custom AI provider's
+  address must start with https://, unless the model server runs on your own
+  computer. Before, an http:// address on another computer received your mail
+  unencrypted. If yours is one, AI sorting stops and asks you to switch to
+  HTTPS. A custom provider with no address no longer falls back to OpenAI;
+  nothing is sent until you add one. The AI consent now says that new mail is
+  sent to your provider as it arrives, and names the server of a custom
+  provider.
+- **Removing an account says what happens to its sign-in.** Removing a Google
+  account also withdraws the app's access at Google, and the app now tells you
+  when that could not be done (for example, while offline), with a link to do
+  it yourself. Microsoft does not let apps withdraw their own access, so
+  removing an Outlook account now shows where to do it: account.live.com
+  (personal accounts) or myapps.microsoft.com (work or school).
+- **Removing a Sarv account now ends its sign-in at Sarv.** Until now its sign-in
+  was only deleted from your device and stayed valid at Sarv until it expired.
+  If Sarv cannot be reached, the account is still removed and the app tells you
+  it could not confirm the sign-in was ended. If Sarv AI runs on that same
+  sign-in, it stops too: the remove dialog says so beforehand, and an "AI is
+  inactive" notice appears if no other AI provider is left.
+- **Removing your last AI provider stops AI at once.** The app kept sending new
+  mail to a removed provider until it was restarted.
+- **Installed copies now run on Electron 44.** Since version 1.2.3 the
+  installed app has run on Electron 43.2.0 by mistake, while it was built and
+  tested on Electron 44, so it missed the fixes in Electron 44. This release
+  moves to Electron 44.9.3, and every release now checks that the app runs the
+  Electron version it was tested on.
+- **The Google sign-in secret stays out of the app window.** Only the part of
+  the app that signs you in is given it, and a release fails to build if the
+  secret ever appears in the window's code.
+
+### Fixed
+- **Antivirus sign-in always shows you what happened.** On Windows, the page
+  saying an antivirus sign-in was declined or incomplete could show up as a
+  connection error in your browser instead.
 
 ### Fixed
 - After you change your Google or Microsoft password, Sarv Inbox stops

@@ -20,6 +20,7 @@ import { createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 
+import { settleRevocation, type AccountRevocation } from '../services/account-revocation';
 import {
   listRegistryAccounts,
   oauthIdentityOf,
@@ -37,7 +38,7 @@ import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accou
 import { peekAntivirusScanService } from '../services/antivirus-scan-service';
 import { cleanupOrphanedAttachmentStores, removeAllCachedAttachments } from '../services/attachment-cache';
 import { clearUnscannedWarningPreference } from '../services/attachment-warning-preferences';
-import { clearEmailContentCookies } from '../services/email-content-cookies';
+import { clearEmailContentData } from '../services/email-content-cookies';
 import { signOutOAuthAccount } from '../services/oauth-refresh-scheduler';
 import { rebindOutboxStorage } from '../services/outbox-service';
 import { noteAppSettingChanged } from '../services/reputation-service';
@@ -214,11 +215,6 @@ export function registerAccountsHandlers(): void {
         }
       }
 
-      // Cookies that remote images in its mail set (CASA 6.6.1). One jar serves
-      // every account, so it is cleared whole; nothing in the app relies on it
-      // (see email-content-cookies.ts). Best-effort, never fails the removal.
-      await clearEmailContentCookies();
-
       // The removed account may have been the OAuth session powering the AI/LLM
       // (Sarv is both mailbox AND LLM). If so, its token is gone and every
       // categorization would now throw "No OAuth account" forever — disable AI
@@ -230,29 +226,50 @@ export function registerAccountsHandlers(): void {
       // background account's refresh token on disk and its grant live.
       // Skipped when another mailbox still uses the same grant, or when the
       // registry can't be read (unknown ≠ unused: never revoke on a guess).
-      // The local token delete IS awaited (the AI revalidation below must see the
-      // grant gone); the network revocation is not — it must not hold the
-      // "Deleting…" state.
+      // The local token delete is awaited first (the AI revalidation below must
+      // see the grant gone). The network revocation is then waited for, at most
+      // REVOCATION_WAIT_MS, so the UI can say whether it worked (CASA I-6) —
+      // offline or slow, removal still succeeds and reports 'failed'.
+      let revocation: AccountRevocation | undefined;
+      let pendingRevocation: Promise<AccountRevocation> | undefined;
       if (removedOAuth) {
         let stillUsed = true;
         try {
           stillUsed = readRegistryAccounts().some((a) => {
             const o = oauthIdentityOf(a);
-            return o?.provider === removedOAuth.provider && o.email === removedOAuth.email;
+            // Case-insensitively, as the token store keys them: one grant.
+            return o?.provider === removedOAuth.provider && o.email.toLowerCase() === removedOAuth.email.toLowerCase();
           });
         } catch (e) {
           logger.warn('[Accounts] OAuth sign-out after removal SKIPPED (registry unreadable):', (e as Error).message);
         }
-        if (!stillUsed) {
-          try { await signOutOAuthAccount(removedOAuth.provider, removedOAuth.email); }
-          catch (e) { logger.warn('[Accounts] OAuth sign-out after removal failed:', (e as Error).message); }
+        if (stillUsed) {
+          revocation = 'skipped';
+        } else {
+          try {
+            const signedOut = await signOutOAuthAccount(removedOAuth.provider, removedOAuth.email);
+            pendingRevocation = settleRevocation(removedOAuth.provider, signedOut.revocation);
+          } catch (e) {
+            logger.warn('[Accounts] OAuth sign-out after removal failed:', (e as Error).message);
+            revocation = 'failed';
+          }
         }
       }
 
       try { await disablePipelineAIIfProviderRemoved(); }
       catch (e) { logger.warn('[Accounts] AI provider revalidation after removal failed:', (e as Error).message); }
 
-      return { success: true };
+      // Cookies and cached images that remote content in its mail left (CASA
+      // 6.6.1). One jar and one cache serve every account, so both are cleared
+      // whole; nothing in the app relies on them (see email-content-cookies.ts).
+      // Last on purpose. With the registry row already gone, a token still on disk
+      // recreates the account on the next launch (seedAccountRegistryFromDurableStores),
+      // so a session store that is slow, or never answers, must not stand between
+      // the removal and the sign-out above. Waited for alongside the revocation, so
+      // the two cost one bound, not two. Both are bounded and neither rejects.
+      const [settled] = await Promise.all([pendingRevocation, clearEmailContentData()]);
+      if (settled) revocation = settled;
+      return revocation ? { success: true, revocation } : { success: true };
     } catch (error) {
       logger.error('[Accounts] remove failed:', error);
       return { success: false, error: (error as Error).message };

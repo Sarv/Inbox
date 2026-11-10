@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
   storage: null as unknown,
   window: null as { sent: string[]; sendThrows: boolean } | null,
   fetches: [] as string[],
+  fetchInits: [] as unknown[],
   respond: null as
     | ((url: string) => Promise<{ ok: boolean; headers: { get: (k: string) => string | null }; arrayBuffer: () => Promise<ArrayBuffer> }>)
     | null,
@@ -42,8 +43,9 @@ vi.mock('../../../../electron/shared', () => ({
 }));
 
 vi.mock('../../../../electron/services/net-fetch', () => ({
-  chromiumFetch: async (url: string) => {
+  chromiumFetch: async (url: string, init?: unknown) => {
     h.fetches.push(url);
+    h.fetchInits.push(init);
     if (!h.respond) throw new Error('network down');
     return h.respond(url);
   },
@@ -127,6 +129,7 @@ beforeEach(() => {
   h.storage = null;
   h.window = { sent: [], sendThrows: false };
   h.fetches.length = 0;
+  h.fetchInits.length = 0;
   h.respond = notFound;
 });
 
@@ -180,6 +183,18 @@ describe('probing', () => {
 
     const hash = createHash('md5').update('mixedcase@example.com').digest('hex');
     expect(h.fetches[0]).toBe(`https://www.gravatar.com/avatar/${hash}?s=160&d=404`);
+  });
+
+  // CASA 6.6.1. Breaks if a jar cookie goes out with these: it would tie every
+  // contact the app looks up to one visitor. `net.fetch` sends and stores cookies
+  // unless told otherwise (measured on Electron 44; `credentials: 'omit'` does
+  // neither).
+  it('asks Gravatar without cookies', async () => {
+    const { storage } = makeStorage([{ id: 'c1', email: 'a@example.com' }]);
+    h.storage = storage;
+    startAvatarDiscoveryScheduler();
+    await advance(FIRST_TICK_MS);
+    expect(h.fetchInits).toEqual([{ credentials: 'omit' }]);
   });
 
   it('caches a hit as a data: URI and nudges the Contacts view', async () => {

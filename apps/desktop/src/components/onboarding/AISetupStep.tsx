@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, CheckCircle2, Loader2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
-import { SARV_AI_DISCLOSURE, setAiConsent } from '../../services/ai-consent';
+import { providerAIDisclosure, SARV_AI_DISCLOSURE, setAiConsent } from '../../services/ai-consent';
 import { addValidatedProvider, loadAISettings, testProvider, type AIProvider, type AIProviderType } from '../../services/ai-service';
 import {
   checkAIConnection, loadSarvAIConnection, makeAIConnection, providerFromConnection,
@@ -267,8 +267,10 @@ export function AISetupStep({ context = 'onboarding', editingProvider, onSavingC
   const label = choices.find((entry) => entry.type === selected)?.name || 'AI';
   const isOAuth = connection?.authMethod === 'oauth';
   const sarv = connection?.sarv;
+  // A custom provider's name is whatever the user typed, so its disclosure
+  // also names the server the mail goes to.
   const disclosure = selected === 'sarv' ? SARV_AI_DISCLOSURE
-    : `AI sorts your inbox, drafts replies and pulls out conversations by sending sender, recipients, subject and message text to ${connection?.name || label}, for every connected email account. Your provider's terms and data policy apply. You can turn AI off in AI → Email Agent.`;
+    : providerAIDisclosure(connection?.name || label, selected === 'custom' ? connection?.baseUrl : undefined);
 
   return (
     <section aria-label="AI setup" className="space-y-6">

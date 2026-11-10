@@ -1,348 +1,208 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { SarvApiError } from '../../../src/agent/categorization-utils';
 import {
-  fetchSarvProviders,
-  fetchSarvModels,
-  fetchSarvZones,
-  fetchSarvWallet,
+  fetchSarvCatalog,
+  parseSarvCatalogError,
+  sarvCatalogUrl,
+  type SarvCatalogDeps,
 } from '../../../src/oauth/sarv-catalog';
+import { OAuthError } from '../../../src/oauth/types';
 
-// These four discovery calls populate the provider/model/zone pickers and the
-// wallet display. Two things must not regress: the URL/auth shape (a doubled
-// slash or a missing Bearer header makes every picker empty with no visible
-// reason), and the error mapping — the calling UI branches ONLY on
-// SarvApiError.code to decide "refresh the token" vs "top up the wallet" vs
-// "back off", so a mis-mapped status sends the user down the wrong path.
-// All fetches are stubbed; nothing leaves the process.
+// The catalog populates the Sarv provider / model / zone pickers. It is fetched
+// by MAIN with the account's bearer — which is also the Sarv mailbox's XOAUTH2
+// credential — so the renderer never holds that token (CASA I-2). What breaks
+// if this file fails: the bearer rides a redirect to another host, a doubled
+// slash or a stray empty filter empties every picker, an expired token is no
+// longer refreshed and retried, a missing scope reads as a generic failure in
+// the log, or "sign in again" becomes indistinguishable from "offline".
+//
+// Changed deliberately (CASA I-2): this file used to test fetchSarvProviders,
+// fetchSarvModels, fetchSarvZones and fetchSarvWallet, global-fetch fetchers
+// with no callers. They are removed; main now fetches the catalog through
+// fetchSarvCatalog. Carried over: URL shape, Bearer auth, trailing slashes,
+// percent-encoding, the FastAPI `detail` error envelope, non-JSON and
+// non-object bodies, network rejection. Dropped with their code: the wallet
+// fetch, per-fetcher AbortSignal forwarding, and that file's own Retry-After
+// and 402/429 code mapping (the live SarvApiError path in
+// utils/sarv-api-error.ts is unchanged and keeps its tests).
 
-const TOKEN = 'jwt-access-token';
+const API = 'https://ai.sarv.com';
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 
-function okJson(payload: unknown) {
-  return {
-    ok: true,
-    status: 200,
-    json: vi.fn(async () => payload),
-    text: vi.fn(async () => JSON.stringify(payload)),
-    headers: new Headers(),
-  } as unknown as Response;
+function deps(over: Partial<SarvCatalogDeps> = {}) {
+  const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => json([]));
+  const resolveBearer = vi.fn(async (force: boolean) => (force ? 'fresh-token' : 'current-token'));
+  return { apiBaseUrl: API, fetchImpl, resolveBearer, ...over } as SarvCatalogDeps & {
+    fetchImpl: typeof fetchImpl; resolveBearer: typeof resolveBearer;
+  };
 }
 
-function errorResponse(
-  status: number,
-  body: string,
-  headers: Record<string, string> = {},
-) {
-  return {
-    ok: false,
-    status,
-    json: vi.fn(async () => JSON.parse(body)),
-    text: vi.fn(async () => body),
-    headers: new Headers(headers),
-  } as unknown as Response;
-}
-
-let fetchMock: ReturnType<typeof vi.fn>;
-
-beforeEach(() => {
-  fetchMock = vi.fn();
-  vi.stubGlobal('fetch', fetchMock);
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-});
-
-const lastInit = () => fetchMock.mock.calls[0][1] as RequestInit;
-const lastUrl = () => fetchMock.mock.calls[0][0] as string;
-
-describe('sarv-catalog — request shape', () => {
-  // Every endpoint needs the llm:view-scoped JWT as a Bearer header; without it
-  // the server answers 401 and the UI shows an empty catalog.
-  it('GETs the providers endpoint with Bearer auth and a JSON Accept header', async () => {
-    fetchMock.mockResolvedValue(okJson([]));
-
-    await fetchSarvProviders('https://ai.sarv.com', TOKEN);
-
-    expect(lastUrl()).toBe('https://ai.sarv.com/oauth/v1/llm/providers');
-    const init = lastInit() as RequestInit & { headers: Record<string, string> };
-    expect(init.method).toBe('GET');
-    expect(init.headers['Authorization']).toBe(`Bearer ${TOKEN}`);
-    expect(init.headers['Accept']).toBe('application/json');
+describe('sarvCatalogUrl', () => {
+  // Breaks: each picker reads the wrong list.
+  it('maps each kind to its endpoint', () => {
+    expect(sarvCatalogUrl(API, { kind: 'providers' })).toBe('https://ai.sarv.com/oauth/v1/llm/providers');
+    expect(sarvCatalogUrl(API, { kind: 'models' })).toBe('https://ai.sarv.com/oauth/v1/llm/models');
+    expect(sarvCatalogUrl(API, { kind: 'zones' })).toBe('https://ai.sarv.com/oauth/v1/zones');
   });
 
   // apiBaseUrl comes from config/env and users add trailing slashes; '//oauth'
   // 404s on the gateway.
-  it('strips a trailing slash from apiBaseUrl so the path never doubles up', async () => {
-    fetchMock.mockResolvedValue(okJson([]));
-
-    await fetchSarvProviders('https://ai.sarv.com/', TOKEN);
-
-    expect(lastUrl()).toBe('https://ai.sarv.com/oauth/v1/llm/providers');
-    expect(lastUrl()).not.toContain('//oauth');
+  it('never doubles the slash before /oauth', () => {
+    expect(sarvCatalogUrl('http://localhost:8880///', { kind: 'zones' })).toBe('http://localhost:8880/oauth/v1/zones');
   });
 
-  it('builds the zones and wallet URLs off the same base', async () => {
-    fetchMock.mockResolvedValue(okJson([]));
-    await fetchSarvZones('http://localhost:8880/', TOKEN);
-    expect(lastUrl()).toBe('http://localhost:8880/oauth/v1/zones');
-
-    fetchMock.mockClear();
-    fetchMock.mockResolvedValue(okJson({ balance: 0, currency: 'INR', locked: false }));
-    await fetchSarvWallet('http://localhost:8880', TOKEN);
-    expect(lastUrl()).toBe('http://localhost:8880/oauth/v1/wallet');
+  // THE zone-less regression: an empty `zone_code=` is sent as a real filter
+  // and can match nothing, so an org-less account sees no providers at all.
+  it('omits empty filters entirely', () => {
+    expect(sarvCatalogUrl(API, { kind: 'providers', zoneCode: '' })).toBe('https://ai.sarv.com/oauth/v1/llm/providers');
+    expect(sarvCatalogUrl(API, { kind: 'models', providerCode: '', zoneCode: '' })).not.toContain('?');
   });
 
-  it('omits the query string entirely when no providerCode is given', async () => {
-    fetchMock.mockResolvedValue(okJson([]));
-
-    await fetchSarvModels('https://ai.sarv.com', TOKEN);
-
-    expect(lastUrl()).toBe('https://ai.sarv.com/oauth/v1/llm/models');
-    expect(lastUrl()).not.toContain('?');
+  // Breaks: the org case regresses into always-unscoped, or a code with '&'
+  // truncates the filter and quietly returns the WRONG model list.
+  it('scopes to provider and zone, percent-encoded', () => {
+    expect(sarvCatalogUrl(API, { kind: 'models', providerCode: 'open ai&x=1', zoneCode: 'blr1' }))
+      .toBe('https://ai.sarv.com/oauth/v1/llm/models?provider_code=open+ai%26x%3D1&zone_code=blr1');
+    expect(sarvCatalogUrl(API, { kind: 'providers', zoneCode: 'jpr1', providerCode: 'ignored' }))
+      .toBe('https://ai.sarv.com/oauth/v1/llm/providers?zone_code=jpr1');
   });
 
-  // Provider codes are server-supplied strings; an unescaped one with '&' or a
-  // space would truncate the filter and quietly return the WRONG model list.
-  it('percent-encodes the provider_code filter', async () => {
-    fetchMock.mockResolvedValue(okJson([]));
-
-    await fetchSarvModels('https://ai.sarv.com', TOKEN, { providerCode: 'open ai&x=1' });
-
-    expect(lastUrl()).toBe('https://ai.sarv.com/oauth/v1/llm/models?provider_code=open%20ai%26x%3D1');
-  });
-
-  // The pickers cancel in-flight requests when the user closes the dialog or
-  // switches provider; dropping the signal leaks the request and races a stale
-  // response into the UI.
-  it('forwards the AbortSignal on every fetcher', async () => {
-    const controller = new AbortController();
-    fetchMock.mockResolvedValue(okJson([]));
-
-    await fetchSarvProviders('https://ai.sarv.com', TOKEN, controller.signal);
-    expect(lastInit().signal).toBe(controller.signal);
-
-    fetchMock.mockClear();
-    await fetchSarvModels('https://ai.sarv.com', TOKEN, { signal: controller.signal });
-    expect(lastInit().signal).toBe(controller.signal);
-
-    fetchMock.mockClear();
-    await fetchSarvZones('https://ai.sarv.com', TOKEN, controller.signal);
-    expect(lastInit().signal).toBe(controller.signal);
-
-    fetchMock.mockClear();
-    fetchMock.mockResolvedValue(okJson({ balance: 1, currency: 'INR', locked: false }));
-    await fetchSarvWallet('https://ai.sarv.com', TOKEN, controller.signal);
-    expect(lastInit().signal).toBe(controller.signal);
+  // Zones are not zone-filtered: a stray filter would hide the user's zones.
+  it('sends no filters for zones', () => {
+    expect(sarvCatalogUrl(API, { kind: 'zones', zoneCode: 'jpr1', providerCode: 'p' })).toBe('https://ai.sarv.com/oauth/v1/zones');
   });
 });
 
-describe('sarv-catalog — payload handling', () => {
-  it('returns the parsed provider/model/zone lists as-is', async () => {
-    fetchMock.mockResolvedValue(okJson([{ code: 'openai', name: 'OpenAI' }]));
-    await expect(fetchSarvProviders('https://ai.sarv.com', TOKEN)).resolves.toEqual([
-      { code: 'openai', name: 'OpenAI' },
-    ]);
-
-    fetchMock.mockResolvedValue(
-      okJson([{ code: 'gpt-4o', display_name: 'GPT-4o', provider_code: 'openai', supports_streaming: true }]),
-    );
-    await expect(fetchSarvModels('https://ai.sarv.com', TOKEN)).resolves.toEqual([
-      { code: 'gpt-4o', display_name: 'GPT-4o', provider_code: 'openai', supports_streaming: true },
-    ]);
-
-    fetchMock.mockResolvedValue(okJson([{ code: 'jpr1', name: 'Jaipur 1' }, { code: 'blr1' }]));
-    await expect(fetchSarvZones('https://ai.sarv.com', TOKEN)).resolves.toEqual([
-      { code: 'jpr1', name: 'Jaipur 1' },
-      { code: 'blr1' }, // an unnamed zone is legal — the UI falls back to `code`
-    ]);
+describe('fetchSarvCatalog — request', () => {
+  // Breaks: the bearer (a mailbox credential) follows a redirect elsewhere, or
+  // the server answers 401 for a missing Bearer header.
+  it('GETs with the bearer, Accept JSON and redirect:error', async () => {
+    const d = deps({ fetchImpl: vi.fn(async () => json([{ code: 'sarv_partners' }])) });
+    const res = await fetchSarvCatalog({ kind: 'providers', zoneCode: 'jpr1' }, d);
+    expect(res).toEqual({ ok: true, body: [{ code: 'sarv_partners' }] });
+    const [url, init] = d.fetchImpl.mock.calls[0];
+    expect(url).toBe('https://ai.sarv.com/oauth/v1/llm/providers?zone_code=jpr1');
+    expect(init).toMatchObject({ method: 'GET', redirect: 'error', headers: { Accept: 'application/json', Authorization: 'Bearer current-token' } });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(d.resolveBearer.mock.calls).toEqual([[false]]);
   });
 
-  // An empty catalog is a valid answer (no models enabled for this org) and must
-  // resolve, NOT throw — the UI shows "no models available" instead of an error.
-  it('resolves an empty list rather than treating it as a failure', async () => {
-    fetchMock.mockResolvedValue(okJson([]));
-
-    await expect(fetchSarvProviders('https://ai.sarv.com', TOKEN)).resolves.toEqual([]);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+  // An empty catalog is a valid answer (no models enabled for this org).
+  it('returns an empty list as success', async () => {
+    expect(await fetchSarvCatalog({ kind: 'zones' }, deps())).toEqual({ ok: true, body: [] });
   });
 
-  it('returns the wallet payload including a locked wallet', async () => {
-    fetchMock.mockResolvedValue(okJson({ balance: 0, currency: 'INR', locked: true }));
+  // Breaks: AI stops working ~15 minutes after sign-in when the edge refuses a
+  // token our clock still trusted — or a refused fresh token loops.
+  it('on 401 refreshes the token and retries exactly once', async () => {
+    const d = deps({ fetchImpl: vi.fn().mockResolvedValueOnce(json({ detail: 'expired' }, 401)).mockResolvedValueOnce(json([{ code: 'z' }])) });
+    expect(await fetchSarvCatalog({ kind: 'zones' }, d)).toEqual({ ok: true, body: [{ code: 'z' }] });
+    expect(d.resolveBearer.mock.calls).toEqual([[false], [true]]);
+    expect(d.fetchImpl.mock.calls[1][1].headers).toMatchObject({ Authorization: 'Bearer fresh-token' });
 
-    await expect(fetchSarvWallet('https://ai.sarv.com', TOKEN)).resolves.toEqual({
-      balance: 0,
-      currency: 'INR',
-      locked: true,
-    });
+    const twice = deps({ fetchImpl: vi.fn(async () => json({ detail: { error: 'invalid_token' } }, 401)) });
+    expect(await fetchSarvCatalog({ kind: 'zones' }, twice)).toMatchObject({ ok: false, status: 401, code: 'invalid_token' });
+    expect(twice.fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  // Breaks: the normal org-less zones 403 forces a token refresh on every boot.
+  it('does not retry a 403', async () => {
+    const d = deps({ fetchImpl: vi.fn(async () => json({ detail: { error: 'missing org_id claim' } }, 403)) });
+    expect(await fetchSarvCatalog({ kind: 'zones' }, d)).toEqual({ ok: false, status: 403, code: 'missing org_id claim', message: 'missing org_id claim' });
+    expect(d.fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('sarv-catalog — error mapping', () => {
-  // 401 → the access token expired: the caller MUST refresh, so this code has to
-  // be exact or the app pops a re-login instead of refreshing silently.
-  it('maps a bare 401 to invalid_token', async () => {
-    fetchMock.mockResolvedValue(errorResponse(401, 'Unauthorized'));
-
-    const err = await fetchSarvProviders('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err).toBeInstanceOf(SarvApiError);
-    expect(err.code).toBe('invalid_token');
-    expect(err.status).toBe(401);
-  });
-
-  it('maps a bare 402 to insufficient_balance and 429 to rate_limit_exceeded', async () => {
-    fetchMock.mockResolvedValue(errorResponse(402, 'Payment Required'));
-    await expect(fetchSarvModels('https://ai.sarv.com', TOKEN)).rejects.toMatchObject({
-      code: 'insufficient_balance',
-      status: 402,
+describe('fetchSarvCatalog — failures stay plain data', () => {
+  // Permanent: only signing in again helps. Breaks: the UI cannot tell this
+  // from a blip, or the old token-layer message (what the user saw) is lost.
+  it('reports a revoked session as sign_in_required without any request', async () => {
+    const d = deps({ resolveBearer: vi.fn(async () => { throw new OAuthError('Token refresh failed (400): invalid_grant', 'TOKEN_REFRESH_FAILED'); }) });
+    expect(await fetchSarvCatalog({ kind: 'providers' }, d)).toEqual({
+      ok: false, status: 0, code: 'sign_in_required', message: 'Token refresh failed (400): invalid_grant',
     });
+    expect(d.fetchImpl).not.toHaveBeenCalled();
+  });
 
-    fetchMock.mockResolvedValue(errorResponse(429, 'Too Many Requests'));
-    await expect(fetchSarvZones('https://ai.sarv.com', TOKEN)).rejects.toMatchObject({
-      code: 'rate_limit_exceeded',
-      status: 429,
+  // A signed-out account is permanent too.
+  it('reports a missing account as sign_in_required', async () => {
+    const d = deps({ resolveBearer: vi.fn(async () => { throw new OAuthError('No OAuth account for sarv:x', 'ACCOUNT_NOT_FOUND'); }) });
+    expect(await fetchSarvCatalog({ kind: 'zones' }, d)).toMatchObject({ code: 'sign_in_required' });
+  });
+
+  // Transient: the OAuth server is unreachable right now. Breaks: a Wi-Fi blip
+  // tells the user to re-authenticate.
+  it('reports an unreachable token endpoint as token_unavailable', async () => {
+    const d = deps({ resolveBearer: vi.fn(async () => { throw new OAuthError('Cannot reach OAuth server', 'TOKEN_REFRESH_NETWORK_ERROR'); }) });
+    expect(await fetchSarvCatalog({ kind: 'zones' }, d)).toEqual({ ok: false, status: 0, code: 'token_unavailable', message: 'Cannot reach OAuth server' });
+  });
+
+  // Transient: no response at all. A refused redirect lands here too.
+  it('reports a network failure as network', async () => {
+    const d = deps({ fetchImpl: vi.fn(async () => { throw new TypeError('redirect mode is set to error'); }) });
+    expect(await fetchSarvCatalog({ kind: 'zones' }, d)).toEqual({ ok: false, status: 0, code: 'network', message: 'redirect mode is set to error' });
+  });
+
+  // Breaks: a hung server leaves the picker spinning forever.
+  it('times out a hung request', async () => {
+    const d = deps({
+      timeoutMs: 20,
+      fetchImpl: vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init.signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      })),
     });
+    expect(await fetchSarvCatalog({ kind: 'zones' }, d)).toEqual({ ok: false, status: 0, code: 'timeout', message: 'Sarv did not answer within 0.02s' });
   });
 
-  // Anything unrecognised must land on upstream_error — never on a code the UI
-  // would react to by wiping credentials or sending the user to top up.
-  it('maps an unmapped status (500/403) to upstream_error with a generic message', async () => {
-    fetchMock.mockResolvedValue(errorResponse(500, 'Internal Server Error'));
-
-    const err = await fetchSarvProviders('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err.code).toBe('upstream_error');
-    expect(err.message).toBe('Sarv API 500');
-    expect(err.detail).toBeUndefined(); // non-JSON body carries no structured detail
+  // Breaks: a proxy's HTML 200 crashes the IPC handler instead of failing cleanly.
+  it('reports a non-JSON success body as invalid_response', async () => {
+    const d = deps({ fetchImpl: vi.fn(async () => new Response('<html>login</html>', { status: 200 })) });
+    expect(await fetchSarvCatalog({ kind: 'zones' }, d)).toMatchObject({ ok: false, status: 200, code: 'invalid_response' });
   });
 
-  // FastAPI wraps HTTPException payloads in { detail: … }; the real error code
-  // lives inside. Reading the outer object instead would flatten every 403 into
-  // upstream_error and lose the "re-authorize with broader scopes" path.
-  it('prefers the error code inside a FastAPI { detail: … } envelope over the status', async () => {
-    fetchMock.mockResolvedValue(
-      errorResponse(403, JSON.stringify({ detail: { error: 'insufficient_scope', message: 'llm:view required' } })),
-    );
+  // Transient upstream failure keeps its own status, so a blip never reads as
+  // "your account has no AI".
+  it('surfaces a 503 with its status and FastAPI string detail', async () => {
+    const d = deps({ fetchImpl: vi.fn(async () => json({ detail: 'upstream unavailable' }, 503)) });
+    expect(await fetchSarvCatalog({ kind: 'providers' }, d)).toEqual({ ok: false, status: 503, code: '503', message: 'upstream unavailable' });
+  });
+});
 
-    const err = await fetchSarvProviders('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err.code).toBe('insufficient_scope');
-    expect(err.message).toBe('llm:view required');
-    expect(err.detail).toEqual({ error: 'insufficient_scope', message: 'llm:view required' });
-    expect(err.status).toBe(403);
+describe('parseSarvCatalogError', () => {
+  // THE diagnosis: the code sits INSIDE `detail` for the OAuth shape; reading
+  // the top level only made every 403 indistinguishable.
+  it('reads the code inside a FastAPI { detail: {…} } envelope', () => {
+    expect(parseSarvCatalogError(403, JSON.stringify({ detail: { error: 'insufficient_scope', error_description: 'llm:view required' } })))
+      .toEqual({ code: 'insufficient_scope', message: 'llm:view required' });
+    expect(parseSarvCatalogError(403, JSON.stringify({ detail: { code: 'cai_account_required', message: 'Link your CAI account' } })))
+      .toEqual({ code: 'cai_account_required', message: 'Link your CAI account' });
   });
 
-  it('also reads an unwrapped { error, message } body', async () => {
-    fetchMock.mockResolvedValue(
-      errorResponse(403, JSON.stringify({ error: 'cai_account_required', message: 'Link your CAI account' })),
-    );
-
-    const err = await fetchSarvZones('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err.code).toBe('cai_account_required');
-    expect(err.message).toBe('Link your CAI account');
+  // An unwrapped body names its code at the top level.
+  it('reads a top-level { error, error_description } body', () => {
+    expect(parseSarvCatalogError(401, JSON.stringify({ error: 'invalid_token', error_description: 'expired' })))
+      .toEqual({ code: 'invalid_token', message: 'expired' });
+    expect(parseSarvCatalogError(400, JSON.stringify({ code: 'bad', message: 'Bad filter' })))
+      .toEqual({ code: 'bad', message: 'Bad filter' });
   });
 
-  // A body-declared code that overrides the status is only honoured when it is
-  // one the app knows how to handle; an unknown string must not leak through as
-  // a code no handler branches on.
-  it('ignores an unknown error string in the body and falls back to the status mapping', async () => {
-    fetchMock.mockResolvedValue(
-      errorResponse(401, JSON.stringify({ error: 'teapot_overflow', message: 'nope' })),
-    );
-
-    const err = await fetchSarvProviders('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err.code).toBe('invalid_token'); // from status, not from the body
-    expect(err.message).toBe('nope'); // message is still surfaced
+  // Breaks: a 422 list becomes "[object Object]" in the user-facing toast.
+  it('joins a 422 validation list into one message', () => {
+    expect(parseSarvCatalogError(422, JSON.stringify({ detail: [{ loc: ['q'], msg: 'bad zone' }, 'and another', { loc: [] }] })))
+      .toEqual({ code: '422', message: 'bad zone; and another' });
+    expect(parseSarvCatalogError(422, JSON.stringify({ detail: [{}] }))).toEqual({ code: '422', message: 'Sarv API 422' });
   });
 
-  it('falls back to upstream_error when an unknown body code meets an unmapped status', async () => {
-    fetchMock.mockResolvedValue(errorResponse(418, JSON.stringify({ error: 'teapot_overflow' })));
-
-    const err = await fetchSarvProviders('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err.code).toBe('upstream_error');
-    expect(err.message).toBe('Sarv API 418'); // no usable message field in the body
+  // A gateway's HTML page or an empty body must still name the status, never
+  // throw in the parser.
+  it.each(['<html>Bad Gateway</html>', '', 'null', '"just a string"', '[1,2]', '{"detail":"  "}'])('falls back to the status for %j', (raw) => {
+    expect(parseSarvCatalogError(502, raw)).toEqual({ code: '502', message: 'Sarv API 502' });
   });
 
-  // Honouring Retry-After is what keeps a rate-limited client from hammering the
-  // gateway into a longer ban.
-  it('parses a numeric Retry-After header on a 429', async () => {
-    fetchMock.mockResolvedValue(
-      errorResponse(429, JSON.stringify({ error: 'rate_limit_exceeded', message: 'slow down' }), {
-        'retry-after': '30',
-      }),
-    );
-
-    const err = await fetchSarvModels('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err.code).toBe('rate_limit_exceeded');
-    expect(err.retryAfterSec).toBe(30);
-  });
-
-  // A non-numeric (HTTP-date) or zero Retry-After must become undefined, not
-  // NaN/0 — a NaN backoff turns setTimeout into an immediate retry storm.
-  it('leaves retryAfterSec undefined for a non-numeric or zero Retry-After', async () => {
-    fetchMock.mockResolvedValue(errorResponse(429, '', { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' }));
-    let err = await fetchSarvModels('https://ai.sarv.com', TOKEN).catch((e) => e);
-    expect(err.retryAfterSec).toBeUndefined();
-    expect(Number.isNaN(err.retryAfterSec)).toBe(false);
-
-    fetchMock.mockResolvedValue(errorResponse(429, '', { 'retry-after': '0' }));
-    err = await fetchSarvModels('https://ai.sarv.com', TOKEN).catch((e) => e);
-    expect(err.retryAfterSec).toBeUndefined();
-  });
-
-  it('has no Retry-After when the header is absent', async () => {
-    fetchMock.mockResolvedValue(errorResponse(429, ''));
-
-    const err = await fetchSarvZones('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err.retryAfterSec).toBeUndefined();
-  });
-
-  // An HTML error page from a proxy is the common "logged out of the VPN" case:
-  // it must still produce a typed SarvApiError, never a JSON parse crash.
-  it('survives an HTML / empty error body without throwing a parse error', async () => {
-    fetchMock.mockResolvedValue(errorResponse(502, '<html>Bad Gateway</html>'));
-    let err = await fetchSarvProviders('https://ai.sarv.com', TOKEN).catch((e) => e);
-    expect(err).toBeInstanceOf(SarvApiError);
-    expect(err.code).toBe('upstream_error');
-    expect(err.message).toBe('Sarv API 502');
-
-    fetchMock.mockResolvedValue(errorResponse(503, ''));
-    err = await fetchSarvWallet('https://ai.sarv.com', TOKEN).catch((e) => e);
-    expect(err).toBeInstanceOf(SarvApiError);
-    expect(err.message).toBe('Sarv API 503');
-  });
-
-  // A JSON body that isn't an object (array, string, null) must not crash the
-  // property probing — real gateways do return bare arrays/strings.
-  it('handles non-object JSON error bodies (array / string / null)', async () => {
-    for (const body of ['[{"x":1}]', '"just a string"', 'null']) {
-      fetchMock.mockClear();
-      fetchMock.mockResolvedValue(errorResponse(400, body));
-
-      const err = await fetchSarvProviders('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-      expect(err).toBeInstanceOf(SarvApiError);
-      expect(err.code).toBe('upstream_error');
-      expect(err.message).toBe('Sarv API 400');
-    }
-  });
-
-  // A network throw is not an API error: it must propagate untouched so the
-  // caller can retry, rather than being mislabelled invalid_token.
-  it('lets a network-level fetch rejection propagate as-is', async () => {
-    const netErr = new TypeError('fetch failed');
-    fetchMock.mockRejectedValue(netErr);
-
-    const err = await fetchSarvProviders('https://ai.sarv.com', TOKEN).catch((e) => e);
-
-    expect(err).toBe(netErr);
-    expect(err).not.toBeInstanceOf(SarvApiError);
+  // Breaks: an OpenAI-style object `error` becomes the code "[object Object]".
+  it('ignores non-string code fields', () => {
+    expect(parseSarvCatalogError(400, JSON.stringify({ error: { message: 'nested' }, detail: { error: 7 } })))
+      .toEqual({ code: '400', message: 'Sarv API 400' });
   });
 });

@@ -56,6 +56,16 @@ both slices actually survived.
 `.deb` covers Debian, Ubuntu, Mint and Pop!\_OS; `.rpm` covers Fedora, RHEL and
 openSUSE; the AppImage runs on anything else without installing.
 
+Every artifact ships the Electron runtime named by the **exact** `"electron"`
+pin in `apps/desktop/package.json`, the same one dev and the tests run.
+electron-builder derives it from that pin, which is why it is not a `^` range
+(electron-builder refuses one) and why there is no `build.electronVersion`. A
+stale `electronVersion: 43.2.0` made every release built after the move to
+Electron 44 (2026-09-26) ship Electron 43.2.0.
+`apps/desktop/test/unit/scripts/electron-version-pin.test.ts` fails if the
+config, the pin, the installed Electron and electron-builder's own resolver
+ever disagree.
+
 > **Linux arm64 needs the free arm runners, which require the repository to be
 > public.** While the repo is private that matrix entry fails; either make the
 > repo public first (see [GITHUB-SETUP.md](./GITHUB-SETUP.md)) or drop the
@@ -112,9 +122,12 @@ certificate is never written to the runner's disk.
 
 #### Application secrets
 
-`vite.config.ts` inlines these into the shipped bundle at build time. **Without
-them the published app has no Gmail sign-in and no crash reporting** — it builds
-and runs fine, so this failure is invisible until a user tries to sign in.
+The build inlines these at build time (`apps/desktop/vite/build-defines.ts`).
+The OAuth values go into the **main-process bundle only**; of these, the
+renderer gets just the Sentry DSN, and the renderer build fails if it ever
+contains the client secret (`vite/forbid-secrets-in-renderer.ts`). **Without them the
+published app has no Gmail sign-in and no crash reporting**. It builds and runs
+fine, so this failure is invisible until a user tries to sign in.
 
 | Secret | Effect if missing |
 | --- | --- |
@@ -123,11 +136,12 @@ and runs fine, so this failure is invisible until a user tries to sign in.
 | `SARVINBOX_SENTRY_DSN` | no crash reports from released builds |
 | `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` | stack traces stay minified (optional) |
 
-> The Google client secret is inlined into a bundle that anyone can unpack. That
-> is expected for an installed desktop app — Google's own documentation treats
-> the installed-app client secret as non-confidential — but it does mean it is
-> effectively public once you ship. Use a client dedicated to the desktop app,
-> never one shared with a web property.
+> The Google client secret is inlined into the main-process bundle inside
+> `app.asar`, so anyone who unpacks the app can read it. Google's installed-app
+> guidance says such a secret cannot be kept confidential, so treat it as
+> extractable once you ship. It is kept out of the renderer, which shows web
+> content, so it is never handed to a page. Use a client dedicated to the
+> desktop app, never one shared with a web property.
 
 #### Release signing secrets (required — a release fails without them)
 
@@ -167,7 +181,7 @@ secrets; the rest are deliberately not needed:
 
 | Local `.env` key | Add as a secret? | Why |
 | --- | --- | --- |
-| `SARVINBOX_GOOGLE_CLIENT_ID` | Yes | inlined into the bundle; no Gmail sign-in without it |
+| `SARVINBOX_GOOGLE_CLIENT_ID` | Yes | inlined into the main-process bundle (never the renderer); no Gmail sign-in without it |
 | `SARVINBOX_GOOGLE_CLIENT_SECRET` | Yes | same |
 | `SARVINBOX_SENTRY_DSN` | Yes | no crash reports without it |
 | `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` | Optional | only for symbolicated stack traces |
@@ -219,7 +233,7 @@ What each secret is worth if it leaks, and what to do:
 | `APPLE_CERTIFICATE_P12` + password | Lets anyone sign software as you | Revoke the certificate in Apple Developer immediately |
 | `APPLE_APP_SPECIFIC_PASSWORD` | Notarization only, tied to your Apple ID | Revoke at appleid.apple.com |
 | `SENTRY_AUTH_TOKEN` | Can write releases/sourcemaps to the Sentry org | Rotate; scope it to this project only |
-| `SARVINBOX_GOOGLE_CLIENT_SECRET` | **Already public** once shipped — it is inlined into the app | Nothing to do, by design; just never reuse a web client here |
+| `SARVINBOX_GOOGLE_CLIENT_SECRET` | **Extractable** once shipped: it is inlined into the main-process bundle in `app.asar` (the renderer build refuses to contain it) | Nothing a release can undo; rotate the desktop client's secret in Google Cloud and cut a release if it is abused. Never reuse a web client here |
 | `SARVINBOX_SENTRY_DSN` | Public by design (client-side) | Nothing |
 | *(no secret)* Windows signing: the one-hour Google token minted in the Windows job | Can sign anything with the Authenticode key for up to an hour; nothing else. Those signatures are timestamped, so they **stay valid indefinitely**: the token expiring, the certificate expiring and disabling the key do not end them | Disable the key version in Cloud KMS (stops all signing at once); **cut GitHub's path in** (disable the Workload Identity provider, or remove the service account's `workloadIdentityUser` binding) until the cause is found; find the first signing call in the KMS audit log you cannot account for; **ask Sectigo to revoke the certificate with a revocation date before that first bad signature**; **re-key** (a new KMS key version or key, attestation and CSR; for a new key, move the signer binding to it) and update `kms.keyVersion` and `publicKeySha256` to match; **get a new certificate** for the new key with the same CN. Details: "If the key or a token is compromised" in WINDOWS_SIGNING.md |
 

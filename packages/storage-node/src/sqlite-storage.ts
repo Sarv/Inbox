@@ -40,7 +40,7 @@ import {
 import Database from 'better-sqlite3';
 
 import { BodyStorageBackfill } from './body-storage-backfill';
-import { escapeDbKey, isExistingPlaintextDb } from './db-encryption';
+import { applyDbKey, encryptPlaintextDb, isExistingPlaintextDb } from './db-encryption';
 import { InlineImageBackfill } from './inline-image-backfill';
 import {
   AUTH_PENDING_INDEX,
@@ -284,20 +284,16 @@ export class SQLiteStorage implements IEmailStorage {
       ...(this.config.verbose ? { verbose: console.log } : {}),
     });
 
-    // At-rest encryption MUST be applied as the very first statement, before any
-    // read/write or journal pragma. Escape single quotes defensively (the key is
-    // hex today, so this never triggers, but never build SQL from an unescaped value).
+    // At-rest encryption MUST be applied before any read/write or journal pragma
+    // (see db-encryption.ts for the settings, the escaping and why both are pinned
+    // there). A plaintext DB is migrated in place, and WAL is re-enabled below on
+    // the now-encrypted file.
     if (this.config.key) {
-      const k = escapeDbKey(this.config.key);
       if (legacyPlaintext) {
-        // Migrate a plaintext DB to encrypted IN PLACE. Checkpoint + leave WAL
-        // first (rekey rewrites every page; doing it under a rollback journal is
-        // the safe path), then WAL is re-enabled below on the now-encrypted DB.
-        this.db.pragma('journal_mode = DELETE');
-        this.db.pragma(`rekey='${k}'`);
+        encryptPlaintextDb(this.db, this.config.key);
         log.info(`[SQLiteStorage] Migrated plaintext DB to encrypted: ${this.config.dbPath}`);
       } else {
-        this.db.pragma(`key='${k}'`);
+        applyDbKey(this.db, this.config.key);
       }
     }
 

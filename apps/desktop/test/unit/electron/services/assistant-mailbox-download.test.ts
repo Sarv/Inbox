@@ -30,6 +30,7 @@ vi.mock('../../../../electron/services/secure-credential-store', () => ({
 vi.mock('../../../../electron/services/oauth-service', () => ({ attachImapBearer: (config: unknown) => config, getAccessTokenForMailHost: state.token }));
 
 import { ensureAssistantMailboxConnection, fetchAssistantMessageBody } from '../../../../electron/services/assistant-mailbox-download';
+import { captureRegistryForLegacyBinding } from '../../../../electron/services/vault-credentials';
 
 beforeEach(() => {
   state.registered = true; state.suspended = false;
@@ -109,6 +110,17 @@ describe('automatic account-safe assistant downloads', () => {
   it('uses the real foreground vault host binding rather than a legacy alias password alone', async () => {
     state.account.imapConfig = { ...state.account.imapConfig, host: 'imap.foreign.test' };
     await expect(ensureAssistantMailboxConnection('work')).rejects.toThrow('Re-enter your password');
+    expect(state.engine.connect).not.toHaveBeenCalled();
+  });
+
+  // Breaks the user being told what to do: "needs its password or sign-in refreshed"
+  // would do, but the assistant must not dial, and must say the same thing connect does.
+  it('asks for the password when nothing says which server a saved one is for', async () => {
+    state.registered = false;
+    captureRegistryForLegacyBinding();
+    state.registered = true;
+    state.secrets.mockResolvedValue({ imap: { password: 'synthetic-secret' } });
+    await expect(ensureAssistantMailboxConnection('work')).rejects.toThrow('has no record of which server');
     expect(state.engine.connect).not.toHaveBeenCalled();
   });
 
