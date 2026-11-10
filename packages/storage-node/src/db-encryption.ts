@@ -41,7 +41,8 @@ const SQLITE_HEADER = 'SQLite format 3';
 export function isExistingPlaintextDb(path: string): boolean {
   if (!path) return false;
   try {
-    const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK || 0));
+    // Read-only: the mode is never applied without O_CREAT, and says no file is made.
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK || 0), 0o600);
     try {
       const stat = fstatSync(fd);
       if (!stat.isFile() || stat.size < 16) return false;

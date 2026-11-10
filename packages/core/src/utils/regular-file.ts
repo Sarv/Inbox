@@ -8,6 +8,13 @@ import type { FileHandle } from 'node:fs/promises';
  */
 const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0);
 
+/**
+ * Owner-only. Without O_CREAT nothing is created, so the OS never applies it; it is
+ * passed so that a reader (and CodeQL's js/insecure-temporary-file) can see these
+ * opens cannot leave a file others may read.
+ */
+const OPEN_MODE = 0o600;
+
 const CHUNK_BYTES = 64 * 1024;
 
 /**
@@ -37,7 +44,7 @@ function namesOpenedFile(named: Stats, opened: Stats): boolean {
  * every throw as "no valid file", never as an empty one.
  */
 export function readRegularFileSync(path: string, limits: { minBytes: number; maxBytes: number }): Buffer {
-  const fd = openSync(path, OPEN_FLAGS);
+  const fd = openSync(path, OPEN_FLAGS, OPEN_MODE);
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size < limits.minBytes || stat.size > limits.maxBytes) {
@@ -78,7 +85,7 @@ export async function readRegularFile(
 ): Promise<Buffer | null> {
   let handle: FileHandle;
   try {
-    handle = await fsp.open(filePath, OPEN_FLAGS);
+    handle = await fsp.open(filePath, OPEN_FLAGS, OPEN_MODE);
   } catch (error) {
     // ELOOP: O_NOFOLLOW met a link (EMLINK on FreeBSD). EISDIR: Windows will not open a folder.
     const code = (error as NodeJS.ErrnoException).code;
