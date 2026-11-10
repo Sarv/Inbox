@@ -5,6 +5,8 @@
  * No LLM call — fast and free. LLM only used when other signals > 40 AND regex is ambiguous.
  */
 
+import { stripTags } from '../../utils/strip-tags';
+
 import type { ContentUrgencySignal } from './types';
 
 const DEADLINE_PATTERNS = [
@@ -56,22 +58,6 @@ const FINANCIAL_PATTERNS = [
  * the top of a message; past this point is quoted history and footers.
  */
 export const MAX_URGENCY_TEXT_CHARS = 20_000;
-
-/**
- * Drop every `<…>` tag and any stray `<`, in one linear pass. A split rather
- * than a regex: `/<[^>]+>/` scanned to the end of the text once per `<` (80 KB
- * of `<` took 3 s), and no `<` survives to form a tag, whatever the text is
- * later used for.
- */
-function stripTags(s: string): string {
-  const parts = s.split('<');
-  let out = parts[0];
-  for (let i = 1; i < parts.length; i++) {
-    const gt = parts[i].indexOf('>');
-    out += gt < 0 ? parts[i] : parts[i].slice(gt + 1);
-  }
-  return out;
-}
 
 export function computeContentUrgency(
   subject: string,

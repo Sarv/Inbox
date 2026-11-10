@@ -53,6 +53,7 @@ import { htmlToPlainText } from './html-text';
 import { stripQuotedTail } from './quoted-text';
 import { isNoReplyAddress } from './role-address';
 import { hasTag } from './tags';
+import { isWhitespaceChar, trimCharsEnd } from './trim-chars';
 
 // The HEADER layer described above now lives in `@sarv-in/mailguard`,
 // which is where the spam filter it feeds went. Re-exported from here because
@@ -154,10 +155,9 @@ export const BULK_THRESHOLD = 3;
 function hasEspMessageIdDomain(messageId: string): boolean {
   const at = messageId.lastIndexOf('@');
   if (at === -1) return false;
-  const domain = messageId
-    .slice(at + 1)
-    .replace(/[>\s]+$/, '')
-    .toLowerCase();
+  // Trailing `>` and whitespace off by a linear scan: /[>\s]+$/ went quadratic
+  // on a Message-ID with a long whitespace run before its end.
+  const domain = trimCharsEnd(messageId.slice(at + 1), (ch) => ch === '>' || isWhitespaceChar(ch)).toLowerCase();
   if (!domain) return false;
   return ESP_MESSAGE_ID_DOMAINS.some((d) => domain === d || domain.endsWith('.' + d) || domain.includes(d));
 }

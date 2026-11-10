@@ -15,9 +15,13 @@
 import { parse as parseHost } from 'tldts';
 
 import { parseAddressList } from './email-address';
+import { trimCharsEnd, trimCharsStart } from './trim-chars';
 
 /** Marks a stored key as a whole-domain allowance rather than one address. */
 export const DOMAIN_KEY_PREFIX = '@';
+
+/** The longest name DNS allows (RFC 1035), and the longest tldts accepts. */
+const MAX_DOMAIN_NAME_LENGTH = 253;
 
 export type ImageAllowKind = 'sender' | 'domain';
 
@@ -37,11 +41,14 @@ export function bareSenderAddress(input?: string | null): string {
   return (first?.address ?? raw).trim().toLowerCase();
 }
 
-/** Everything after the LAST `@`, lowercased and without a trailing dot. */
+/**
+ * Everything after the LAST `@`, lowercased and without a trailing dot. Dots
+ * come off by a linear scan: /\.+$/ went quadratic on a domain of many dots.
+ */
 const domainOf = (address: string): string => {
   const at = address.lastIndexOf('@');
   if (at < 0) return '';
-  return address.slice(at + 1).replace(/\.+$/, '').toLowerCase();
+  return trimCharsEnd(address.slice(at + 1), '.').toLowerCase();
 };
 
 /**
@@ -52,7 +59,7 @@ const domainOf = (address: string): string => {
  * accident far more often than on purpose.
  */
 export function normalizeAllowDomain(input?: string | null): string {
-  const candidate = (input ?? '').trim().replace(/^@+/, '').replace(/\.+$/, '').toLowerCase();
+  const candidate = trimCharsEnd(trimCharsStart((input ?? '').trim(), '@'), '.').toLowerCase();
   if (!candidate || candidate.includes('@') || candidate.includes('/') || candidate.includes(' ')) return '';
   const parsed = parseHost(candidate);
   // A hostname tldts had to repair (or could not read at all) is not what the
@@ -111,13 +118,22 @@ export function imageAllowKeysFor(address?: string | null): string[] {
   if (!bare) return [];
   if (!domain) return [bare];
 
-  const labels = domain.split('.');
-  const parents = labels
-    .map((_, index) => labels.slice(index).join('.'))
+  // The domain, then what follows each of its dots — but only names short
+  // enough to be a DNS name. A stored domain key always is (normalizeAllowDomain
+  // refuses anything tldts can't read, and tldts refuses a name over 253
+  // characters), so a longer candidate can never match. Bounding it matters: the
+  // From address is a stranger's text, and building every suffix of a "domain"
+  // of 200 K dots was quadratic and froze the window.
+  const parents: string[] = [];
+  const addParent = (candidate: string) => {
     // A single label ("com") is never a key we'd have stored — see
     // normalizeAllowDomain — so don't bother probing for it.
-    .filter((candidate) => candidate.includes('.'))
-    .map((candidate) => `${DOMAIN_KEY_PREFIX}${candidate}`);
+    if (candidate.length <= MAX_DOMAIN_NAME_LENGTH && candidate.includes('.')) parents.push(`${DOMAIN_KEY_PREFIX}${candidate}`);
+  };
+  addParent(domain);
+  for (let dot = domain.indexOf('.', Math.max(0, domain.length - MAX_DOMAIN_NAME_LENGTH - 1)); dot !== -1; dot = domain.indexOf('.', dot + 1)) {
+    addParent(domain.slice(dot + 1));
+  }
 
   return [bare, ...parents];
 }

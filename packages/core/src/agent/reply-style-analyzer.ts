@@ -10,6 +10,7 @@ import type { ILLMProvider, CompletionOptions } from '../types/llm';
 import type { EmailRecord } from '../types/models';
 import { parseAddresses } from '../utils/email-address';
 import { logger } from '../utils/logger';
+import { stripTags } from '../utils/strip-tags';
 
 export interface ReplyStyleProfile {
   /** Average reply length in characters */
@@ -178,8 +179,9 @@ Draft a reply in the user's style:`;
   // ========== Private Helpers ==========
 
   private cleanReplyBody(body: string): string {
-    let s = body
-      .replace(/<[^>]+>/g, '') // Strip HTML
+    // Strip HTML with the linear tag strip — a regex here went quadratic on a
+    // body of unclosed `<`, and this runs on every sent mail sampled.
+    let s = stripTags(body)
       .replace(/^>.*$/gm, '') // Strip quoted text
       .replace(/^On .+ wrote:$/gm, ''); // Strip "On ... wrote:"
 

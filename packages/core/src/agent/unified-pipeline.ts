@@ -20,6 +20,7 @@ import type {
   ContactType,
 } from '../types/agent';
 import type { EmailRecord } from '../types/models';
+import { addressTokens } from '../utils/address-tokens';
 import { automaticCategorizationDeferred, existingCategoryClassification } from '../utils/category-authority';
 import { logger } from '../utils/logger';
 import { isSpamProtectedEmail, type SpamFolderMetadata } from '../utils/spam-protection';
@@ -383,9 +384,9 @@ export class UnifiedPipeline {
     const userLower = this.deps.userEmail?.toLowerCase() || '';
     // Exact address comparison — substring matching made "joann@example.com"
     // match user "ann@example.com" and fed the LLM the wrong TO/CC role.
-    const extractAddrs = (s: string) => s.match(/[\w.+-]+@[\w.-]+/g) || [];
-    const userInTo = userLower ? extractAddrs(toAddrs).some(a => a === userLower) : false;
-    const userInCc = userLower ? (!userInTo && extractAddrs(ccAddrs).some(a => a === userLower)) : false;
+    // addressTokens, not a regex: the regex went quadratic on a crafted header.
+    const userInTo = userLower ? addressTokens(toAddrs).some(a => a === userLower) : false;
+    const userInCc = userLower ? (!userInTo && addressTokens(ccAddrs).some(a => a === userLower)) : false;
     const subjectMap = repetitionStats.sameSubject[fromAddr];
     const sameSubjectCount = subjectMap ? (subjectMap[email.subject || ''] || 0) : 0;
     const senderReceived = ctx ? ctx.receivedCount : 0;

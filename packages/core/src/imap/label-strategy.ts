@@ -32,6 +32,7 @@ import { IMAPError, type IIMAPClient } from '../types/imap';
 import { mapGmailLabels } from '../utils/gmail-labels';
 import { logger } from '../utils/logger';
 import { detectProvider } from '../utils/provider';
+import { trimChars } from '../utils/trim-chars';
 
 import { withFolderSelected } from './with-folder';
 
@@ -74,7 +75,9 @@ export function isSarvLabelPath(path: string): boolean {
 
 /** IMAP keyword atom (no spaces / specials) for the keyword strategy. */
 export function keywordForCategory(cat: CategoryLabel): string {
-  const base = (cat.slug || cat.name || '').replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  // trimChars, not /^_+|_+$/g: `_` survives the collapse above, so a name with a
+  // long run of underscores made that regex quadratic.
+  const base = trimChars((cat.slug || cat.name || '').replace(/[^A-Za-z0-9_]+/g, '_'), '_');
   return base || 'label';
 }
 
