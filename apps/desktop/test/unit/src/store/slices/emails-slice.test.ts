@@ -12,6 +12,8 @@ import { getPageSizeForView } from '../../../../../src/store/helpers';
 import { buildEmailReplacementPatch, createEmailsSlice, sectionRowsPatch, selectLoadedEmailIds } from '../../../../../src/store/slices/emails-slice';
 import { createSearchAISlice } from '../../../../../src/store/slices/search-ai-slice';
 
+import { sliceOver } from './slice-over';
+
 /** The vitest env is 'node'; buildThreads (called through the patch) reads the
  *  Smart-Prioritize flag from localStorage on every rebuild. */
 const installLocalStorage = () => {
@@ -271,7 +273,7 @@ describe('fetchEmailBody — a defer must not park the email', () => {
     (globalThis as any).window = { electronAPI: { emails: { fetchBody } } };
     const set = (patch: Record<string, any>) => { Object.assign(h.state, patch); };
     const get = () => ({ ...h.state, ...h.slice, syncEmails: async () => { h.synced += 1; } });
-    h.slice = createEmailsSlice(set as any, get as any, undefined as any);
+    h.slice = sliceOver(createEmailsSlice, set, get);
     return h;
   };
 
@@ -381,7 +383,7 @@ describe('loadAllSections — the click-resolution pool', () => {
     // so the harness state must be spread LAST — otherwise `sectionData` reads
     // back as {} and every reload looks like a first load.
     const get = () => ({ ...h.slice, ...h.state });
-    h.slice = createEmailsSlice(set as any, get as any, undefined as any);
+    h.slice = sliceOver(createEmailsSlice, set, get);
     return h;
   };
 
@@ -607,7 +609,7 @@ describe('goToEmailPage — paging past what the folder can actually show', () =
     };
     const set = (patch: Record<string, any>) => { Object.assign(h.state, patch); };
     const get = () => ({ ...h.slice, ...h.state });
-    h.slice = createEmailsSlice(set as any, get as any, undefined as any);
+    h.slice = sliceOver(createEmailsSlice, set, get);
     return h;
   };
 
@@ -728,7 +730,7 @@ describe('refreshVirtualFolder — a refresh must not leave the page window', ()
     };
     const set = (patch: Record<string, any>) => { Object.assign(h.state, patch); };
     const get = () => ({ ...h.slice, ...h.state });
-    h.slice = createEmailsSlice(set as any, get as any, undefined as any);
+    h.slice = sliceOver(createEmailsSlice, set, get);
     return h;
   };
 
@@ -883,7 +885,7 @@ describe('Promotions over All Inboxes stays category-scoped', () => {
     };
     const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
     const get = () => ({ ...slice, ...state });
-    const slice = createEmailsSlice(set as any, get as any, undefined as any);
+    const slice = sliceOver(createEmailsSlice, set, get);
     return { state, slice, unifiedInbox };
   };
 
@@ -984,7 +986,7 @@ describe('Starred/Important/All Email page in CONVERSATIONS, not messages', () =
     };
     const set = (patch: Record<string, any>) => { Object.assign(h.state, patch); };
     const get = () => ({ ...h.slice, ...h.state });
-    h.slice = createEmailsSlice(set as any, get as any, undefined as any);
+    h.slice = sliceOver(createEmailsSlice, set, get);
     return h;
   };
 
@@ -1130,9 +1132,9 @@ describe('_reloadCurrentView — live AI category membership', () => {
         },
       },
     };
-    const store = createStore<any>()((set, get, api) => ({
-      ...createEmailsSlice(set, get, api),
-      ...createSearchAISlice(set, get, api),
+    const store = createStore<any>()((...a) => ({
+      ...createEmailsSlice(...a),
+      ...createSearchAISlice(...a),
     }));
     store.setState({
       accounts: [{ id: 'acct-a' }],

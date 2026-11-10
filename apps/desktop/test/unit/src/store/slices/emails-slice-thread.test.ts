@@ -8,6 +8,8 @@ vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
 
 import { createEmailsSlice } from '../../../../../src/store/slices/emails-slice';
 
+import { sliceOver } from './slice-over';
+
 /**
  * The open thread's rows (`loadThread`) and the "new message in this
  * conversation" banner (`noteNewEmailForOpenThread`).
@@ -49,9 +51,7 @@ function harness(api: Record<string, unknown>, initial: Record<string, unknown> 
   const holder: { slice?: any } = {};
   // The slice carries its own initial values; the harness state wins over them.
   const get = () => ({ ...holder.slice, ...state });
-  // The slice reads only set and get; zustand's store api is not needed.
-  const create = createEmailsSlice as unknown as (s: typeof set, g: typeof get) => any;
-  holder.slice = create(set, get);
+  holder.slice = sliceOver(createEmailsSlice, set, get);
   return { state, slice: holder.slice };
 }
 

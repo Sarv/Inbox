@@ -57,10 +57,10 @@ function harness(overrides: Record<string, unknown> = {}) {
       emails: { bulkAction },
     },
   });
-  const store = createStore<any>((set, get, api) => ({
-    ...createEmailsSlice(set, get, api),
-    ...createSearchAISlice(set, get, api),
-    ...createEmailActionsSlice(set, get, api),
+  const store = createStore<any>((...a) => ({
+    ...createEmailsSlice(...a),
+    ...createSearchAISlice(...a),
+    ...createEmailActionsSlice(...a),
     activeAccountId: 'account-a',
     accounts: [{ id: 'account-a' }, { id: 'account-b' }, { id: 'excluded', includeInUnified: false }],
     folders: [{ id: 'inbox', path: 'INBOX' }], selectedFolderId: 'inbox',

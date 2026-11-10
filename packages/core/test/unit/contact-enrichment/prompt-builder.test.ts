@@ -47,8 +47,13 @@ describe('buildEnrichmentUserMessage', () => {
     expect(msg).not.toContain('current organization');
   });
 
+  // Breaks if the free-provider rule drops out: the model then reads a
+  // gmail.com address as an employer ("works at Gmail").
   it('system prompt states the JSON-only contract and the free-domain rule', () => {
     expect(ENRICHMENT_SYSTEM_PROMPT).toMatch(/JSON only/i);
-    expect(ENRICHMENT_SYSTEM_PROMPT).toMatch(/gmail\.com/i); // free-provider employer rule
+    // The rule itself, not just a mention of gmail.com somewhere in the prompt.
+    const prompt = ENRICHMENT_SYSTEM_PROMPT.replace(/\s+/g, ' ');
+    expect(prompt).toContain('If the domain is a free provider (gmail.com,');
+    expect(prompt).toContain('IGNORE it as an employer clue');
   });
 });

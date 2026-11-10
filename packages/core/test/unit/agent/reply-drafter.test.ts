@@ -102,7 +102,9 @@ describe('reply drafter compact context', () => {
     { name: 'body truncation', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.slice(0, 2000); } },
     { name: 'signature removed', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.split('Regards,')[0]!; } },
     { name: 'changed financial revision', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.replace('275,000', '270,000'); } },
-    { name: 'changed whitespace', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.replace('\n', '\t'); } },
+    // One whitespace character differs (the newline before the quotation
+    // becomes a tab): even that must not count as the same body.
+    { name: 'changed whitespace', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.replace('\nQuotation Q-204', '\tQuotation Q-204'); } },
     { name: 'body known unavailable', change: target => { target.hasBody = false; } },
   ])('keeps the full incoming fallback for $name', async ({ change }) => {
     const target = fullTarget();

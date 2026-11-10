@@ -18,8 +18,8 @@ const smtp = {
   cancelSend: vi.fn(async () => ({ success: true, cancelled: true })),
 };
 
-const makeStore = () => createStore<any>((set, get, api) => ({
-  ...createComposeSlice(set, get, api),
+const makeStore = () => createStore<any>((...a) => ({
+  ...createComposeSlice(...a),
   imapConfig: { username: 'me@example.test' }, smtpConnected: true,
   emails: [], threadEmails: [], accounts: [], activeAccountId: 'account-a',
   connectSmtp: vi.fn(async () => {}), syncEmails: vi.fn(async () => {}),

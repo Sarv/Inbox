@@ -402,7 +402,7 @@ describe('provider and manual classification avoids redundant AI', () => {
   // Regression: native Promotions/Important must stay categorized locally in every account without classification cost, even after restart.
   it('retains Gmail Promotions, Sarv Important and explicit unlabelled choices across restart', async () => {
     seedMirror(established(true));
-    let s = await launch();
+    const s = await launch();
     const { notifyNewMail } = await import('../../../../electron/services/notification-service');
     vi.mocked(notifyNewMail).mockClear();
     await put(s, 'acct-a', 'gmail-native', ['promotions']);
@@ -413,7 +413,9 @@ describe('provider and manual classification avoids redundant AI', () => {
     expect(notifyNewMail).toHaveBeenCalledWith(expect.objectContaining({ emailId: 'sarv-native', categories: ['important'] }));
     for (const [acct, id] of [['acct-a', 'gmail-native'], ['acct-b', 'sarv-native'], ['acct-b', 'user-empty']]) expect(row(acct, id).ai_categories).toBeNull();
     quit();
-    s = await launch();
+    // The restart: a fresh main process over the same mirror and mailbox DBs.
+    // Its first poll must find nothing to send, since every row is decided.
+    await launch();
     await pollTick();
     expect(h.sent).toEqual([]);
     expect((await h.accounts[0].storage.getEmail('gmail-native')).serverCategories).toEqual(['promotions']);
