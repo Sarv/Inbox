@@ -11,6 +11,13 @@ const CHUNK_BYTES = 64 * 1024;
 const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0);
 
 /**
+ * Owner-only. Without O_CREAT nothing is created, so the OS never applies it; it is
+ * passed so that a reader (and CodeQL's js/insecure-temporary-file) can see this open
+ * cannot leave a file others may read.
+ */
+const OPEN_MODE = 0o600;
+
+/**
  * The bytes of the plain file at `filePath`, or null when that path is anything else: a
  * link (wherever it points), a directory, a pipe or device, or a file larger than
  * `maxBytes`. A missing file throws, as `readFile` does.
@@ -26,7 +33,7 @@ export async function readRegularFile(
 ): Promise<Buffer | null> {
   let handle: FileHandle;
   try {
-    handle = await fs.open(filePath, OPEN_FLAGS);
+    handle = await fs.open(filePath, OPEN_FLAGS, OPEN_MODE);
   } catch (error) {
     // ELOOP: O_NOFOLLOW met a link (EMLINK on FreeBSD). EISDIR: Windows will not open a folder.
     const code = (error as NodeJS.ErrnoException).code;
