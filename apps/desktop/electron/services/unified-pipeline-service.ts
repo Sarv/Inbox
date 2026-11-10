@@ -1165,8 +1165,9 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
       if (modelDetectedSpam) repos?.agent?.markAgentDone(emailId, { priorityScore, priorityTier, priorityReasoning, recommendedAction });
       return;
     }
-    existingClassification = latest && existingCategoryClassification(latest);
-    classificationPending = !!latest && automaticCategorizationDeferred(latest);
+    // `latest` is non-null here: a vanished email returned above.
+    existingClassification = existingCategoryClassification(latest);
+    classificationPending = automaticCategorizationDeferred(latest);
     if (existingClassification) {
       categories = existingClassification.categories;
       categorizationFailed = false;
