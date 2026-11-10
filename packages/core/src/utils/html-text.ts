@@ -12,7 +12,7 @@
  * link URLs — a tracking pixel then becomes the first 2 KB of the snippet.
  * `html-to-text` drops images and renders block structure as newlines.
  */
-import { compile } from 'html-to-text';
+import { compile, type FormatCallback } from 'html-to-text';
 
 import { MAX_HTML_PARSE_BYTES } from './mail-parse';
 
@@ -41,14 +41,33 @@ export interface HtmlToPlainTextOptions {
  */
 const converters = new Map<boolean, (html: string) => string>();
 
+/**
+ * A table cell is a word boundary. `html-to-text` only lays out tables it is
+ * told are data tables; every other `<td>`/`<th>` renders as bare inline text,
+ * so a minified signature table (`<td>Arun</td><td>+91 98…</td>`) came out as
+ * "Arun+91 98…" — a name glued to a number, which phone mining and snippets
+ * then read as one word. Spaces added inline collapse like source whitespace:
+ * an empty spacer cell adds nothing, and none survives at a line's edge.
+ */
+const formatTableCell: FormatCallback = (elem, walk, builder) => {
+  builder.addInline(' ');
+  walk(elem.children, builder);
+  builder.addInline(' ');
+};
+
 function converterFor(keepLinkHrefs: boolean): (html: string) => string {
   const cached = converters.get(keepLinkHrefs);
   if (cached) return cached;
   const converter = compile({
     wordwrap: false,
+    formatters: { tableCell: formatTableCell },
     selectors: [
       { selector: 'img', format: 'skip' },
       ...(keepLinkHrefs ? [] : [{ selector: 'a', options: { ignoreHref: true } }]),
+      // Each row on its own line, its cells on that line (see formatTableCell).
+      { selector: 'tr', format: 'block', options: { leadingLineBreaks: 1, trailingLineBreaks: 1 } },
+      { selector: 'td', format: 'tableCell' },
+      { selector: 'th', format: 'tableCell' },
     ],
   });
   converters.set(keepLinkHrefs, converter);
