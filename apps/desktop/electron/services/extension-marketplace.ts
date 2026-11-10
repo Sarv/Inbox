@@ -105,6 +105,14 @@ const ALLOWED_ARCHIVE_ENTRY = /^(?:\.\/)?(?:sarvinbox-extension\.json|dist\/[\w.
  */
 const ALLOWED_ARCHIVE_DIRECTORY = /^(?:\.|\.\/|(?:\.\/)?dist\/)$/;
 
+/**
+ * The archive entry types an extension ships: plain files and folders. The path
+ * allowlist says nothing about type, so without this a symbolic or hard link named
+ * `dist/index.js` would be unpacked as that link, pointing wherever its author chose
+ * on this computer; a device or a FIFO is nothing an extension ships either.
+ */
+export const ALLOWED_ARCHIVE_ENTRY_TYPES: ReadonlySet<string> = new Set(['File', 'OldFile', 'ContiguousFile', 'Directory']);
+
 export interface RegistryStatus {
   url: string;
   /** The repository the registry describes, for a "view on GitHub" link. */
@@ -626,9 +634,10 @@ async function downloadVerified(entry: InstallableEntry): Promise<Buffer> {
  * Unpack a verified archive into a staging folder.
  *
  * The archive is flat by construction, and only the handful of paths the app
- * actually loads are extracted. `tar` already refuses `..` and strips leading
- * slashes; the allowlist is the second lock, so a publisher who changes what
- * they ship cannot write a file the installer never expected.
+ * actually loads are extracted, and only as plain files and folders. `tar`
+ * already refuses `..` and strips leading slashes; the allowlist is the second
+ * lock, so a publisher who changes what they ship cannot write a file, or a
+ * link, the installer never expected.
  */
 async function extractToStaging(root: string, extensionId: string, archive: Buffer): Promise<string> {
   const archivePath = path.join(root, 'archive.tgz');
@@ -640,11 +649,14 @@ async function extractToStaging(root: string, extensionId: string, archive: Buff
   await tar.x({
     file: archivePath,
     cwd: unpacked,
-    filter: (entryPath) => {
+    filter: (entryPath, entry) => {
       const normalized = entryPath.replace(/\\/g, '/');
-      if (ALLOWED_ARCHIVE_DIRECTORY.test(normalized)) return true;
-      if (ALLOWED_ARCHIVE_ENTRY.test(normalized)) return true;
-      skipped.push(normalized);
+      const type = 'type' in entry ? entry.type : undefined;
+      if (type !== undefined && ALLOWED_ARCHIVE_ENTRY_TYPES.has(type)) {
+        if (ALLOWED_ARCHIVE_DIRECTORY.test(normalized)) return true;
+        if (ALLOWED_ARCHIVE_ENTRY.test(normalized)) return true;
+      }
+      skipped.push(type === undefined || ALLOWED_ARCHIVE_ENTRY_TYPES.has(type) ? normalized : `${normalized} (${type})`);
       return false;
     },
   });

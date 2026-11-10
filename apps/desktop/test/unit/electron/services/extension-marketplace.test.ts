@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, existsSync, linkSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -891,6 +891,34 @@ describe('installFromRegistry', () => {
 
     await installFromRegistry('otp-code', ['email:read', 'ui:notify']);
     expect(h.stagedFiles[0].sort()).toEqual(['dist/index.js', 'sarvinbox-extension.json']);
+  });
+
+  // Breaks: a link under a name the app loads is unpacked as that link, so the
+  // installed extension carries a pointer to a file anywhere on this computer
+  // (a symbolic link), or a second name for one of its own files (a hard link).
+  it.skipIf(process.platform === 'win32')('never unpacks a link, even under a name the app loads', async () => {
+    const staging = mkdtempSync(join(tmpdir(), 'sarvinbox-links-'));
+    const outside = mkdtempSync(join(tmpdir(), 'sarvinbox-outside-'));
+    writeFileSync(join(outside, 'secret.txt'), 'SECRET', 'utf-8');
+    mkdirSync(join(staging, 'dist'));
+    writeFileSync(join(staging, 'sarvinbox-extension.json'), JSON.stringify(MANIFEST), 'utf-8');
+    writeFileSync(join(staging, 'dist', 'index.js'), 'exports.activate = () => {};', 'utf-8');
+    symlinkSync(join(outside, 'secret.txt'), join(staging, 'README.md'));
+    linkSync(join(staging, 'dist', 'index.js'), join(staging, 'LICENSE'));
+    const out = join(outside, 'out.tgz');
+    createTar({ gzip: true, cwd: staging, file: out, sync: true }, ['sarvinbox-extension.json', 'dist/index.js', 'README.md', 'LICENSE']);
+    const archive = readFileSync(out);
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    try {
+      await installFromRegistry('otp-code', ['email:read', 'ui:notify']);
+      expect(h.stagedFiles[0].sort()).toEqual(['dist/index.js', 'sarvinbox-extension.json']);
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   // Every real release is packed from a staging folder, so the tarball carries
