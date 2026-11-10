@@ -111,6 +111,31 @@ describe('contact URL destinations', () => {
     const wrapped = `https://nam01.safelinks.protection.outlook.com/?url=${encodeURIComponent(destination)}&data=tracking`;
     expect(normalizeContactUrl(wrapped)).toBe('https://linkedin.com/in/alice');
   });
+
+  const safeLink = (destination: string, region = 'nam01') =>
+    `https://${region}.safelinks.protection.outlook.com/?url=${encodeURIComponent(destination)}&data=tracking`;
+
+  // Breaks: a Safe Links wrapper inside another is unwrapped twice, so a
+  // signature can smuggle a chain of redirects in as a "contact link".
+  it('refuses a Safe Links wrapper whose destination is another wrapper', () => {
+    expect(normalizeContactUrl(safeLink(safeLink('https://linkedin.com/in/alice', 'eur02')))).toBeNull();
+    // A wrapper on the bare Safe Links host is still a wrapper.
+    expect(normalizeContactUrl(safeLink('https://safelinks.protection.outlook.com/?url=https%3A%2F%2Fx.example'))).toBeNull();
+  });
+
+  // Breaks (the old substring test): a real destination that merely MENTIONS
+  // the Safe Links domain in its query was thrown away.
+  it('unwraps a destination that only mentions the Safe Links domain in its query', () => {
+    const destination = 'https://www.acme.example/team?ref=safelinks.protection.outlook.com';
+    expect(normalizeContactUrl(safeLink(destination))).toBe('https://www.acme.example/team');
+  });
+
+  // Breaks: a lookalike host that merely starts with the Safe Links domain is
+  // treated as Microsoft's wrapper and its `url` parameter is trusted.
+  it('does not unwrap a lookalike host built around the Safe Links domain', () => {
+    const lookalike = `https://nam01.safelinks.protection.outlook.com.evil.example/?url=${encodeURIComponent('https://linkedin.com/in/alice')}`;
+    expect(normalizeContactUrl(lookalike)).toBe('https://nam01.safelinks.protection.outlook.com.evil.example');
+  });
 });
 
 describe('LLM enrichment evidence validation', () => {

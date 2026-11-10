@@ -948,6 +948,27 @@ describe('deriveSmtpFromImap', () => {
     expect(deriveSmtpFromImap({ host: 'imap.icloud.com', username: 'a@x' }).host).toBe('smtp.mail.me.com');
   });
 
+  // Breaks (the substring match this replaced): a self-hosted server whose name
+  // merely CONTAINS a provider's domain is prefilled with that provider's SMTP
+  // host, and the password the user types into the form is sent there.
+  it.each([
+    ['imap.acme.com', 'smtp.acme.com'], // contains "me.com"
+    ['imap.home.com', 'smtp.home.com'], // contains "me.com"
+    ['imap.notgmail.com', 'smtp.notgmail.com'],
+    ['imap.gmail.com.example.net', 'smtp.gmail.com.example.net'],
+    ['imap.myoutlook.company.example', 'smtp.myoutlook.company.example'],
+    ['mail.yahoo.com.evil.example', 'mail.yahoo.com.evil.example'],
+  ])('does not take %s for a known provider', (imapHost, smtpHost) => {
+    expect(deriveSmtpFromImap({ host: imapHost, username: 'a@x' }).host).toBe(smtpHost);
+  });
+
+  // Breaks: a provider host written in capitals or with the DNS root dot falls
+  // through to the generic rewrite and gets a server that does not exist.
+  it('recognises a provider host regardless of case or a trailing root dot', () => {
+    expect(deriveSmtpFromImap({ host: 'IMAP.GMAIL.COM', username: 'a@x' }).host).toBe('smtp.gmail.com');
+    expect(deriveSmtpFromImap({ host: 'imap.mail.me.com.', username: 'a@x' }).host).toBe('smtp.mail.me.com');
+  });
+
   it('rewrites a generic imap.<domain> to smtp.<domain>', () => {
     expect(deriveSmtpFromImap({ host: 'imap.sarv.com', username: 'a@sarv.com' }).host).toBe('smtp.sarv.com');
     expect(deriveSmtpFromImap({ host: 'IMAP.Sarv.com', username: 'a@sarv.com' }).host).toBe('smtp.Sarv.com');

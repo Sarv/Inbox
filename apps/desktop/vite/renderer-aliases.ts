@@ -26,6 +26,10 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
     // Pure (zero imports) — the account forms resolve ssl/starttls/none with the
     // same rule the IMAP and SMTP clients connect with.
     '@sarvinbox/core/connection-security': resolve(desktopDir, '../../packages/core/src/utils/connection-security.ts'),
+    // Pure (zero imports) — "is this host that domain or under it", the one
+    // rule the SMTP prefill and core's provider detection match hosts by,
+    // instead of a substring test that lets imap.acme.com pass for me.com.
+    '@sarvinbox/core/host-match': resolve(desktopDir, '../../packages/core/src/utils/host-match.ts'),
     // Pure (libphonenumber-js only) — shared with core so the one implementation
     // doesn't drift into a second renderer copy.
     '@sarvinbox/core/contact-enrichment': resolve(

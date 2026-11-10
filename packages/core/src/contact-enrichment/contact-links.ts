@@ -1,16 +1,32 @@
+import { hostIsOrUnder } from '../utils/host-match';
 import { trimTrailingSlashes } from '../utils/trailing-slash';
+
+/** Microsoft Defender's link-rewriting host (`<region>.safelinks.protection.outlook.com`). */
+const SAFE_LINKS_DOMAIN = 'safelinks.protection.outlook.com';
 
 /** Contact links must be destinations, never share buttons, tracking pixels or login pages. */
 export function normalizeContactUrl(raw: string): string | null {
+  return normalize(raw, false);
+}
+
+/**
+ * `unwrapped` is true while normalizing the destination a Safe Links wrapper
+ * pointed at. A wrapper inside a wrapper is refused, decided on the parsed
+ * HOST of the inner URL — not on whether its text mentions the Safe Links
+ * domain anywhere, which also refused ordinary links that merely carried it in
+ * their query.
+ */
+function normalize(raw: string, unwrapped: boolean): string | null {
   const text = raw.trim().replace(/&amp;/gi, '&').replace(/[\]),.;|]+$/, '');
   if (!text || /\s/.test(text)) return null;
   let url: URL;
   try { url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`); } catch { return null; }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !url.hostname.includes('.')) return null;
   const host = url.hostname.toLowerCase();
-  if (host.endsWith('.safelinks.protection.outlook.com')) {
+  if (hostIsOrUnder(host, SAFE_LINKS_DOMAIN)) {
+    if (unwrapped) return null;
     const destination = url.searchParams.get('url');
-    return destination && !destination.includes('safelinks.protection.outlook.com') ? normalizeContactUrl(destination) : null;
+    return destination ? normalize(destination, true) : null;
   }
   if (/^(?:click|track|tracking|links?|email)\./i.test(host) || /(?:^|\.)(?:urldefense\.com|urldefense\.proofpoint\.com|t\.co|bit\.ly|lnkd\.in)$/.test(host)) return null;
   if (/(?:^|\/)(?:share|sharer(?:\.php)?|shareArticle|intent|unsubscribe|login|signin|oauth|tracking|pixel)(?:\/|$)/i.test(url.pathname)) return null;

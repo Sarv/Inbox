@@ -5,6 +5,7 @@ export * from './message-id';
 export * from './logger';
 export * from './validators';
 export * from './provider';
+export * from './host-match';
 export * from './oauth-imap-presets';
 export * from './gmail-labels';
 export * from './category-authority';
