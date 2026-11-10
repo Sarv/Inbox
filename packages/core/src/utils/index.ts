@@ -10,6 +10,7 @@ export * from './gmail-labels';
 export * from './category-authority';
 export * from './role-address';
 export * from './timeout';
+export * from './atomic-file';
 export * from './error-class-name';
 export * from './bearer-retry';
 export * from './abortable-operation';

@@ -14,6 +14,7 @@ import { promises as fs } from 'fs';
 import { extname, join } from 'path';
 
 import { SANDBOX_DEFINE_GLOBAL } from '../extension-sandbox/constants';
+import { readRegularFile } from '../utils/read-regular-file';
 
 /** What `require` can load. Nothing else in the folder is any of a Worker's business. */
 const MODULE_EXTENSIONS = new Set(['.js', '.cjs', '.json']);
@@ -77,8 +78,6 @@ export function wrapModuleSource(relativePath: string, text: string): string {
  * a link that has replaced it.
  */
 export async function readModuleFile(rootDir: string, relativePath: string): Promise<string | null> {
-  const absolute = join(rootDir, ...relativePath.split('/'));
-  const stat = await fs.lstat(absolute);
-  if (!stat.isFile() || stat.size > MAX_MODULE_BYTES) return null;
-  return fs.readFile(absolute, 'utf8');
+  const bytes = await readRegularFile(join(rootDir, ...relativePath.split('/')), MAX_MODULE_BYTES);
+  return bytes === null ? null : bytes.toString('utf8');
 }

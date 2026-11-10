@@ -24,10 +24,10 @@
  *
  * Plain Node apart from what is passed in, so the false alarms can be tested one by one.
  */
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { mkdirSync, readFileSync } from 'fs';
 import { dirname } from 'path';
 
-import { createLogger } from '@sarvinbox/core';
+import { createLogger, writePrivateFileAtomicSync } from '@sarvinbox/core';
 
 const logger = createLogger('extension-crash-guard');
 
@@ -90,19 +90,12 @@ function readState(file: string): GuardState | null {
 
 /** Written whole or not at all, because the crash this exists for can come at any moment. */
 function writeState(file: string, state: GuardState): void {
-  const temporary = `${file}.tmp`;
   try {
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
-    renameSync(temporary, file);
+    writePrivateFileAtomicSync(file, JSON.stringify(state));
   } catch (error) {
     // No mark means no protection this launch, which is the safe way round to fail.
     logger.warn('Could not write the crash guard mark:', error);
-    try {
-      unlinkSync(temporary);
-    } catch {
-      // It was never written.
-    }
   }
 }
 

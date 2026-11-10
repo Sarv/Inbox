@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected.
 - **Extensions have limits.** An extension may keep 25 MB, and 5 MB in one value. Data
   already over that stays readable and is never deleted; only new writes are refused.
+  What an extension stores is now readable only by your own account on the computer,
+  and is saved in one step, so a crash while saving can no longer leave it damaged.
 - **Windows downloads are signed by Sarv.** The installer, the app and its
   components are now digitally signed by SARV WEBS PRIVATE LIMITED, so Windows
   names the company as the publisher instead of "Unknown publisher". From this

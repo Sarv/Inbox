@@ -11,6 +11,7 @@ import * as path from 'path';
 import { EventBus, createEventBus } from '../pipeline/event-bus';
 import type { WorkflowResult } from '../pipeline/types';
 import type { EmailRecord } from '../types/models';
+import { writePrivateFileAtomicSync } from '../utils/atomic-file';
 import { logger } from '../utils/logger';
 
 import type {
@@ -80,6 +81,19 @@ const inMegabytes = (bytes: number): string => `${Math.ceil(bytes / (1024 * 1024
 
 /** A write refused for its size, which the extension has to hear about. */
 class StorageLimitError extends Error {}
+
+/**
+ * An extension's storage file, or null when it has none yet. Read straight away rather
+ * than after an `existsSync`, so nothing can change between the check and the read.
+ */
+function readStoreText(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
 
 /**
  * Extension manager options
@@ -235,10 +249,8 @@ export class ExtensionManager {
       async get<T>(extensionId: string, key: string): Promise<T | undefined> {
         const filePath = path.join(storageDir, extensionId, 'storage.json');
         try {
-          if (fs.existsSync(filePath)) {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-            return data[key];
-          }
+          const text = readStoreText(filePath);
+          if (text !== null) return JSON.parse(text)[key];
         } catch (error) {
           logger.error(`Extension storage get error [${extensionId}]:`, error);
         }
@@ -262,13 +274,11 @@ export class ExtensionManager {
           );
         }
         try {
-          if (!fs.existsSync(extDir)) {
-            fs.mkdirSync(extDir, { recursive: true });
-          }
+          fs.mkdirSync(extDir, { recursive: true });
           let data: Record<string, unknown> = {};
           let currentBytes = 0;
-          if (fs.existsSync(filePath)) {
-            const current = fs.readFileSync(filePath, 'utf-8');
+          const current = readStoreText(filePath);
+          if (current !== null) {
             currentBytes = Buffer.byteLength(current);
             data = JSON.parse(current);
           }
@@ -284,7 +294,7 @@ export class ExtensionManager {
                 `and this would make ${inMegabytes(nextBytes)}. Nothing was written.`
             );
           }
-          fs.writeFileSync(filePath, next, 'utf-8');
+          writePrivateFileAtomicSync(filePath, next);
         } catch (error) {
           if (error instanceof StorageLimitError) throw error;
           logger.error(`Extension storage set error [${extensionId}]:`, error);
@@ -294,10 +304,11 @@ export class ExtensionManager {
       async delete(extensionId: string, key: string): Promise<void> {
         const filePath = path.join(storageDir, extensionId, 'storage.json');
         try {
-          if (fs.existsSync(filePath)) {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          const text = readStoreText(filePath);
+          if (text !== null) {
+            const data = JSON.parse(text);
             delete data[key];
-            fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+            writePrivateFileAtomicSync(filePath, JSON.stringify(data, null, 2));
           }
         } catch (error) {
           logger.error(`Extension storage delete error [${extensionId}]:`, error);
@@ -307,10 +318,8 @@ export class ExtensionManager {
       async keys(extensionId: string): Promise<string[]> {
         const filePath = path.join(storageDir, extensionId, 'storage.json');
         try {
-          if (fs.existsSync(filePath)) {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-            return Object.keys(data);
-          }
+          const text = readStoreText(filePath);
+          if (text !== null) return Object.keys(JSON.parse(text));
         } catch (error) {
           logger.error(`Extension storage keys error [${extensionId}]:`, error);
         }
@@ -320,9 +329,7 @@ export class ExtensionManager {
       async clear(extensionId: string): Promise<void> {
         const filePath = path.join(storageDir, extensionId, 'storage.json');
         try {
-          if (fs.existsSync(filePath)) {
-            fs.writeFileSync(filePath, '{}', 'utf-8');
-          }
+          if (readStoreText(filePath) !== null) writePrivateFileAtomicSync(filePath, '{}');
         } catch (error) {
           logger.error(`Extension storage clear error [${extensionId}]:`, error);
         }

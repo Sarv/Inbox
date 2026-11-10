@@ -102,6 +102,9 @@ function start(port: MessagePort, init: SandboxInitMessage): void {
 }
 
 // `once` by hand: the listener is only for the port that starts everything.
+// No origin check: this is a dedicated Worker, so its only possible sender is the
+// page that created it (the sandbox's own preload), not another window or frame.
+// What guards it is taking one message, and only one that carries a port.
 let started = false;
 scope.addEventListener('message', (event: MessageEvent) => {
   const [port] = event.ports;

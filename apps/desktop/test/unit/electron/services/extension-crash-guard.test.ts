@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -185,10 +185,11 @@ describe('what it does not touch', () => {
     expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ held: true });
   });
 
-  // Only its own file, with its own name.
+  // Only its own file, with its own name: no temporary file from the atomic write is
+  // left beside it.
   it('keeps nothing but the mark', () => {
     launch().decide(IDS);
-    expect(existsSync(`${file}.tmp`)).toBe(false);
+    expect(readdirSync(dirname(file))).toEqual(['extension-crash-guard.json']);
     expect(Object.keys(JSON.parse(readFileSync(file, 'utf8'))).sort()).toEqual(['appVersion', 'crashes', 'held', 'starting']);
   });
 });
