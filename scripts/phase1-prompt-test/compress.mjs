@@ -14,105 +14,59 @@ export function estimateTokens(s) {
   return Math.ceil((s || '').length / 3.5);
 }
 
-// Sentinels that mark blockquote open/close boundaries while the HTML is
-// flattened to text. U+0001 (SOH) never occurs in real mail bodies, so it
-// cannot collide with content. Spelled as an escape so this file stays plain
-// UTF-8 text (a literal control byte made `file` classify it as binary "data").
-const SENTINEL = '\u0001';
-const OPENQ = `${SENTINEL}OPENQ${SENTINEL}`;
-const CLOSEQ = `${SENTINEL}CLOSEQ${SENTINEL}`;
+// HTML -> text is the app's own conversion (`htmlToPlainText`, the same one
+// that fills `cleanBody` for every AI prompt), loaded from the built core
+// package through the light `extension-sdk-text` entry point. It used to be a
+// chain of regex replacements here, and a regex is not an HTML parser: it
+// decoded entities BEFORE stripping tags, so every "&lt;name@host&gt;" became
+// a tag and the sender addresses vanished from the text the model was asked to
+// ground `from_address` in; and `<script>...</script >` (a legal end tag) left
+// its script in the body.
+let htmlToPlainText;
+try {
+  ({ htmlToPlainText } = await import('../../packages/core/dist/extension-sdk-text.mjs'));
+} catch (error) {
+  if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
+  throw new Error(
+    'packages/core is not built: run `pnpm build:core` first (compress.mjs reuses the app\'s HTML-to-text conversion from its dist).',
+    { cause: error }
+  );
+}
+
+/** A line made only of quote markers: an empty paragraph inside a blockquote. */
+const isBlankQuotedLine = (line) => line.replaceAll('>', '').trim() === '';
 
 /**
  * Drop everything that isn't text or a structural cue. Keeps:
- *   • Text content (verbatim, no paraphrase)
- *   • Quote markers ("On X wrote:", "From: ... Sent: ...", "Forwarded message")
- *   • Blockquote indentation as "> " prefix on quoted lines
- *   • Email addresses (already in source)
+ *   - Text content (verbatim, no paraphrase), entities decoded exactly once
+ *   - Quote markers ("On X wrote:", "From: ... Sent: ...", "Forwarded message")
+ *   - Blockquote indentation as "> " prefix on quoted lines ("> > " nested)
+ *   - Email addresses, including the "<name@host>" form
  *
  * Drops:
- *   • All HTML tags (kept as text only)
- *   • Inline styles, classes, ids, font-family / color / etc
- *   • Tables → rendered as text rows
- *   • Repeated whitespace
- *   • Sarv-specific signature blocks (toll-free, social icons, etc)
+ *   - Every tag, and the content of <head>, <style>, <script> and comments
+ *     (MSO conditionals included); images
+ *   - Blank lines, so the output stays compact
+ *   - Sarv-specific signature boilerplate (toll-free, social icons, etc)
  *
- * Output is plain text with `> ` prefixes for quoted blocks. About
- * 5-10× smaller than the HTML for typical emails.
+ * The conversion is the app's, so its quirks are the app's too: headings come
+ * back upper-cased, and adjacent table cells run together.
+ *
+ * @param {string} body The mail body.
+ * @param {{ html?: boolean }} [options] `html: false` for a body that is
+ *   ALREADY plain text (the DB's clean_body when there is no raw HTML): it is
+ *   not parsed as HTML, which would join its lines and eat "<name@host>".
+ * @returns {string} Plain text with `> ` prefixes for quoted blocks. About
+ *   5-10x smaller than the HTML for typical emails.
  */
-export function compressToPlainText(html) {
-  let s = html || '';
-  if (!s) return '';
-
-  // Decode common HTML entities first so we don't lose them when stripping tags.
-  s = s.replace(/&nbsp;/gi, ' ')
-       .replace(/&amp;/gi, '&')
-       .replace(/&lt;/gi, '<')
-       .replace(/&gt;/gi, '>')
-       .replace(/&quot;/gi, '"')
-       .replace(/&#39;/g, "'");
-
-  // Strip MSO conditionals, comments, style/script blocks, head, etc.
-  s = s.replace(/<!--\[if[^]*?<!\[endif\]-->/gi, '');
-  s = s.replace(/<!--[\s\S]*?-->/g, '');
-  s = s.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-  s = s.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-  s = s.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '');
-
-  // Drop images entirely (the LLM can't see them).
-  s = s.replace(/<img[^>]*\/?>/gi, '');
-
-  // Track blockquote depth for "> " prefixing.
-  // Replace <blockquote> open with marker, </blockquote> with end marker,
-  // then we'll process line-by-line.
-  s = s.replace(/<blockquote[^>]*>/gi, OPENQ);
-  s = s.replace(/<\/blockquote>/gi, CLOSEQ);
-
-  // <br>, </p>, </div>, </tr> become newlines so we get per-line text.
-  s = s.replace(/<br\s*\/?>/gi, '\n');
-  s = s.replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n');
-  // Cells separated by tab so a flattened table is at least readable
-  s = s.replace(/<\/td>/gi, '\t');
-
-  // Strip every remaining tag (keeping text content).
-  s = s.replace(/<[^>]+>/g, '');
-
-  // Collapse runs of spaces/tabs.
-  s = s.replace(/[ \t]+/g, ' ');
-  // Trim each line.
-  s = s.split('\n').map(line => line.trim()).join('\n');
-  // Collapse 3+ blank lines.
-  s = s.replace(/\n{3,}/g, '\n\n');
-
-  // Now apply blockquote prefixes. Walk lines, track depth.
-  const lines = s.split('\n');
-  const out = [];
-  let depth = 0;
-  for (const line of lines) {
-    // Markers may appear mid-line if a blockquote opens/closes inline.
-    // Process them in order.
-    let rest = line;
-    while (rest.length > 0) {
-      const open = rest.indexOf(OPENQ);
-      const close = rest.indexOf(CLOSEQ);
-      const next = (open === -1) ? close : (close === -1) ? open : Math.min(open, close);
-      if (next === -1) {
-        const text = rest.trim();
-        if (text) out.push('> '.repeat(depth) + text);
-        break;
-      }
-      const before = rest.slice(0, next).trim();
-      if (before) out.push('> '.repeat(depth) + before);
-      if (rest.charAt(next) === SENTINEL && rest.startsWith(OPENQ, next)) {
-        depth++;
-        rest = rest.slice(next + OPENQ.length);
-      } else {
-        depth = Math.max(0, depth - 1);
-        rest = rest.slice(next + CLOSEQ.length);
-      }
-    }
-  }
-  // Drop empty lines created by stripping.
-  let result = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+export function compressToPlainText(body, { html = true } = {}) {
+  if (!body) return '';
+  const text = html ? htmlToPlainText(body) : body;
+  let result = text
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => !isBlankQuotedLine(line))
+    .join('\n');
 
   // Strip Sarv signature boilerplate that often clutters threads.
   const SIG_NOISE = [
@@ -159,9 +113,13 @@ export function compressTruncateDepth(plainText, maxDepth) {
  * Smart fit: try plain-text. If still too big for budget, truncate
  * at decreasing depths until it fits. Returns the compressed body
  * AND the depth that was kept (for diagnostics).
+ *
+ * @param {string} html
+ * @param {number} maxBodyChars
+ * @param {{ html?: boolean }} [options] As for {@link compressToPlainText}.
  */
-export function compressToFit(html, maxBodyChars) {
-  let body = compressToPlainText(html);
+export function compressToFit(html, maxBodyChars, options = {}) {
+  let body = compressToPlainText(html, options);
   if (body.length <= maxBodyChars) {
     return { body, finalDepth: -1, originalChars: html.length, compressedChars: body.length };
   }
