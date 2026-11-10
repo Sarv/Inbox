@@ -158,6 +158,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # The harness crashes renderers on purpose; who handles their core dumps decides
+          # how soon each one has exited (asked on 2026-11-10, see #107).
+          echo "core_pattern=$(cat /proc/sys/kernel/core_pattern) suid_dumpable=$(cat /proc/sys/fs/suid_dumpable) ulimit_c=$(ulimit -c)"
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libgtk-3-0t64 libgbm1 libasound2t64
 

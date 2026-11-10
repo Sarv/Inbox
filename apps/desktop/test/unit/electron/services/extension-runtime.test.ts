@@ -215,7 +215,15 @@ async function startChannel(extensionId = 'demo') {
 /** What the Worker would say back. */
 const fromWorker = (port: FakePort, data: unknown) => port.emit('message', { data });
 
+// Whether the OS sandbox is on is read from Electron's process metrics on macOS and
+// Windows, and from the kernel's /proc on Linux (os-sandbox-state.test.ts covers
+// both). These fake the metrics, so they run as macOS on every host. Breaks: on a
+// Linux runner the real /proc has no such process, the state reads as unknown, and
+// every start in this file is refused (39 failures in CI on 2026-11-07).
+const HOST_PLATFORM = process.platform;
+
 beforeEach(() => {
+  Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
   h.views.length = 0;
   h.sessions.clear();
   h.ports.length = 0;
@@ -238,6 +246,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  Object.defineProperty(process, 'platform', { value: HOST_PLATFORM, configurable: true });
   vi.useRealTimers();
   vi.unstubAllEnvs();
   rmSync(rootDir, { recursive: true, force: true });
@@ -589,7 +598,6 @@ describe('the operating system sandbox', () => {
     ['the renderer reports it is not sandboxed', () => { h.sandboxed = false; }],
     ['nothing can say either way', () => { h.sandboxed = undefined; }],
   ])('refuses in a release build when %s', async (_name, setup) => {
-    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
     setup();
 
     await expect(startChannel()).rejects.toThrow(OFF);

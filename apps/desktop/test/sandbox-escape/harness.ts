@@ -377,7 +377,9 @@ async function availability(): Promise<void> {
   (sandboxOf('flood') as Electron.WebContents).forcefullyCrashRenderer();
   await until(() => manager.getExtensionInfo('flood')?.state !== 'active', 5000);
   const back = await until(() => manager.getExtensionInfo('flood')?.state === 'active', 10_000);
-  check('a crashed renderer: it comes back by itself', Boolean(back) && sandboxOf('flood')?.getOSProcessId() !== crashedPid, manager.getExtensionInfo('flood')?.state);
+  // `crashedPidAlive` tells a renderer still dying (Chromium cannot report it gone until the
+  // process has exited, a core dump included) from a death nobody reported.
+  check('a crashed renderer: it comes back by itself', Boolean(back) && sandboxOf('flood')?.getOSProcessId() !== crashedPid, { state: manager.getExtensionInfo('flood')?.state, crashedPidAlive: isAlive(crashedPid) });
   check('a crashed renderer: it works again', (await call(manager, 'flood', 'ping')) === 'alive');
 
   // The worst of them as a line of console output: Chromium decides how much of it reaches main.
