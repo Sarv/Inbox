@@ -8,13 +8,6 @@ import type { IMAPConfig, SyncEngineOptions } from '@sarvinbox/core';
 import { withTimeout, transportOptInsOf, limitTransport, ImapFlowClient, isAuthError, isQuotaError, isStartTlsUnavailableError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift, STARTTLS_UNAVAILABLE } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
-// Per-account connection back-off after a "too many simultaneous connections"
-// quota error (or a connect timeout, usually the same saturated condition). ONE
-// shared instance so EVERY connect path — the active `imap:connect`,
-// `imap:resetAndReconnect`, and background sync — parks the same account for the
-// same window; otherwise the active path kept re-hammering a cap the background
-// path was already waiting out (the reconnect storm). See quota-backoff.ts.
-const quotaBackoff = createQuotaBackoff();
 import { identifyClient } from '../sentry';
 import { ensureAccountRuntime, accountInboxUnread, accountDbExists } from '../services/accounts-runtime';
 // Static import (not require()): the bundled main.js has no on-disk services
@@ -34,6 +27,14 @@ import {
 import { narrowSavedTransport, resolveVaultPassword, vaultIdCandidates, vaultRefusalMessage, withSavedPassword, type VaultPasswordFound, type VaultPasswordResult } from '../services/vault-credentials';
 import { getStorage, getSyncEngine, getMainWindow, requireSyncEngine, requireStorage, sendToWindow, getCurrentAccountId, getStorageFor, getSyncEngineFor, getIsQuitting, getSystemSuspended, setCurrentAccount } from '../shared';
 const logger = createLogger('sync-handlers');
+
+// Per-account connection back-off after a "too many simultaneous connections"
+// quota error (or a connect timeout, usually the same saturated condition). ONE
+// shared instance so EVERY connect path — the active `imap:connect`,
+// `imap:resetAndReconnect`, and background sync — parks the same account for the
+// same window; otherwise the active path kept re-hammering a cap the background
+// path was already waiting out (the reconnect storm). See quota-backoff.ts.
+const quotaBackoff = createQuotaBackoff();
 
 // IDLE event logging is aggregated, never per-event. The server emits one
 // event PER MESSAGE, so a flag reconcile produces hundreds of them in a burst;
