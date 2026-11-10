@@ -44,6 +44,8 @@
  * callers already hold `BLOCKLISTS` from `@sarv-in/mailguard/reputation`.
  */
 
+import { trimTrailingSlashes } from './trailing-slash';
+
 /** Who answers: this computer's own DNS queries, or the Sarv-hosted service. */
 export type BlocklistProvider = 'local' | 'sarv';
 
@@ -95,7 +97,7 @@ export function normalizeBlocklistEndpoint(value: unknown): string {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) return '';
   try {
-    return new URL(raw).protocol === 'https:' ? raw.replace(/\/+$/, '') : '';
+    return new URL(raw).protocol === 'https:' ? trimTrailingSlashes(raw) : '';
   } catch {
     return '';
   }

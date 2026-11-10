@@ -88,10 +88,14 @@ const A = 'a@sarv.com';
 const B = 'b@sarv.com';
 const FAR_FUTURE = Math.floor(Date.now() / 1000) + 3_600;
 
+// Minted ten minutes ago: these tests start a refresh with `forceRefresh`, which
+// is ignored for a token minted under a minute ago (FORCED_REFRESH_MIN_AGE_SEC).
+const MINTED_AT = Math.floor(Date.now() / 1000) - 600;
+
 const seed = (email: string, refreshToken: string, over: Record<string, unknown> = {}) => {
   h.store.set(`sarv:${email}`, {
     provider: 'sarv', email, accessToken: `access-${email}`, refreshToken, accessExpiresAt: FAR_FUTURE, scopes: [],
-    updatedAt: Math.floor(Date.now() / 1000), ...over,
+    updatedAt: MINTED_AT, ...over,
   });
 };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -575,5 +579,52 @@ describe('what the sign-out reports', () => {
     const err = await getValidAccessToken('sarv', 'nobody@sarv.com').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(OAuthError);
     expect(err).toMatchObject({ code: 'ACCOUNT_NOT_FOUND' });
+  });
+});
+
+describe('a forced refresh right after a mint', () => {
+  const now = () => Math.floor(Date.now() / 1000);
+
+  // Breaks: a server that refuses the token for good (Sarv's "Token audience
+  // does not match this service") makes every catalog or AI call spend, and on
+  // Sarv rotate, the refresh token: 9 refreshes in one minute on 2026-11-07.
+  it('ignores the force for a token minted under a minute ago', async () => {
+    seed(A, 'R1', { updatedAt: now() - 5 });
+    await expect(getValidAccessToken('sarv', A, true)).resolves.toBe(`access-${A}`);
+    expect(h.refreshed).toEqual([]);
+  });
+
+  // Breaks: the 401 self-heal (clock skew, a token that aged out while idle)
+  // stops working for every token, not just fresh ones.
+  it('still refreshes a token minted more than a minute ago', async () => {
+    seed(A, 'R1', { updatedAt: now() - 61 });
+    await expect(getValidAccessToken('sarv', A, true)).resolves.toBe('fresh-access');
+    expect(h.refreshed).toEqual(['R1']);
+  });
+
+  // Breaks: a token that is already due (a short lifetime) is handed out stale
+  // when forced, because the force was dropped instead of left to the gate.
+  it('still refreshes a fresh token that is already due', async () => {
+    seed(A, 'R1', { updatedAt: now() - 5, accessExpiresAt: now() + 60 });
+    await expect(getValidAccessToken('sarv', A, true)).resolves.toBe('fresh-access');
+    expect(h.refreshed).toEqual(['R1']);
+  });
+
+  // Breaks: a clock that stepped backwards makes the token look minted in the
+  // future and the window arithmetic forces a refresh, or throws.
+  it('treats a mint time in the future as just minted', async () => {
+    seed(A, 'R1', { updatedAt: now() + 3_600 });
+    await expect(getValidAccessToken('sarv', A, true)).resolves.toBe(`access-${A}`);
+    expect(h.refreshed).toEqual([]);
+  });
+
+  // Breaks: the window is shared across accounts, so one account's fresh token
+  // stops another account's due refresh.
+  it('decides per account', async () => {
+    seed(A, 'RA', { updatedAt: now() - 5 });
+    seed(B, 'RB', { updatedAt: now() - 600 });
+    await getValidAccessToken('sarv', A, true);
+    await getValidAccessToken('sarv', B, true);
+    expect(h.refreshed).toEqual(['RB']);
   });
 });

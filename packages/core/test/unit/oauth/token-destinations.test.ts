@@ -138,6 +138,10 @@ describe('isSarvAIEndpointAllowed — a Sarv bearer only goes to Sarv AI', () =>
     'https://x.jpr1-ai-edge.sarv.com/edge/v1/llm',
     'https://-ai-edge.sarv.com/edge/v1/llm',
     'https://ai-edge.sarv.com/edge/v1/llm',
+    // Breaks: an extra host name in front of the zone label passes (CodeQL
+    // js/incomplete-url-substring-sanitization), or the bare domain does.
+    'https://evil.example-ai-edge.sarv.com/edge/v1/llm',
+    'https://sarv.com/edge/v1/llm',
   ])('refuses the non-LLM sarv.com address %j', (url) => {
     expect(isSarvAIEndpointAllowed(url)).toBe(false);
   });
@@ -152,6 +156,10 @@ describe('isSarvAIEndpointAllowed — a Sarv bearer only goes to Sarv AI', () =>
     'https://user:pw@jpr1-ai-edge.sarv.com/edge/v1/llm',
     'https://jpr1-ai-edge.sarv.com@evil.example/v1',
     'https://jpr1-ai-edge.sarv.com.evil.example/edge/v1/llm',
+    // On the LLM path, so only the host check stands between these and the
+    // token: a domain that merely ends in "sarv.com" is not under sarv.com.
+    'https://evilsarv.com/edge/v1/llm',
+    'https://jpr1-ai-edgesarv.com/edge/v1/llm',
     'not a url',
     '',
   ])('refuses %j', (url) => {
