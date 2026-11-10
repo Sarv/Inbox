@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+
+import { effectiveAIBaseUrl } from '@sarvinbox/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type HandlerResult = { success: boolean; data?: unknown; error?: string };
@@ -147,6 +150,23 @@ describe('Inbox Agent trusted IPC and source ownership', () => {
     vi.mocked(getPipelineAIConfig).mockReturnValue(null);
     expect(h.serviceDeps.reviewCacheIdentity!()).not.toBe(identity);
     expect(callInboxAssistantAI).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the identity is a plain, unkeyed SHA-256 of the provider config, so
+  // anyone who sees it can confirm a guessed API key offline by hashing the
+  // same fields (a short key for a self-hosted endpoint falls to a dictionary).
+  it('keys the review identity so a guessed API key cannot be confirmed from it', () => {
+    const provider = { type: 'custom' as const, model: 'review-model', apiKey: 'letmein', baseUrl: 'https://llm.example/v1',
+      providerId: 'provider-a', authMethod: 'apiKey', oauthProvider: undefined, oauthEmail: undefined };
+    vi.mocked(getPipelineAIConfig).mockReturnValue(provider);
+    const identity = h.serviceDeps.reviewCacheIdentity!();
+    const unkeyed = (apiKey: string) => createHash('sha256').update(JSON.stringify({
+      type: provider.type, model: provider.model, baseUrl: effectiveAIBaseUrl(provider), apiKey,
+      providerId: provider.providerId, authMethod: provider.authMethod,
+      oauthProvider: provider.oauthProvider, oauthEmail: provider.oauthEmail,
+    })).digest('hex');
+    expect(identity).toMatch(/^[a-f0-9]{64}$/);
+    expect(identity).not.toBe(unkeyed('letmein'));
   });
 
   it('downloads the original when research identifies an incomplete nonempty preview', async () => {
