@@ -100,6 +100,45 @@ describe('user-authored meeting date planning', () => {
   });
 });
 
+// The parser reads only the user's own question and instructions, but those are
+// often pasted from mail, and it runs in the main process. Three of its regexes
+// were super-linear on a long whitespace run: `(?:\s+|-)+` was exponential
+// (CodeQL js/redos — 34 spaces after "one and a half" took 21 s), and two put
+// `\s*` next to `\s*` (quadratic — "1" or "between 1" before 150-200 K spaces
+// took 15-16 s). Each crafted input below made the old pattern exceed the test
+// timeout. ("from 1" before a long space run is still slow, inside chrono-node's
+// own parser, so the range case uses "between".)
+describe('meeting text parsing — bounded work on long whitespace', () => {
+  // Breaks: the "one and a half hours" pattern nests a quantifier again and a
+  // short run of spaces freezes the main process.
+  it('reads "one and a half" before a long space run at once', () => {
+    expect(windows(`Schedule a meeting tomorrow, one and a half${' '.repeat(34)}!`)).toHaveLength(1);
+  });
+
+  // Breaks: spaces, tabs or dashes between the words stop being accepted.
+  it('still reads "one and a half hours" written with any mix of spaces and dashes', () => {
+    expect(wallWindows('Arrange a one - and -  a\thalf hour meeting tomorrow at 3pm')).toEqual([{ start: '2026-10-22T15:00', end: '2026-10-22T16:30', duration: 90 }]);
+  });
+
+  // Breaks: the numeric duration pattern puts two `\s*` side by side again.
+  it('reads a number before a long space run at once, and still reads "45 - minutes"', () => {
+    expect(windows(`Schedule a meeting tomorrow 1${' '.repeat(200_000)}x`)).toHaveLength(1);
+    expect(wallWindows('Schedule a 45 -   minutes meeting tomorrow at 3pm')).toEqual([{ start: '2026-10-22T15:00', end: '2026-10-22T15:45', duration: 45 }]);
+  });
+
+  // Breaks: the range pattern's first clock is followed by a second `\s*` again.
+  it('reads "between 1" before a long space run at once', () => {
+    expect(windows(`Schedule a meeting tomorrow between 1${' '.repeat(150_000)}x`)).toHaveLength(1);
+  });
+
+  // Breaks: spaces around the separator, or after a meridiem, stop being read as
+  // part of a range (the first clock now carries the spaces after its "pm").
+  it('still reads a range with spaces around its meridiems and separator', () => {
+    expect(wallWindows('Arrange a 60-minute meeting Friday between 2 pm   and   4pm')).toEqual([{ start: '2026-10-23T14:00', end: '2026-10-23T16:00', duration: 60 }]);
+    expect(wallWindows('Arrange a 60-minute meeting Friday from 2 p.m. - 4 p.m.')).toEqual([{ start: '2026-10-23T14:00', end: '2026-10-23T16:00', duration: 60 }]);
+  });
+});
+
 const availability = (): LocalCalendarAvailability => ({ startMs: NOW, endMs: NOW + 86400000, checkedAt: NOW, timeZone: 'UTC', durationMinutes: 30, calendarIds: ['local'], calendarNames: ['Private calendar'], scope: 'local-only', status: 'ready', slots: [{ startMs: NOW + 3600000, endMs: NOW + 5400000, label: 'Wed, 21 Oct 2026, 09:00 UTC – 09:30' }] });
 
 describe('verified meeting times stay under application control', () => {
