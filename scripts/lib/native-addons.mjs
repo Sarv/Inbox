@@ -148,10 +148,26 @@ export function missingRequiredAddons(addonPaths, required = REQUIRED_ADDONS) {
 export function readFileHeader(file, bytes = 1024) {
   const handle = fs.openSync(file, 'r');
   try {
-    const buffer = Buffer.alloc(bytes);
-    const read = fs.readSync(handle, buffer, 0, bytes, 0);
-    return buffer.subarray(0, read);
+    return readFromHandle(handle, bytes);
   } finally {
     fs.closeSync(handle);
   }
+}
+
+/**
+ * Read up to `bytes` bytes at `position` of a file that is already open.
+ *
+ * For a caller that reads one file more than once: every read through the same
+ * descriptor is of the same file, where opening the path again could find a
+ * different file in its place.
+ *
+ * @param {number} handle An open file descriptor.
+ * @param {number} bytes How much to read.
+ * @param {number} [position] Byte offset to read from.
+ * @returns {Buffer} What was actually read, which may be shorter than `bytes`.
+ */
+export function readFromHandle(handle, bytes, position = 0) {
+  const buffer = Buffer.alloc(bytes);
+  const read = fs.readSync(handle, buffer, 0, bytes, position);
+  return buffer.subarray(0, read);
 }

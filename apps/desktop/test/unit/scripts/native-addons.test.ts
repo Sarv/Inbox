@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 
@@ -10,6 +10,8 @@ import {
   findNativeAddons,
   findPackagedApps,
   missingRequiredAddons,
+  readFileHeader,
+  readFromHandle,
 } from '../../../../../scripts/lib/native-addons.mjs';
 
 /**
@@ -177,5 +179,25 @@ describe('missingRequiredAddons', () => {
   // make every check pass.
   it('requires at least better-sqlite3 by default', () => {
     expect(REQUIRED_ADDONS).toContain('better_sqlite3.node');
+  });
+});
+
+describe('readFileHeader / readFromHandle', () => {
+  // Breaks if a read past the end comes back zero-padded to the size asked
+  // for: the padding then reads as real header bytes (a truncated binary looks
+  // whole), and a reader bounding later reads by what it got is misled.
+  it('returns only the bytes that exist, from the position asked for', () => {
+    const file = join(root, 'bytes.bin');
+    writeFileSync(file, Buffer.from('MZ0123456789'));
+    expect(readFileHeader(file, 4).toString()).toBe('MZ01');
+    expect(readFileHeader(file, 4096).toString()).toBe('MZ0123456789');
+    const handle = openSync(file, 'r');
+    try {
+      expect(readFromHandle(handle, 4, 2).toString()).toBe('0123');
+      expect(readFromHandle(handle, 100, 10).toString()).toBe('89');
+      expect(readFromHandle(handle, 8, 50)).toHaveLength(0);
+    } finally {
+      closeSync(handle);
+    }
   });
 });
