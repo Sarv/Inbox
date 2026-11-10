@@ -97,8 +97,8 @@ export interface SQLiteStorageConfig {
   verbose?: boolean;
   /**
    * At-rest encryption key (passphrase) for SQLite3 Multiple Ciphers (bundled by
-   * better-sqlite3-multiple-ciphers). No `cipher=` is configured, so its DEFAULT
-   * cipher applies: ChaCha20-Poly1305 — NOT SQLCipher — with the page key
+   * better-sqlite3-multiple-ciphers), with the cipher pinned (DB_CIPHER_SETTINGS
+   * in db-encryption.ts): ChaCha20-Poly1305 — NOT SQLCipher — with the page key
    * derived from this passphrase by PBKDF2-HMAC-SHA256 (64,007 iterations, a
    * random 16-byte salt per file) and a random 16-byte nonce plus a 16-byte
    * Poly1305 tag on every page. When set, the DB is opened with this key;
