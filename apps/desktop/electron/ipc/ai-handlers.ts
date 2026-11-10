@@ -165,8 +165,9 @@ export function registerAIHandlers(): void {
       return { success: false, error: (error as Error).message };
     }
   });
-  // A request to an AI provider that needs its SAVED key: main attaches it,
-  // for the origin it was saved for only (ai-provider-proxy.ts).
+  // A request to an AI provider that needs its SAVED key or a Sarv sign-in:
+  // main attaches the credential — a saved key for the origin it was saved for
+  // only, a Sarv token for Sarv AI endpoints only (ai-provider-proxy.ts).
   ipcMain.handle('ai:providerFetch', (_event, request: AiProviderFetchRequest) => proxyAiProviderFetch(request));
   ipcMain.handle('ai:providerFetchAbort', (_event, requestId: string) => { abortAiProviderFetch(requestId); });
 

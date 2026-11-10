@@ -67,13 +67,31 @@ export function isOAuthMailHostAllowed(
   return oauthMailHostsFor(provider, protocol).includes(normalizeHost(host));
 }
 
+/** Every Sarv AI (LLM) request lives at or under this path on an edge host. */
+const SARV_LLM_PATH = '/edge/v1/llm';
+
+/**
+ * A zone's edge host is `<zone>-ai-edge.sarv.com`, the zone being one label: one
+ * label under `.sarv.com` (matched with its leading dot, so no other domain can
+ * end in it), and that label is the zone plus `-ai-edge`.
+ */
+const SARV_DOMAIN_SUFFIX = '.sarv.com';
+const SARV_EDGE_LABEL_SUFFIX = '-ai-edge';
+
 /**
  * Whether a Sarv OAuth bearer may be sent to the AI endpoint `url`.
  *
- * Sarv AI routes each model to a zone with its own edge host
- * (`<zone>-ai-edge.sarv.com`), so the rule is a host under sarv.com over https,
- * or the exact origin of a configured Sarv base URL (the dev override, which
- * may be http://localhost). URLs carrying credentials are refused outright.
+ * That bearer is also the Sarv mailbox's XOAUTH2 credential (email:read, send,
+ * delete), so it goes to Sarv's AI edge and its LLM API only (CASA I-2):
+ *  - the host is a zone edge host, `<zone>-ai-edge.sarv.com`, over https on
+ *    the default port, or the exact origin of the configured Sarv edge base URL
+ *    (the dev override, which may be http://localhost);
+ *  - the path is the LLM API: `/edge/v1/llm` or below it.
+ *
+ * Other sarv.com hosts are refused. inbox.sarv.com is the website, served by
+ * GitHub Pages; oauth.sarv.com and ai.sarv.com are APIs this token must not be
+ * pointed at by whoever names the URL (main fetches the catalog from ai.sarv.com
+ * itself, at a fixed address). URLs carrying credentials are refused outright.
  */
 export function isSarvAIEndpointAllowed(url: string | undefined | null): boolean {
   if (typeof url !== 'string' || url.trim() === '') return false;
@@ -84,8 +102,10 @@ export function isSarvAIEndpointAllowed(url: string | undefined | null): boolean
     return false;
   }
   if (parsed.username || parsed.password) return false;
+  // The URL parser has already resolved dot segments (`..`, `%2e%2e`).
+  if (parsed.pathname !== SARV_LLM_PATH && !parsed.pathname.startsWith(`${SARV_LLM_PATH}/`)) return false;
   const sarv = getOAuthProvider('sarv');
-  for (const base of [sarv.llmBaseUrl, sarv.edgeBaseUrl, sarv.apiBaseUrl]) {
+  for (const base of [sarv.llmBaseUrl, sarv.edgeBaseUrl]) {
     if (!base) continue;
     try {
       if (new URL(base).origin === parsed.origin) return true;
@@ -93,6 +113,10 @@ export function isSarvAIEndpointAllowed(url: string | undefined | null): boolean
       // A malformed configured base can never match anything.
     }
   }
+  if (parsed.protocol !== 'https:' || parsed.port !== '') return false;
   const host = normalizeHost(parsed.hostname);
-  return parsed.protocol === 'https:' && (host === 'sarv.com' || host.endsWith('.sarv.com'));
+  if (!host.endsWith(SARV_DOMAIN_SUFFIX)) return false;
+  const label = host.slice(0, -SARV_DOMAIN_SUFFIX.length);
+  if (label.includes('.') || !label.endsWith(SARV_EDGE_LABEL_SUFFIX)) return false;
+  return label.length > SARV_EDGE_LABEL_SUFFIX.length;
 }

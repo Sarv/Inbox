@@ -51,6 +51,7 @@ import {
   deleteAiSecret,
   getAllAiSecrets,
   listAiSecretIds,
+  pinAiSecretOrigin,
   resolveAiKey,
   revertAiSecret,
   isSecureStorageAvailable,
@@ -208,9 +209,67 @@ describe('origin binding', () => {
     await expect(resolveAiKey('p1', 'https://evil.example/v1/chat/completions')).resolves.toEqual({
       status: 'origin-mismatch', boundOrigin: 'https://api.openai.com',
     });
-    // Scheme and port are part of the origin.
-    await expect(resolveAiKey('p1', 'http://api.openai.com/v1')).resolves.toMatchObject({ status: 'origin-mismatch' });
+    // Changed deliberately (CASA I-7): plain HTTP to another computer is now
+    // refused outright by the shared transport rule, before any binding check,
+    // so it reads as 'none' rather than an origin mismatch. Still no key.
+    await expect(resolveAiKey('p1', 'http://api.openai.com/v1')).resolves.toEqual({ status: 'none' });
     await expect(resolveAiKey('p1', 'https://api.openai.com:8443/v1')).resolves.toMatchObject({ status: 'origin-mismatch' });
+    // Scheme is still part of the origin where plain HTTP is allowed (this computer).
+    await setAiSecret('local', 'sk-local', 'https://localhost:8443/v1');
+    await expect(resolveAiKey('local', 'http://localhost:8443/v1')).resolves.toMatchObject({ status: 'origin-mismatch' });
+  });
+
+  // CASA I-7. Breaks: a key typed for a plain-HTTP address on another computer
+  // is saved UNBOUND (the transport rule gives it no origin) and then binds to
+  // whichever address first asks for it.
+  it('refuses to save a key for an address main may not call', async () => {
+    await expect(setAiSecret('p1', 'sk-1', 'http://models.lan.example/v1')).rejects.toThrow(/^AI provider address must use HTTPS/);
+    await expect(setAiSecret('p2', 'sk-2', 'https://user:pw@models.example/v1')).rejects.toThrow(/username or password/);
+    await expect(getAllAiSecrets()).resolves.toEqual({});
+    // Deleting (an empty key) is never refused: it sends nothing anywhere.
+    await expect(setAiSecret('p1', '', 'http://models.lan.example/v1')).resolves.toEqual(expect.any(Number));
+  });
+
+  // Breaks: a local model server with a saved key stops working.
+  it('binds a key for a model server on this computer and returns it there', async () => {
+    await setAiSecret('ollama', 'sk-local', 'http://localhost:11434/v1');
+    await expect(resolveAiKey('ollama', 'http://localhost:11434/v1/chat/completions')).resolves.toEqual({ status: 'found', key: 'sk-local' });
+    await expect(resolveAiKey('ollama', 'http://127.0.0.1:11434/v1')).resolves.toMatchObject({ status: 'origin-mismatch' });
+  });
+
+  // An unbound (older) key is never handed out for a refused address.
+  it('does not hand out a pre-binding key for a plain-HTTP address on another computer', async () => {
+    dbState.blobs.set(BLOB_KEY, plainEnvelope({ legacy: 'sk-old' }));
+    await expect(resolveAiKey('legacy', 'http://models.lan.example/v1')).resolves.toEqual({ status: 'none' });
+  });
+
+  // CASA I-7 review. A key saved for a LAN server before keys were bound can
+  // no longer bind itself by use (its address is refused), so main pins it to
+  // that address when it refuses the provider. Breaks: the key stays unbound
+  // and goes to the first HTTPS address a compromised renderer names.
+  it('pins a pre-binding key to its refused address, so no other address gets it', async () => {
+    dbState.blobs.set(BLOB_KEY, plainEnvelope({ legacy: 'sk-old' }));
+    await pinAiSecretOrigin('legacy', 'http://models.lan.example:8000/v1');
+    await expect(resolveAiKey('legacy', 'https://attacker.example/v1/chat/completions')).resolves.toEqual({
+      status: 'origin-mismatch', boundOrigin: 'http://models.lan.example:8000',
+    });
+    await expect(resolveAiKey('legacy', 'http://models.lan.example:8000/v1')).resolves.toEqual({ status: 'none' });
+    // The key itself is kept: the user re-enters it for an HTTPS address.
+    await expect(getAllAiSecrets()).resolves.toEqual({ legacy: 'sk-old' });
+  });
+
+  // Breaks: pinning re-binds a key the user saved for another address.
+  it('leaves a bound key, a missing key and an unparseable address alone', async () => {
+    await setAiSecret('p1', 'sk-1', 'https://api.openai.com/v1');
+    await pinAiSecretOrigin('p1', 'http://models.lan.example/v1');
+    await expect(resolveAiKey('p1', 'https://api.openai.com/v1')).resolves.toEqual({ status: 'found', key: 'sk-1' });
+    await pinAiSecretOrigin('nobody', 'http://models.lan.example/v1');
+    await expect(getAllAiSecrets()).resolves.toEqual({ p1: 'sk-1' });
+    dbState.blobs.set(BLOB_KEY, plainEnvelope({ legacy: 'sk-old' }));
+    await pinAiSecretOrigin('legacy', 'not a url');
+    await pinAiSecretOrigin('legacy', 'file:///etc/passwd');
+    // Still unbound: binds on its first (allowed) use, as any older key does.
+    await expect(resolveAiKey('legacy', 'https://api.openai.com/v1')).resolves.toEqual({ status: 'found', key: 'sk-old' });
   });
 
   it('is none for an unknown provider, a missing id, or a URL that is not one', async () => {

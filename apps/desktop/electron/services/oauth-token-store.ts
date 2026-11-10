@@ -21,7 +21,7 @@ import type { OAuthAccount, OAuthProviderId } from '@sarvinbox/core';
 import { createLogger } from '@sarvinbox/core';
 import { app } from 'electron';
 
-import { getBlob, setBlob } from './core-db';
+import { readBlob, setBlob } from './core-db';
 import { sealJson, openJson, type EnvelopeErrors } from './safe-storage-envelope';
 import { createWriteQueue } from './write-queue';
 const logger = createLogger('oauth-token-store');
@@ -73,11 +73,12 @@ async function migrateLegacyFile(): Promise<OAuthAccount[] | null> {
 
 export async function loadAccounts(): Promise<OAuthAccount[]> {
   if (cache) return cache;
-  const blob = getBlob(BLOB_KEY);
+  // Do NOT fall back to [] when the store cannot be read, or on a decrypt/parse
+  // failure: caching "no accounts" would make the next saveAccount destroy every
+  // other account's refresh token, and "this sign-in is gone" would switch AI off
+  // and skip revocation. readBlob and deserialize throw → callers fail loudly.
+  const blob = readBlob(BLOB_KEY);
   if (blob) {
-    // Do NOT fall back to [] on a decrypt/parse failure: caching "no accounts"
-    // would make the next saveAccount destroy every other account's refresh
-    // token. deserialize throws → propagate so callers fail loudly.
     cache = deserialize(blob);
     return cache;
   }
@@ -87,7 +88,7 @@ export async function loadAccounts(): Promise<OAuthAccount[]> {
   // migrateLegacyFile returned null: either there was no file, OR a concurrent
   // first-load already migrated + renamed it. Re-check the blob before caching
   // "empty" — otherwise a race could permanently strand this session at [].
-  const blob2 = getBlob(BLOB_KEY);
+  const blob2 = readBlob(BLOB_KEY);
   cache = blob2 ? deserialize(blob2) : [];
   return cache;
 }

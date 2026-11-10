@@ -95,12 +95,33 @@ A handful cannot be fixed that way. Those are listed in
 pnpm 8 offers — and every entry must be justified here. An undocumented entry is
 a bug: the point of the gate is that nothing high-severity is silently carried.
 
-Reviewed 2026-10-05:
+Reviewed 2026-10-12 (`pnpm audit --audit-level=high` exits 0; the full report
+without the ignore list shows 2 high, both below, and 3 moderate, noted after
+the table). Neither high advisory has a fixed version that an override could
+reach, so both exceptions stay:
 
 | CVE | Package | Why it is accepted | Removed when |
 | --- | --- | --- | --- |
-| [CVE-2026-93748](https://github.com/advisories/GHSA-ch52-4w7c-c8xp) | `http-cache-semantics` <= 4.2.0 | Cross-user response disclosure requires a shared HTTP cache accepting attacker-controlled `max-stale` directives. The dependency is reached only through the desktop **build tool** `electron-builder` → `app-builder-lib` → `@electron/get` → `got` → `cacheable-request`. Inbox does not use this chain to handle mail, OAuth, scanner requests, or shared user caches. **No patched release exists.** This is a temporary exception for that reviewed tooling scope, not a vulnerability fix. | A patched release becomes available, the build tool drops it, or a runtime/shared-cache path appears (reassess before shipping). |
-| [CVE-2026-93687](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | `braces` <= 3.0.3 | Stack exhaustion requires deeply nested glob patterns. All dependency paths are **tooling**: ESLint/globby, Tailwind/chokidar/fast-glob, and Metro/Jest. These tools process project patterns, not mail bodies, attachments, or user-supplied runtime patterns. **No patched release exists.** The remaining build-tool risk is accepted temporarily; the package itself remains vulnerable. | A patched release becomes available, the tooling drops it, or an untrusted runtime-pattern path appears (reassess before shipping). |
+| [CVE-2026-93748](https://github.com/advisories/GHSA-ch52-4w7c-c8xp) | `http-cache-semantics` <= 4.2.0 | Cross-user response disclosure requires a shared HTTP cache accepting attacker-controlled `max-stale` directives. The dependency is reached only through the desktop **build tool** `electron-builder` → `app-builder-lib` → `@electron/get` → `got` → `cacheable-request`. Inbox does not use this chain to handle mail, OAuth, scanner requests, or shared user caches. **No patched release exists.** 4.3.0 (2026-10-04) is not one: it fixes a different advisory (CVE-2026-93750, `Vary` matching) and leaves `max-stale` handling unchanged. Because the advisory's range stops at 4.2.0, `pnpm audit` would nonetheless report this CVE as gone on 4.3.0, so do not read a clean audit after such a bump as a fix. This is a temporary exception for that reviewed tooling scope, not a vulnerability fix. | A release that actually changes `max-stale` handling ships (check its diff, not the advisory range), the build tool drops it, or a runtime/shared-cache path appears (reassess before shipping). |
+| [CVE-2026-93687](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | `braces` <= 3.0.3 | Stack exhaustion requires deeply nested glob patterns. All dependency paths are **tooling**: ESLint/globby, Tailwind/chokidar/fast-glob, and Metro/Jest. These tools process project patterns, not mail bodies, attachments, or user-supplied runtime patterns. **No patched release exists** (3.0.3 is the latest published version). The remaining build-tool risk is accepted temporarily; the package itself remains vulnerable. | A patched release becomes available, the tooling drops it, or an untrusted runtime-pattern path appears (reassess before shipping). |
+
+Moderate, no fixed version (below the gate, so not in `ignoreCves`; listed so
+the full report holds no surprises):
+
+- [CVE-2026-97058](https://github.com/advisories/GHSA-hp3w-g68c-fv3c),
+  `sprintf-js` <= 1.1.3 (denial of service through unbounded precision
+  specifiers). 1.1.3 is the latest release. Reached only by dev and build
+  tooling: 1.0.3 via `packages/ui-primitives` → `react-native` (an optional
+  peer) → `babel-jest` → … → `js-yaml@3` → `argparse@1`, and 1.1.3 via
+  `electron-builder` → `@electron/get` → `global-agent` → `roarr`. Neither is
+  in the shipped app.
+- [CVE-2026-104844](https://github.com/advisories/GHSA-rj75-hqrm-r3gf),
+  `postcss-selector-parser` < 7.1.6 (quadratic parsing of flat selectors).
+  Fixed only in 7.1.6. 6.1.4, the last 6.x release, comes from Tailwind CSS 3
+  (`tailwindcss` and its `postcss-nested`), a devDependency that requires the
+  6.x line. Forcing 7.x on it would be an incompatible major-version override.
+  It runs at build time over the app's own stylesheets and never parses email
+  or user CSS.
 
 The previous Vite exception (`CVE-2026-53571`) was removed: the desktop now
 uses Vite 8. The two `image-size` exceptions (`CVE-2025-71329` and

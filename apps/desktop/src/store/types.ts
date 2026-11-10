@@ -1,6 +1,7 @@
 import type { EmailRecord, FolderRecord, Label, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, ViewFilter } from '@sarvinbox/core';
 import type { StateCreator } from 'zustand';
 
+import type { AccountRevocation } from '../../electron/services/account-revocation';
 import type { InboxType, InboxSection } from '../config/inbox-types';
 import type { SearchQuery } from '../services/ai-service';
 import type { LocalCalendarAvailability } from '../types/local-calendar';
@@ -180,8 +181,10 @@ export interface ConnectionSlice {
    *  config (the OAuth flow probes first so it can prompt before overwriting) —
    *  it skips the duplicate connection, never the safety. */
   addAccount: (imapConfig: any, opts?: { alreadyVerified?: boolean }) => Promise<void>;
-  /** Remove an account from the registry; if active, switch to another (or none). */
-  removeAccountById: (accountId: string) => Promise<void>;
+  /** Remove an account from the registry; if active, switch to another (or none).
+   *  Resolves with what happened to its sign-in grant at the provider (OAuth
+   *  accounts; undefined otherwise, or when the removal was a no-op). */
+  removeAccountById: (accountId: string) => Promise<AccountRevocation | undefined>;
   /** Set an account's send-as aliases (the extra From addresses; the account's own
    *  address is always kept). Normalised + persisted to the registry. */
   setAccountIdentities: (accountId: string, aliases: string[]) => void;

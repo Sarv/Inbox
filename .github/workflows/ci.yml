@@ -53,8 +53,10 @@ jobs:
   # / better-sqlite3 / …) has leaked into the RENDERER bundle. Such a leak crashes
   # the packaged app on startup with 'Dynamic require of "stream" is not supported'
   # — a bug that has shipped to a user before. A fast renderer-only build runs the
-  # exact same guard the release build carries, so the crash can never reach a
-  # user.
+  # exact same guards the release build carries, so the crash can never reach a
+  # user. The same build also fails on a Google OAuth client secret ("GOCSPX-")
+  # in the renderer (CASA I-3); this job has no secrets, so the configured-value
+  # half of that guard runs in the release build.
   renderer-bundle-guard:
     name: Renderer bundle guard (no Node-only deps)
     runs-on: ubuntu-latest
@@ -125,6 +127,7 @@ jobs:
           test/unit/electron/services/attachment-save-marks-downloaded.test.ts
           test/unit/electron/services/oauth-loopback.test.ts
           test/unit/electron/utils/loopback-callback-headers.test.ts
+          test/unit/electron/utils/loopback-server-close.test.ts
           test/unit/electron/services/antivirus-oauth-service.test.ts
 
   # The release signs Windows binaries with an HSM key that only a pushed v*

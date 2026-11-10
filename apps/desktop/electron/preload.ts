@@ -6,7 +6,7 @@
 // preload script. Safe/no-op when Sentry has no DSN configured.
 import '@sentry/electron/preload';
 
-import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult } from '@sarvinbox/core';
+import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult, SarvCatalogResult } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
 import type { DefaultAppsAPI } from '../src/types/default-apps';
@@ -17,9 +17,12 @@ import type { SecureStorageAccessResult, SecureStorageStatus } from '../src/type
 
 
 import type { PgpComposeDefaults, PgpIpcResult } from './ipc/pgp-handlers';
+import type { AccountRevocation } from './services/account-revocation';
+import type { AiProviderFetchRequest, AiProviderFetchResult } from './services/ai-provider-proxy';
 import type { DomainIdentityRow } from './services/domain-identity-store';
 import type { ContactKeySummary, OwnKeySummary, RecipientKeyStatus } from './services/pgp-keyring';
 import type { PgpDraftResult, PgpViewResult } from './services/pgp-reader';
+import type { SarvCatalogIpcRequest } from './services/sarv-catalog-service';
 import type { SenderIdentity, SenderIdentityPolicy } from './services/sender-identity-service';
 import type { SpamReputationState } from './services/spam-reputation-service';
 import type { UpdateState } from './services/update-policy';
@@ -40,21 +43,6 @@ interface InAppToast {
   threadId?: string;
   calendarEvent?: LocalCalendarOpenEvent;
 }
-
-/** A request to an AI provider that needs its saved key (see ai-provider-proxy.ts). */
-interface AiProviderFetchRequest {
-  requestId: string;
-  providerId: string;
-  type: string;
-  url: string;
-  method?: 'GET' | 'POST';
-  headers?: Record<string, string>;
-  body?: string;
-}
-
-type AiProviderFetchResult =
-  | { ok: true; status: number; statusText: string; contentType: string | null; body: string }
-  | { ok: false; reason: 'no-key' | 'origin-mismatch' | 'invalid-request' | 'network' | 'aborted'; error: string };
 
 /** Per-account secrets kept in the main-process vault (never renderer disk). */
 /** Write-only: secrets go INTO the vault with the host they're for; nothing
@@ -974,8 +962,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     revert: (providerId: string, writeId: number) => ipcRenderer.invoke('aiSecrets:revert', providerId, writeId),
   },
 
-  // AI provider requests that need a saved key — main adds it (for the
-  // endpoint it was saved for only) and makes the request.
+  // AI provider requests that need a saved key or a Sarv sign-in — main adds
+  // the credential (a saved key for the endpoint it was saved for only, a Sarv
+  // token for Sarv AI endpoints only) and makes the request.
   aiProxy: {
     fetch: (request: AiProviderFetchRequest) => ipcRenderer.invoke('ai:providerFetch', request),
     abort: (requestId: string) => ipcRenderer.invoke('ai:providerFetchAbort', requestId),
@@ -1132,6 +1121,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Pipeline control
     setAIConfig: (config: { type: string; apiKey: string; providerId?: string; model: string; baseUrl?: string; authMethod?: 'apiKey' | 'oauth'; oauthProvider?: 'sarv'; oauthEmail?: string }) =>
       ipcRenderer.invoke('pipeline:setAIConfig', config),
+    // The last AI provider is gone: main stops using its copies now.
+    clearAIConfig: () => ipcRenderer.invoke('pipeline:clearAIConfig'),
     setCategoryLabels: (cfg: { enabled: boolean; folderMode: 'copy' | 'move' }) =>
       ipcRenderer.invoke('pipeline:setCategoryLabels', cfg),
     syncCategoryLabels: (limit?: number) => ipcRenderer.invoke('pipeline:syncCategoryLabels', limit),
@@ -1212,10 +1203,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     listReauthRequired: () => ipcRenderer.invoke('oauth:listReauthRequired'),
     signOut: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
       ipcRenderer.invoke('oauth:signOut', providerId, email),
-    // Sarv only: main refuses every other provider, so a mail provider's token
-    // never reaches the renderer (RENDERER_TOKEN_PROVIDERS in oauth-handlers.ts).
-    getAccessToken: (providerId: 'sarv', email: string) =>
-      ipcRenderer.invoke('oauth:getAccessToken', providerId, email),
+    // One Sarv CAI catalog list for the AI pickers, fetched by main with the
+    // account's token. No access token ever crosses to the renderer (CASA I-2).
+    sarvCatalog: (request: SarvCatalogIpcRequest) => ipcRenderer.invoke('oauth:sarvCatalog', request),
   },
 
   // Extension management operations
@@ -1853,7 +1843,11 @@ export interface ElectronAPI {
   accounts: {
     setActive: (accountId: string) => Promise<{ success: boolean; error?: string }>;
     rekey: (oldId: string, newId: string) => Promise<{ success: boolean; error?: string }>;
-    remove: (accountId: string) => Promise<{ success: boolean; error?: string }>;
+    /**
+     * `revocation` (OAuth accounts only): what happened to the grant at the
+     * provider. Removal itself succeeds whatever it says.
+     */
+    remove: (accountId: string) => Promise<{ success: boolean; error?: string; revocation?: AccountRevocation }>;
     // Durable DB-backed registry. The DTO mirrors the renderer's StoredAccount
     // persisted (non-secret) shape.
     list: () => Promise<{ success: boolean; data?: RegistryAccountDTO[]; error?: string }>;
@@ -2042,6 +2036,7 @@ export interface ElectronAPI {
     setCategoryLabels: (cfg: { enabled: boolean; folderMode: 'copy' | 'move' }) => Promise<{ success: boolean; error?: string }>;
     syncCategoryLabels: (limit?: number) => Promise<{ success: boolean; data?: { accounts: number; labeled: number }; error?: string }>;
     removeCategoryLabels: () => Promise<{ success: boolean; data?: { accounts: number; removed: number }; error?: string }>;
+    clearAIConfig: () => Promise<{ success: boolean }>;
     setAIConfig: (config: {
       type: string;
       /** Empty for a saved key — main fills it in by `providerId`. */
@@ -2080,9 +2075,8 @@ export interface ElectronAPI {
     }>;
     signOut: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
       Promise<{ success: boolean; error?: string }>;
-    // Sarv only — main refuses every other provider (see the bridge above).
-    getAccessToken: (providerId: 'sarv', email: string) =>
-      Promise<{ success: boolean; data?: { accessToken: string }; error?: string }>;
+    /** Plain data: `{ ok, body }` or `{ ok: false, status, code, message }`. */
+    sarvCatalog: (request: SarvCatalogIpcRequest) => Promise<SarvCatalogResult>;
   };
   extensions: {
     list: () => Promise<{ success: boolean; data?: InstalledExtension[]; error?: string }>;

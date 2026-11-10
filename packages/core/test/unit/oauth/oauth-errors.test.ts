@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import {
   isOAuthServerUnreachableError,
   isOAuthTokenError,
+  isSignInRequiredError,
   isTerminalOAuthError,
 } from '../../../src/oauth/oauth-errors';
 import { OAuthError } from '../../../src/oauth/types';
@@ -186,5 +187,34 @@ describe('isOAuthServerUnreachableError', () => {
     expect(isOAuthServerUnreachableError(null)).toBe(false);
     expect(isOAuthServerUnreachableError(undefined)).toBe(false);
     expect(isOAuthServerUnreachableError('TOKEN_REFRESH_NETWORK_ERROR')).toBe(false);
+  });
+});
+
+/**
+ * Decides, for a Sarv AI request or catalog lookup main makes on the
+ * renderer's behalf, whether a failure to get a token means "sign in again"
+ * (permanent) or "try again later" (transient). Too eager tells a user on flaky
+ * Wi-Fi to re-authenticate; too reluctant leaves a signed-out account retrying.
+ */
+describe('isSignInRequiredError', () => {
+  // Breaks: a signed-out / removed account reads as a transient blip, so AI
+  // keeps retrying instead of asking the user to sign in with Sarv again.
+  it('treats a missing account as needing sign-in, by code', () => {
+    expect(isSignInRequiredError(new OAuthError('No OAuth account for sarv:me@sarv.com', 'ACCOUNT_NOT_FOUND'))).toBe(true);
+    expect(isSignInRequiredError(coded('ACCOUNT_NOT_FOUND'))).toBe(true);
+  });
+
+  // Breaks: a revoked refresh token is not recognised as needing sign-in.
+  it('agrees with isTerminalOAuthError for a dead grant', () => {
+    const dead = new OAuthError('Token refresh failed (400): invalid_grant', 'TOKEN_REFRESH_FAILED');
+    expect(isSignInRequiredError(dead)).toBe(true);
+    expect(isSignInRequiredError(coded('EMPTY_STORED_TOKEN'))).toBe(true);
+  });
+
+  // Breaks: a network blip or a suspended refresh signs the user out of AI.
+  it('leaves transient failures retryable', () => {
+    expect(isSignInRequiredError(new OAuthError('Cannot reach OAuth server', 'TOKEN_REFRESH_NETWORK_ERROR'))).toBe(false);
+    expect(isSignInRequiredError(coded('TOKEN_REFRESH_TIMEOUT'))).toBe(false);
+    expect(isSignInRequiredError(null)).toBe(false);
   });
 });

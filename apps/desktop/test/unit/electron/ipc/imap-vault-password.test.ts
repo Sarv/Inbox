@@ -115,6 +115,31 @@ beforeEach(async () => {
   await setAccountSecrets('acct-a', { imap: { password: 'imap-pw', host: 'imap.x.com' } });
 });
 
+// Breaks the user ever being asked. A refusal with nothing on record used to read as
+// "not ready yet": the connect polled for 10 s, then said "Credentials not ready — will
+// retry" for good, while the changelog says the app asks for the password again. The
+// test timeout is shorter than that poll, so a connect that waits fails here too.
+describe('a saved password nothing says the server of', () => {
+  const NO_RECORD = 'Sarv Inbox has no record of which server your saved mailbox password is for, so it was not sent to imap.x.com. Re-enter your password to connect.';
+
+  beforeEach(() => {
+    dbState.blobs.set('secure-credentials', Buffer.from(`PLAIN1:${JSON.stringify({ 'acct-orphan': { imap: { password: 'old-pw' } } })}`));
+    captureRegistryForLegacyBinding();
+  });
+
+  it('asks for the password on imap:connect at once, non-retryably, and never dials', async () => {
+    const res = await h.handlers.get('imap:connect')!({}, SAVED, 'acct-orphan');
+    expect(res).toEqual({ success: false, error: NO_RECORD, retryable: false });
+    expect(h.engine.connect).not.toHaveBeenCalled();
+  });
+
+  it('asks for it on the background path too', async () => {
+    const res = await h.handlers.get('accounts:backgroundSync')!({}, { accountId: 'acct-orphan', config: SAVED });
+    expect(res).toEqual({ success: false, error: NO_RECORD, retryable: false });
+    expect(h.engine.connect).not.toHaveBeenCalled();
+  });
+});
+
 describe('imap:connect', () => {
   // Breaks: a saved account can't reconnect after restart.
   it('injects the saved password for its own host', async () => {

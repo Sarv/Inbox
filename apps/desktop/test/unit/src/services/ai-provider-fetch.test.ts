@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { addProvider, aiProviderFetch, hydrateAiSecrets, loadAISettings, removeProvider } from '../../../../src/services/ai-service';
 
 // The renderer also renders untrusted email HTML, so it never holds a SAVED AI
-// key (CASA H-1). A request that needs one goes through main; a key the user is
-// typing right now, or a Sarv OAuth bearer, is used directly. What breaks if
-// this file fails: saved keys are read back into the renderer; requests that
-// need them stop working; or a cancelled request isn't cancelled in main.
+// key (CASA H-1) or a Sarv access token (CASA I-2 — that token is also the Sarv
+// mailbox's XOAUTH2 credential). A request that needs either goes through main;
+// only a key the user is typing right now is used directly. What breaks if this
+// file fails: saved keys or the Sarv token are read back into the renderer;
+// requests that need them stop working; a cancelled request isn't cancelled in
+// main; or the 429 back-off loses the server's retry-after.
 
 const proxyFetch = vi.fn();
 const proxyAbort = vi.fn();
@@ -23,10 +25,14 @@ beforeEach(() => {
     electronAPI: {
       aiSecrets: { set: vi.fn(async () => ({ success: true, encrypted: true })), delete: vi.fn(), list: vi.fn(async () => ({ success: true, data: [] })) },
       aiProxy: { fetch: proxyFetch, abort: proxyAbort },
-      oauth: { getAccessToken: vi.fn(async () => ({ success: true, data: { accessToken: 'sarv-token' } })) },
+      // Changed deliberately (CASA I-2): no `oauth.getAccessToken` — the
+      // bridge no longer exists, so nothing here can hand the renderer a token.
+      oauth: {},
     },
   };
-  proxyFetch.mockReset().mockResolvedValue({ ok: true, status: 200, statusText: 'OK', contentType: 'application/json', body: '{"a":1}' });
+  // Changed deliberately (CASA I-2): main's result now carries the forwarded
+  // response headers (`headers`), so the default stand-in does too.
+  proxyFetch.mockReset().mockResolvedValue({ ok: true, status: 200, statusText: 'OK', contentType: 'application/json', headers: {}, body: '{"a":1}' });
   proxyAbort.mockReset();
   fetchMock.mockReset().mockResolvedValue(new Response('{}', { status: 200 }));
   vi.stubGlobal('fetch', fetchMock);
@@ -95,11 +101,6 @@ describe('aiProviderFetch — direct requests', () => {
     expect(proxyFetch).not.toHaveBeenCalled();
   });
 
-  it('uses a fresh Sarv OAuth bearer for OAuth providers', async () => {
-    await aiProviderFetch({ id: 's', type: 'sarv', name: 'Sarv', apiKey: '', authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: 'a@sarv.com' }, 'https://jpr1-ai-edge.sarv.com/edge/v1/llm/x', {});
-    expect(fetchMock.mock.calls[0][1].headers).toEqual({ Authorization: 'Bearer sarv-token' });
-  });
-
   // Keyless Custom services are supported; any other keyless provider is a clear error.
   it('sends no auth for a keyless Custom service and refuses a keyless OpenAI one', async () => {
     await aiProviderFetch({ id: 'c', type: 'custom', name: 'Local', apiKey: '' }, 'http://localhost:8080/v1/x', {});
@@ -132,5 +133,70 @@ describe('saved-key bookkeeping', () => {
     expect((globalThis as any).window.electronAPI.aiSecrets.set).toHaveBeenCalledWith('legacy', 'old-plain', 'https://generativelanguage.googleapis.com/v1beta');
     expect(localStorage.getItem('sarvinbox-ai-settings')).not.toContain('old-plain');
     expect(loadAISettings().providers.map((p) => [p.id, p.hasStoredKey, p.apiKey])).toEqual([['legacy', true, ''], ['vaulted', true, '']]);
+  });
+});
+
+describe('aiProviderFetch — Sarv sign-in requests go through main', () => {
+  const sarv = { id: 's', type: 'sarv' as const, name: 'Sarv', apiKey: '', authMethod: 'oauth' as const, oauthProvider: 'sarv' as const, oauthEmail: 'a@sarv.com' };
+  const EDGE = 'https://jpr1-ai-edge.sarv.com/edge/v1/llm/chat/completions';
+
+  // Changed deliberately (CASA I-2): this replaces "uses a fresh Sarv OAuth
+  // bearer for OAuth providers", which asserted the renderer's own fetch
+  // carried `Authorization: Bearer sarv-token`. THE regression now: breaks if
+  // the renderer fetches with a Sarv bearer again, or sends main a token.
+  it('names the account to main and never sends a bearer itself', async () => {
+    const res = await aiProviderFetch(sarv, EDGE, { headers: { 'Content-Type': 'application/json', Authorization: 'Bearer forged' }, body: '{}' });
+    expect(res.status).toBe(200);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const [request] = proxyFetch.mock.calls[0];
+    expect(request).toMatchObject({ providerId: 's', type: 'sarv', url: EDGE, method: 'POST', body: '{}', oauth: { provider: 'sarv', email: 'a@sarv.com' } });
+    // No token anywhere in what crosses to main (main strips the forged header).
+    expect(JSON.stringify(request)).not.toContain('sarv-token');
+  });
+
+  // Breaks: the 429 back-off falls back to blind exponential waits because the
+  // rebuilt Response lost the server's retry-after (and the request id).
+  it('rebuilds the Response with the forwarded retry-after and x-request-id', async () => {
+    proxyFetch.mockResolvedValueOnce({
+      ok: true, status: 429, statusText: 'Too Many Requests', contentType: 'application/json',
+      headers: { 'retry-after': '7', 'x-request-id': 'req-123' }, body: '{"error":"rate_limit_exceeded"}',
+    });
+    const res = await aiProviderFetch(sarv, EDGE, {});
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('7');
+    expect(res.headers.get('x-request-id')).toBe('req-123');
+    expect(res.headers.get('content-type')).toBe('application/json');
+  });
+
+  // Breaks: the renderer's sign-in-needed vs transient behaviour changes. Both
+  // surface as a plain Error carrying main's message — exactly what the old
+  // renderer-side token fetch threw — not as a network TypeError or an abort.
+  it.each([
+    ['sign-in-required', 'Token refresh failed (400): invalid_grant'],
+    ['token-unavailable', 'Cannot reach OAuth server [ENOTFOUND] at https://oauth.sarv.com/api/oauth/token'],
+    ['oauth-refused', 'Only a Sarv sign-in can authenticate AI requests, and only to Sarv AI — not https://evil.example.'],
+  ])('reports %s as a plain Error with main\'s message', async (reason, error) => {
+    proxyFetch.mockResolvedValueOnce({ ok: false, reason, error });
+    const err = await aiProviderFetch(sarv, EDGE, {}).catch((e) => e);
+    expect(err.constructor).toBe(Error);
+    expect(err.message).toBe(error);
+  });
+
+  // Breaks: an OAuth provider missing its account is sent to main half-formed.
+  it('refuses an OAuth provider with no account before asking main', async () => {
+    await expect(aiProviderFetch({ ...sarv, oauthEmail: undefined }, EDGE, {})).rejects.toThrow('oauthProvider/oauthEmail missing');
+    expect(proxyFetch).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a cancelled Sarv request keeps running (and spending) in main.
+  it('forwards an abort to main for a Sarv request too', async () => {
+    let settle!: (v: unknown) => void;
+    proxyFetch.mockReturnValueOnce(new Promise((resolve) => { settle = resolve; }));
+    const controller = new AbortController();
+    const pending = aiProviderFetch(sarv, EDGE, { signal: controller.signal });
+    controller.abort();
+    expect(proxyAbort).toHaveBeenCalledWith(proxyFetch.mock.calls[0][0].requestId);
+    settle({ ok: false, reason: 'aborted', error: 'cancelled' });
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
 });

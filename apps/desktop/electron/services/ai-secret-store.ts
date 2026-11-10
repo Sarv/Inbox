@@ -23,7 +23,7 @@
 import { promises as fs, renameSync } from 'fs';
 import { join } from 'path';
 
-import { aiEndpointOrigin, createLogger } from '@sarvinbox/core';
+import { aiEndpointOrigin, checkAIEndpoint, createLogger } from '@sarvinbox/core';
 import { app } from 'electron';
 
 import { getBlob, setBlob } from './core-db';
@@ -140,10 +140,16 @@ export async function listAiSecretIds(): Promise<string[]> {
 /**
  * Save (or replace) a provider's key, bound to the origin of `baseUrl` — the
  * endpoint the user configured it for. An empty key deletes the entry.
+ *
+ * @throws when `baseUrl` is given but is not an address main may call
+ *   (`checkAIEndpoint`, e.g. plain HTTP to another computer). Saved unbound
+ *   instead, the key would bind to whichever address first asked for it.
  */
 export async function setAiSecret(providerId: string, apiKey: string, baseUrl?: string): Promise<number | undefined> {
   if (!providerId) return undefined;
-  const origin = aiEndpointOrigin(baseUrl) ?? undefined;
+  const check = baseUrl ? checkAIEndpoint(baseUrl) : undefined;
+  if (apiKey && check && !check.ok) throw new Error(check.message);
+  const origin = check?.ok ? check.origin : undefined;
   let writeId: number | undefined;
   await writeVault((v) => {
     writeId = ++writeSeq;
@@ -206,6 +212,38 @@ export async function resolveAiKey(providerId: string, url: string | undefined):
   });
   logger.info(`[AiSecrets] bound the saved key for ${providerId} to ${origin} (first use)`);
   return { status: 'found', key };
+}
+
+/**
+ * Bind a pre-binding (unbound) key to the origin of `url` WITHOUT handing it
+ * out. For the provider's own address when main refuses to send there
+ * (`prepareAIProviderConfig`: plain HTTP to another computer, CASA I-7): that
+ * address can no longer bind the key by using it, and an unbound key binds to
+ * whichever address asks first, so a key saved for a LAN server would go to
+ * the first HTTPS address a compromised renderer named (the CASA H-1 leak).
+ * Pinned, it is refused everywhere until the user enters it again for an HTTPS
+ * address. A key that is already bound is left alone.
+ */
+export async function pinAiSecretOrigin(providerId: string, url: string): Promise<void> {
+  if (!providerId) return;
+  let origin: string;
+  try {
+    const parsed = new URL(url.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+    origin = parsed.origin;
+  } catch {
+    return;
+  }
+  let pinned = false;
+  await writeVault((v) => {
+    const current = v[providerId];
+    const key = keyOf(current);
+    if (key && !originOf(current)) {
+      v[providerId] = { key, origin };
+      pinned = true;
+    }
+  });
+  if (pinned) logger.info(`[AiSecrets] pinned the saved key for ${providerId} to its refused address ${origin}`);
 }
 
 /** Forget a provider's key (on provider removal). */

@@ -10,7 +10,7 @@ import { requireAccountStorage, requireTargetAccountId, resolveNamedOrActiveAcco
 import { readRegistryAccounts } from './accounts-registry';
 import { attachImapBearer, getAccessTokenForMailHost } from './oauth-service';
 import {
-  hostMismatchMessage, narrowSavedTransport, resolveVaultPassword, vaultIdCandidates,
+  narrowSavedTransport, resolveVaultPassword, vaultIdCandidates, vaultRefusalMessage,
   withSavedPassword, type VaultPasswordFound,
 } from './vault-credentials';
 
@@ -45,8 +45,9 @@ async function credentials(accountId: string, signal: AbortSignal): Promise<{ co
     const vaulted = await waitForAbortableOperation(resolveVaultPassword(
       vaultIdCandidates(accountId, config.username, config.host), 'imap', config.host,
     ), signal);
-    if (vaulted.status === 'host-mismatch') throw new Error(hostMismatchMessage('imap', config.host, vaulted.boundHost));
-    if (vaulted.status === 'none') throw new Error('This account needs its password or sign-in refreshed.');
+    if (vaulted.status !== 'found') {
+      throw new Error(vaultRefusalMessage('imap', config.host, vaulted) ?? 'This account needs its password or sign-in refreshed.');
+    }
     const applied = withSavedPassword(config, 'imap', vaulted);
     if ('refusal' in applied) throw new Error(applied.refusal);
     config = applied.config;

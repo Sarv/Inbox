@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { askAiConsent, getAiConsent, setAiConsent } from '../../../../src/services/ai-consent';
+import { askAiConsent, getAiConsent, providerAIDisclosure, SARV_AI_DISCLOSURE, setAiConsent } from '../../../../src/services/ai-consent';
 import { registerSarvProvider } from '../../../../src/services/sarv-llm-provider';
 import { useConfirmStore } from '../../../../src/store/confirm-service';
 
@@ -80,5 +80,32 @@ describe('registerSarvProvider', () => {
       zoneCode: 'jpr1', baseUrl: 'https://jpr1.ai.sarv.com', email: 'me@sarv.com',
     } as any);
     expect(getAiConsent()).toBe('granted');
+  });
+});
+
+// CASA audit I-7: the consent the user ticks for a non-Sarv provider must say
+// what actually happens — connecting turns sorting on and new mail goes to the
+// provider as it arrives — just as Sarv's does. For a Custom provider, whose
+// name the user typed, it must name the server the mail goes to.
+describe('providerAIDisclosure', () => {
+  // Breaks: the OpenAI/Gemini consent no longer says mail is sent as it arrives.
+  it('says new messages go to the named provider as they arrive, like the Sarv text', () => {
+    const text = providerAIDisclosure('OpenAI');
+    expect(text).toContain('sending new messages');
+    expect(text).toContain('to OpenAI as they arrive, for every connected account');
+    expect(text).toContain("Your provider's terms and data policy apply.");
+    expect(SARV_AI_DISCLOSURE).toContain('as they arrive, for every connected account');
+  });
+
+  // Breaks: a Custom provider called e.g. "Company AI" hides that mail goes to some other host.
+  it('names the server a custom provider sends to', () => {
+    expect(providerAIDisclosure('Company AI', 'https://llm.example.net:8443/v1')).toContain('to Company AI (llm.example.net:8443) as they arrive');
+    expect(providerAIDisclosure('Local model', 'http://localhost:11434/v1')).toContain('to Local model (localhost:11434) as they arrive');
+  });
+
+  // Breaks: a repeated or garbled destination when the name IS the host, or the address can't be parsed.
+  it('names the destination once when the name is the host, and falls back to the name for a bad address', () => {
+    expect(providerAIDisclosure('llm.example.net', 'https://llm.example.net/v1')).toContain('to llm.example.net as they arrive');
+    expect(providerAIDisclosure('My AI', 'not a url')).toContain('to My AI as they arrive');
   });
 });

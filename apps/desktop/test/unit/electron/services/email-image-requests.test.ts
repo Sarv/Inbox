@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  cookielessRequestHeaders,
   createRedirectedRequestTracker,
   installEmailImageRequestHandlers,
   PROXY_URL_FILTERS,
@@ -260,6 +261,84 @@ describe('strippedResponseHeaders', () => {
   });
 });
 
+// CASA 6.6.1. What breaks: one session serves every mailbox, so a `SameSite=None`
+// cookie set by a pixel in one message comes back on the next message from any
+// sender using that host, in any account. Measured on Electron 44 with these hooks
+// in a scratch harness against a real server: a mail frame's <img> sent
+// `seeded=1; sec_e1=1` before this rule and no Cookie header after it.
+describe('cookielessRequestHeaders', () => {
+  const image = (requestHeaders?: Record<string, string>) => ({
+    url: 'https://tracker.example.com/pixel.png',
+    resourceType: 'image',
+    requestHeaders,
+  });
+
+  it('removes the cookie from an image request and keeps every other header', () => {
+    expect(cookielessRequestHeaders(image({ Cookie: 'trk=1', Accept: 'image/*', 'User-Agent': 'x' })))
+      .toEqual({ Accept: 'image/*', 'User-Agent': 'x' });
+  });
+
+  // Breaks if a header spelled differently slips through.
+  it.each(['Cookie', 'cookie', 'COOKIE'])('matches %s', (name) => {
+    expect(cookielessRequestHeaders(image({ [name]: 'trk=1' }))).toEqual({});
+  });
+
+  // Mail can also reach the network as media or font if a frame's CSP ever allows
+  // it, so the rule follows the same list as the response side.
+  it.each(['media', 'font'])('covers a %s request too', (resourceType) => {
+    expect(cookielessRequestHeaders({ ...image({ Cookie: 'trk=1' }), resourceType })).toEqual({});
+  });
+
+  // Breaks the app's own traffic: a document, script or XHR keeps its cookies.
+  it.each(['mainFrame', 'subFrame', 'xhr', 'script', 'stylesheet', 'other'])('leaves a %s request alone', (resourceType) => {
+    expect(cookielessRequestHeaders({ ...image({ Cookie: 'keep=1' }), resourceType })).toBeNull();
+  });
+
+  // Null means "leave it": no rebuilt header map for traffic with nothing to remove.
+  it('returns null when there is no cookie', () => {
+    expect(cookielessRequestHeaders(image({ Accept: 'image/*' }))).toBeNull();
+  });
+
+  // Electron omits both fields on some requests, and a throw inside the hook fails
+  // the request outright.
+  it('survives details with no resource type and no headers', () => {
+    expect(cookielessRequestHeaders({ url: 'https://cdn.example.com/a.png' })).toBeNull();
+    expect(cookielessRequestHeaders(image())).toBeNull();
+  });
+
+  // Breaks if the hook mutated Electron's own details object for a later listener.
+  it('does not change the headers it was given', () => {
+    const requestHeaders = { Cookie: 'trk=1' };
+    cookielessRequestHeaders(image(requestHeaders));
+    expect(requestHeaders).toEqual({ Cookie: 'trk=1' });
+  });
+});
+
+describe('strippedResponseHeaders and Set-Cookie', () => {
+  // Breaks tracking protection on the way in: the jar would keep filling even though
+  // nothing is sent back. Chromium saves cookies from the headers this hook returns.
+  it.each(['Set-Cookie', 'set-cookie', 'SET-COOKIE', 'Set-Cookie2'])('removes %s from an image response', (name) => {
+    expect(
+      strippedResponseHeaders({
+        url: 'https://tracker.example.com/pixel.png',
+        resourceType: 'image',
+        responseHeaders: { [name]: ['trk=1; Secure; SameSite=None'], 'Content-Type': ['image/png'] },
+      }),
+    ).toEqual({ 'Content-Type': ['image/png'] });
+  });
+
+  // Breaks the app's own traffic: a document or XHR response keeps its cookies.
+  it.each(['mainFrame', 'xhr', 'other'])('leaves Set-Cookie on a %s response', (resourceType) => {
+    expect(
+      strippedResponseHeaders({
+        url: 'https://api.example.com/',
+        resourceType,
+        responseHeaders: { 'Set-Cookie': ['session=1'] },
+      }),
+    ).toBeNull();
+  });
+});
+
 describe('installEmailImageRequestHandlers', () => {
   /** A webRequest double that records its listeners and lets tests drive them. */
   function fakeWebRequest() {
@@ -347,6 +426,53 @@ describe('installEmailImageRequestHandlers', () => {
         responseHeaders: untouched,
       }),
     ).toEqual({ cancel: false, responseHeaders: untouched });
+  });
+
+  // Breaks if the cookie rule and the referer rule overwrite each other: only one
+  // answer reaches Chromium for a request, and it has to carry both.
+  describe('the one onBeforeSendHeaders answer', () => {
+    const send = (details: any) => {
+      const webRequest = fakeWebRequest();
+      installEmailImageRequestHandlers(webRequest as any);
+      return invoke(webRequest, 'onBeforeSendHeaders', details);
+    };
+    const IMAGE = 'https://tracker.example.com/pixel.png';
+
+    it('removes the cookie AND adds the referer on an image', () => {
+      expect(send({ url: IMAGE, resourceType: 'image', requestHeaders: { Cookie: 'trk=1', Accept: 'image/*' } }))
+        .toEqual({ cancel: false, requestHeaders: { Accept: 'image/*', Referer: 'https://tracker.example.com/' } });
+    });
+
+    // refererHeadersFor answers null here, which must not bring the cookie back.
+    it('still removes the cookie when the image already has a referer', () => {
+      expect(send({ url: IMAGE, resourceType: 'image', requestHeaders: { Cookie: 'trk=1', Referer: 'https://a.example/' } }))
+        .toEqual({ cancel: false, requestHeaders: { Referer: 'https://a.example/' } });
+    });
+
+    // A font gets no referer of its own, and the cookie must go regardless.
+    it('removes the cookie from a font, adding nothing', () => {
+      expect(send({ url: IMAGE, resourceType: 'font', requestHeaders: { Cookie: 'trk=1' } }))
+        .toEqual({ cancel: false, requestHeaders: {} });
+    });
+
+    // Breaks the app's own traffic, and the hook is on every request in the session.
+    it('sends a non-content request exactly as it was', () => {
+      expect(send({ url: IMAGE, resourceType: 'xhr', requestHeaders: { Cookie: 'keep=1' } })).toEqual({ cancel: false });
+    });
+  });
+
+  // Breaks on a tracker redirector: every hop is its own response, and a 302 that
+  // set a cookie put it in the jar before this rule (measured: `redir.test`).
+  it('removes Set-Cookie from a redirect hop of an image', () => {
+    const webRequest = fakeWebRequest();
+    installEmailImageRequestHandlers(webRequest as any);
+    expect(
+      invoke(webRequest, 'onHeadersReceived', {
+        url: 'https://redirector.example.com/r',
+        resourceType: 'image',
+        responseHeaders: { Location: ['https://cdn.example.com/a.png'], 'Set-Cookie': ['hop=1'] },
+      }),
+    ).toEqual({ cancel: false, responseHeaders: { Location: ['https://cdn.example.com/a.png'] } });
   });
 
   // Regression: the hooks are independent. One unsupported API on some platform

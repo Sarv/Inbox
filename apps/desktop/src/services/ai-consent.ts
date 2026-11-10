@@ -7,6 +7,8 @@
 // an AI service. Nothing is sent to an AI provider until one is registered, so
 // gating the Sarv registration on this answer gates the data flow.
 
+import { aiEndpointHost } from '@sarvinbox/core/ai-provider-auth';
+
 import { requestConfirm } from '../store/confirm-service';
 
 const KEY = 'sarvinbox-ai-consent';
@@ -34,6 +36,20 @@ export const SARV_AI_DISCLOSURE =
   'Sarv AI sorts your inbox, drafts replies and pulls out conversations by sending new messages — sender, ' +
   'recipients, subject and text — to Sarv AI as they arrive, for every connected account. Sarv does not use ' +
   'your mail to train AI models. You can turn this off at any time in AI → Email Agent.';
+
+/**
+ * The disclosure shown when the user connects any other provider. Like Sarv's,
+ * it says that new messages go to the provider as they arrive — connecting a
+ * provider turns sorting on. For a custom provider, whose name the user typed,
+ * it also names the server the mail actually goes to (`endpoint`'s host).
+ */
+export function providerAIDisclosure(name: string, endpoint?: string): string {
+  const host = aiEndpointHost(endpoint);
+  const destination = host && host !== name ? `${name} (${host})` : name;
+  return 'AI sorts your inbox, drafts replies and pulls out conversations by sending new messages — sender, ' +
+    `recipients, subject and text — to ${destination} as they arrive, for every connected account. Your ` +
+    "provider's terms and data policy apply. You can turn this off at any time in AI → Email Agent.";
+}
 
 /**
  * Ask once. Resolves to the recorded answer; "Not now", Escape and a backdrop

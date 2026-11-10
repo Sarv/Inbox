@@ -60,8 +60,12 @@ describe('resolveRecommendedSarvDraft', () => {
       ok: true,
       draft: expect.objectContaining({ modelCode: 'gpt-oss-120b', email: account.email, name: 'Sarv · Sarv LLM · Sarv Mati' }),
     });
-    expect(deps.listCaiProviders).toHaveBeenCalledWith(account.apiBaseUrl, account.email, 'jpr1');
-    expect(deps.listCaiModels).toHaveBeenCalledWith(account.apiBaseUrl, account.email, 'sarv_partners', 'jpr1');
+    // Changed deliberately (CASA I-2): the catalog calls no longer take a base
+    // URL — main fetches from its own configured Sarv API, never a
+    // renderer-chosen one.
+    expect(deps.loadZoneSelection).toHaveBeenCalledWith(account.email);
+    expect(deps.listCaiProviders).toHaveBeenCalledWith(account.email, 'jpr1');
+    expect(deps.listCaiModels).toHaveBeenCalledWith(account.email, 'sarv_partners', 'jpr1');
   });
 
   it('falls back to the env edge URL when the account has no zone', async () => {

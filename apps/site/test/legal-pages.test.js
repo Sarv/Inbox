@@ -108,6 +108,25 @@ describe('the real pages', () => {
     expect(html).toContain('including the Limited Use requirements');
   });
 
+  // CASA audit I-6/I-7: the policy must match what the app enforces. Breaks if
+  // an edit drops that connecting a provider sends new mail as it arrives, the
+  // HTTPS rule for custom AI addresses (and its on-your-computer exception in
+  // §7's TLS sentence), or what removing a Microsoft or Sarv account does.
+  it('the privacy policy states the AI transport rule and what account removal does', () => {
+    // Line wrapping in the Markdown is not content.
+    const text = renderLegalMarkdown(read('privacy-policy.md')).html.replace(/\s+/g, ' ');
+    expect(text).toContain('connecting a provider turns AI sorting on: from then on, new mail is sent to that provider as it arrives');
+    expect(text).toContain('address must use HTTPS, unless the server runs on your own computer');
+    // Both plain-HTTP exceptions are named: a statement that only one exists
+    // would be false while password accounts can choose no encryption.
+    expect(text).toContain('apart from two you can choose yourself: an AI model server running on your own computer');
+    expect(text).toContain('connection security you set to None (not recommended)');
+    expect(text).toContain('Accounts you sign in to (Google, Microsoft, Sarv) always use TLS');
+    expect(text).toContain('Microsoft has no way for an app to revoke its own access');
+    expect(text).toContain('for Google and Sarv accounts, revokes the app');
+    expect(text).toContain('Removing a Sarv account also stops Sarv AI if it uses that same sign-in');
+  });
+
   // The consent screen links these pages and Google's review reads them: a
   // [CONFIRM] placeholder would publish them as a noindexed Draft, which fails it.
   it.each(Object.entries(LEGAL_PAGES))('%s is published as final text, not a draft', (name, file) => {

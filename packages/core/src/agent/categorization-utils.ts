@@ -888,6 +888,9 @@ async function callOpenAICompatibleAPI(
           max_completion_tokens: outputTokenLimit(config),
           ...buildAIChatRequestOptions(config),
         }),
+        // A redirect would carry the bearer and the mail text to an address
+        // nobody checked (and could downgrade it to plain HTTP).
+        redirect: 'error',
         signal: timeoutCtl.signal,
       });
     };
@@ -942,6 +945,8 @@ async function callGeminiAPI(
         thinkingConfig: { thinkingBudget: 0 },
       },
     }),
+    // Same as the OpenAI-compatible call: the key and mail stay on this address.
+    redirect: 'error',
     signal,
   });
 

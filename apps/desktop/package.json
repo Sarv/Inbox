@@ -96,7 +96,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.1.1",
     "autoprefixer": "^10.6.1",
-    "electron": "^44.9.1",
+    "electron": "44.9.3",
     "electron-builder": "^26.17.0",
     "happy-dom": "^21.0.4",
     "parse5": "^8.0.1",
@@ -110,7 +110,6 @@
   "build": {
     "appId": "com.sarv.sarvinbox",
     "productName": "Sarv Inbox",
-    "electronVersion": "43.2.0",
     "publish": [
       {
         "provider": "github",

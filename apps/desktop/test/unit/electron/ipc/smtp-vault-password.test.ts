@@ -106,6 +106,19 @@ describe('smtp:connect', () => {
     expect(h.connect).not.toHaveBeenCalled();
   });
 
+  // Breaks the user being told what to do: "set up sending" is wrong for a password
+  // that IS saved, and the app must not send it to a server nothing vouches for.
+  it('asks for the password when nothing says which server a saved one is for', async () => {
+    dbState.blobs.set('secure-credentials', Buffer.from(`PLAIN1:${JSON.stringify({ 'acct-orphan': { smtp: { password: 'old-pw' } } })}`));
+    captureRegistryForLegacyBinding();
+    const res = await h.handlers.get('smtp:connect')!({}, SAVED, 'acct-orphan');
+    expect(res).toEqual({
+      success: false,
+      error: 'Sarv Inbox has no record of which server your saved sending password is for, so it was not sent to smtp.x.com. Re-enter your password to connect.',
+    });
+    expect(h.connect).not.toHaveBeenCalled();
+  });
+
   // CASA M-5: the sending server would not encrypt a STARTTLS account. Breaks:
   // the window cannot tell this from any other failure, so startup and lazy
   // send swallow it and mail waits in the Outbox with no reason shown.

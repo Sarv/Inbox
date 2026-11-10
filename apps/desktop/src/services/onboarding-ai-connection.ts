@@ -1,3 +1,5 @@
+import { checkAIEndpoint, type AIEndpointRefusal } from '@sarvinbox/core/ai-provider-auth';
+
 import { aiFailureReason, aiProviderFetch, PROVIDER_CONFIGS, type AIProvider, type AIProviderType } from './ai-service';
 import {
   buildSarvEdgeBaseUrl, listCaiModels, listCaiProviders, loadZoneSelection, pickRecommendedModel, pickRecommendedProvider,
@@ -49,18 +51,22 @@ export function makeAIConnection(type: AIProviderType): OnboardingAIConnection {
   };
 }
 
-/** Endpoint rules apply before any credentials leave the device. */
+const ENDPOINT_FIELD_ERRORS: Record<AIEndpointRefusal, string> = {
+  invalid: 'Enter a complete API endpoint URL.',
+  insecure: 'Use an HTTPS API endpoint. HTTP is supported only for a local model server.',
+  credentials: 'The API endpoint must not include a password, query string or fragment.',
+};
+
+/**
+ * Endpoint rules apply before any credentials leave the device: the shared
+ * transport rule (`checkAIEndpoint` — the one main enforces too), plus no
+ * query string or fragment, since the request paths are appended to it.
+ */
 export function normalizeAIEndpoint(endpoint: string): string {
-  let url: URL;
-  try { url = new URL(endpoint.trim()); } catch { throw new Error('Enter a complete API endpoint URL.'); }
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
-    throw new Error('Use an HTTPS API endpoint. HTTP is supported only for a local model server.');
-  }
-  if (url.username || url.password || url.search || url.hash) {
-    throw new Error('The API endpoint must not include a password, query string or fragment.');
-  }
-  return url.toString().replace(/\/+$/, '');
+  const check = checkAIEndpoint(endpoint);
+  if (!check.ok) throw new Error(ENDPOINT_FIELD_ERRORS[check.reason]);
+  if (check.url.search || check.url.hash) throw new Error(ENDPOINT_FIELD_ERRORS.credentials);
+  return check.url.toString().replace(/\/+$/, '');
 }
 
 export function providerFromConnection(connection: OnboardingAIConnection): AIProvider {
@@ -168,7 +174,7 @@ export async function loadSarvAIConnection(
   const account = selectedEmail ? accounts.find((entry) => entry.email.toLowerCase() === selectedEmail.toLowerCase()) : accounts[0];
   if (!account) throw new Error('Sign in with Sarv to connect AI.');
   if (!config?.apiBaseUrl || !config.llmBaseUrl) throw new Error('Sarv AI is unavailable in this app configuration.');
-  const zoneSelection = await loadZoneSelection(config.apiBaseUrl, account.email);
+  const zoneSelection = await loadZoneSelection(account.email);
   signal.throwIfAborted();
   const saved = !previous.sarv && previous.savedSarvProvider?.oauthEmail?.toLowerCase() === account.email.toLowerCase()
     ? previous.savedSarvProvider : undefined;
@@ -187,7 +193,7 @@ export async function loadSarvAIConnection(
     ?? saved?.sarvZoneCode
     ?? savedZone?.code
     ?? (saved ? '' : zoneSelection.zoneCode);
-  const providers = await listCaiProviders(config.apiBaseUrl, account.email, zoneCode);
+  const providers = await listCaiProviders(account.email, zoneCode);
   signal.throwIfAborted();
   if (!providers.length) throw new Error('No AI backends are available on your Sarv account.');
   const protectedBackend = previous.sarv?.email === account.email ? previous.sarv.providerCode : saved?.sarvProviderCode;
@@ -204,7 +210,7 @@ export async function loadSarvAIConnection(
     let restored: { code: string; models: SarvLLMModel[] } | undefined;
     let available: { code: string; models: SarvLLMModel[] } | undefined;
     for (const provider of ordered) {
-      const catalog = await listCaiModels(config.apiBaseUrl, account.email, provider.code, zoneCode);
+      const catalog = await listCaiModels(account.email, provider.code, zoneCode);
       signal.throwIfAborted();
       if (!available && catalog.length) available = { code: provider.code, models: catalog };
       if (!catalog.some((model) => model.code === saved.model)) continue;
@@ -215,7 +221,7 @@ export async function loadSarvAIConnection(
     if (!result) throw new Error('No models are available for this Sarv backend. Choose another backend or try again.');
     providerCode = result.code;
     models = result.models;
-  } else models = await listCaiModels(config.apiBaseUrl, account.email, providerCode, zoneCode);
+  } else models = await listCaiModels(account.email, providerCode, zoneCode);
   signal.throwIfAborted();
   if (!models.length) throw new Error('No models are available for this Sarv backend. Choose another backend or try again.');
   const sarv: SarvConnection = {

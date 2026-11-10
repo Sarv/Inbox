@@ -35,7 +35,7 @@ import { createLogger } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
 
-import { escapeDbKey, isExistingPlaintextDb } from './db-encryption';
+import { encryptPlaintextDb, isExistingPlaintextDb, pinDbCipher } from './db-encryption';
 
 const log = createLogger('SharedContacts');
 
@@ -247,14 +247,17 @@ export function attachSharedContacts(
   // interpolated, so it cannot terminate the string. ATTACH creates the file
   // when it does not exist yet, so the first account to open is also the one
   // that brings the directory into being.
+  //
+  // ATTACH takes its encryption settings from the connection, not from the
+  // file, so they are pinned here too: this connection may have been keyed by
+  // anything, and the directory has to open the same way from all of them.
+  if (key) pinDbCipher(db);
   const attachKey = key && !legacyPlaintext ? key : '';
   db.prepare(`ATTACH DATABASE ? AS ${SHARED_SCHEMA} KEY ?`).run(path, attachKey);
 
   if (legacyPlaintext) {
-    // Leave WAL first: rekey rewrites every page, and doing that under a
-    // rollback journal is the recoverable path. WAL is restored below.
-    db.pragma(`${SHARED_SCHEMA}.journal_mode = DELETE`);
-    db.pragma(`${SHARED_SCHEMA}.rekey='${escapeDbKey(key!)}'`);
+    // WAL is restored below.
+    encryptPlaintextDb(db, key!, SHARED_SCHEMA);
     log.info(`[SharedContacts] migrated plaintext directory to encrypted: ${path}`);
   }
 

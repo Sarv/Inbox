@@ -84,7 +84,7 @@ vi.mock('../../../../electron/services/attachment-cache', () => ({
 }));
 vi.mock('../../../../electron/services/email-content-cookies', () => ({
   // The real one never throws; it reports failure as false.
-  clearEmailContentCookies: async () => { h.calls.push('cookies-clear'); return !h.cookiesFail; },
+  clearEmailContentData: async () => { h.calls.push('content-clear'); return { cookies: !h.cookiesFail, cache: !h.cookiesFail }; },
 }));
 vi.mock('../../../../electron/services/antivirus-scan-service', () => ({ peekAntivirusScanService: () => null }));
 vi.mock('../../../../electron/services/oauth-refresh-scheduler', () => ({ signOutOAuthAccount: async () => {} }));
@@ -133,15 +133,17 @@ describe('accounts:remove — cached attachments', () => {
 
     await expect(remove('a2')).resolves.toEqual({ success: true });
 
-    // 'cookies-clear' added deliberately (CASA 6.6.1): removal now also clears
-    // the email-content cookie jar, after the data is gone.
+    // 'content-clear' added deliberately (CASA 6.6.1): removal now also clears
+    // the email-content cookie jar and HTTP cache, after the data is gone. Moved
+    // deliberately to last: a session store that hangs must not hold the sign-out
+    // and AI revalidation (accounts-remove-signout.test.ts).
     expect(h.calls).toEqual([
       'wipe:a2',
       'registry-remove:a2',
       'db-sweep:a1,a3',
       'attachments-sweep:a1,a3:stale=0',
-      'cookies-clear',
       'ai-revalidate',
+      'content-clear',
     ]);
     expect(h.calls).not.toContain('attachments-remove-all');
   });
@@ -219,21 +221,21 @@ describe('accounts:remove — cached attachments', () => {
   });
 });
 
-// CASA 6.6.1. Remote images in mail set cookies in the session email renders
-// in; nothing else uses that jar, and it cannot be split by account.
-describe('accounts:remove — email-content cookies', () => {
-  // Breaks: a removed mailbox's tracker cookies stay on disk because others
-  // remain (multi-account), or because it was the last one.
+// CASA 6.6.1. Remote images in mail leave cookies and cached bytes in the session
+// email renders in; nothing else needs them, and they cannot be split by account.
+describe('accounts:remove — email-content cookies and cache', () => {
+  // Breaks: a removed mailbox's tracker cookies or images stay on disk because
+  // others remain (multi-account), or because it was the last one.
   it.each([
     ['a non-last account', [password('a1'), password('a2')]],
     ['the last account', [password('a1')]],
-  ])('clears the cookie jar when %s is removed', async (_label, registry) => {
+  ])('clears the jar and cache when %s is removed', async (_label, registry) => {
     h.registry = registry;
     await expect(remove('a1')).resolves.toEqual({ success: true });
-    expect(h.calls.filter((c) => c === 'cookies-clear')).toHaveLength(1);
+    expect(h.calls.filter((c) => c === 'content-clear')).toHaveLength(1);
   });
 
-  // Cookies are not keyed by the registry, so an unreadable registry (which
+  // Neither is keyed by the registry, so an unreadable registry (which
   // rightly stops every keyed delete) is no reason to keep them; nor is an
   // idempotent re-run of an already-finished removal.
   it('clears them even when the registry is unreadable, and on a re-run', async () => {
@@ -241,16 +243,16 @@ describe('accounts:remove — email-content cookies', () => {
     h.readFails = [true, true];
     await expect(remove('a1')).resolves.toEqual({ success: true });
     await expect(remove('a1')).resolves.toEqual({ success: true });
-    expect(h.calls.filter((c) => c === 'cookies-clear')).toHaveLength(2);
+    expect(h.calls.filter((c) => c === 'content-clear')).toHaveLength(2);
   });
 
-  // Breaks: a cookie store that cannot be cleared fails the removal the user
+  // Breaks: a jar or cache that cannot be cleared fails the removal the user
   // asked for, or skips the steps after it.
   it('still succeeds, and still revalidates AI, when the clear fails', async () => {
     h.registry = [password('a1'), password('a2')];
     h.cookiesFail = true;
     await expect(remove('a1')).resolves.toEqual({ success: true });
-    expect(h.calls.slice(-2)).toEqual(['cookies-clear', 'ai-revalidate']);
+    expect(h.calls.slice(-2)).toEqual(['ai-revalidate', 'content-clear']);
   });
 
   // The data goes first: the clear must never run for a removal that failed.

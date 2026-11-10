@@ -177,6 +177,33 @@ describe('attachOAuthBearer — AI provider configs', () => {
     expect(h.warn).toHaveBeenCalledTimes(1);
   });
 
+  // Breaks: a URL carrying credentials gets the Sarv token (and the log line
+  // writes the credentials or the renderer's path into app.log).
+  it('refuses a credentialed Sarv URL and logs only its origin', () => {
+    const cfg = attachOAuthBearer({ ...sarvConfig, baseUrl: 'https://user:secret@jpr1-ai-edge.sarv.com/edge/v1/llm?x=1' }) as { resolveBearer?: unknown };
+    expect(cfg.resolveBearer).toBeUndefined();
+    expect(h.getAccount).not.toHaveBeenCalled();
+    const line = h.warn.mock.calls[0][0] as string;
+    expect(line).toContain('Refused a sarv token for AI endpoint https://jpr1-ai-edge.sarv.com');
+    expect(line).not.toMatch(/secret|user|edge\/v1|x=1/);
+  });
+
+  // Breaks the categorizer's 401 self-heal: the shared resolver must forward
+  // forceRefresh, so a refused token is replaced instead of re-sent.
+  it('forwards forceRefresh to a real token refresh', async () => {
+    const tokenEndpoint = vi.fn(async () => new Response(JSON.stringify({ access_token: 'refreshed-token', expires_in: 900, token_type: 'Bearer' }), { status: 200 }));
+    vi.stubGlobal('fetch', tokenEndpoint);
+    try {
+      const cfg = attachOAuthBearer(sarvConfig) as typeof sarvConfig & { resolveBearer: (force?: boolean) => Promise<string> };
+      await expect(cfg.resolveBearer()).resolves.toBe('sarv-token');
+      expect(tokenEndpoint).not.toHaveBeenCalled();
+      await expect(cfg.resolveBearer(true)).resolves.toBe('refreshed-token');
+      expect(tokenEndpoint).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   // Breaks: API-key providers (OpenAI, Gemini, custom) get wrapped or logged.
   it('passes API-key configs through untouched and silently', () => {
     const apiKey = { type: 'openai', model: 'gpt', apiKey: 'sk-x', baseUrl: 'https://api.openai.com/v1' };
