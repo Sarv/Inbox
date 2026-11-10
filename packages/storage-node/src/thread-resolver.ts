@@ -22,7 +22,7 @@
 // child has already been threaded standalone, the child's thread_id is
 // merged into the parent's via reattachOrphans().
 
-import { normalizeSubject, createLogger, createLoopYielder, hasReplyPrefix, yieldToEventLoop } from '@sarvinbox/core';
+import { angleBracketed, normalizeSubject, createLogger, createLoopYielder, hasReplyPrefix, yieldToEventLoop } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
 import { prepared } from './statement-cache';
@@ -218,10 +218,9 @@ function parseAddressList(list: string | null | undefined): string[] {
     .split(',')
     .map(s => s.trim())
     .filter(Boolean)
-    .map(entry => {
-      const m = entry.match(/<([^>]+)>/);
-      return (m ? m[1] : entry).toLowerCase();
-    });
+    // angleBracketed, not /<([^>]+)>/: the regex rescanned to the end from
+    // every `<`, quadratic on an entry of many `<` with no `>`.
+    .map(entry => (angleBracketed(entry) ?? entry).toLowerCase());
 }
 
 function participants(email: Pick<ResolverEmail, 'fromAddress' | 'toAddress' | 'ccAddress'>): Set<string> {
