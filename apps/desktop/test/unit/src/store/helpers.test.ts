@@ -592,6 +592,57 @@ describe('stripSecrets / extractSecrets', () => {
   });
 });
 
+describe('what the account write paths leave in localStorage', () => {
+  // The secret-bearing fields an IMAP/SMTP config can carry (IMAPConfig,
+  // SMTPConfig, and the refresh token an OAuth sign-in hands the renderer).
+  const SECRETS = { password: 'pw-must-not-persist', accessToken: 'at-must-not-persist', refreshToken: 'rt-must-not-persist' };
+  const leaked = (text: string) => Object.values(SECRETS).filter((secret) => text.includes(secret));
+
+  // Breaks: a password or OAuth token is written to localStorage (a plaintext
+  // file in the profile) or mirrored into the account registry, by any of the
+  // writes that run on connect, account add/update/remove, the id migration and
+  // the active-account switch. These are the writes CodeQL flags as "clear
+  // text storage of stripSecrets(...)": what they store is the config WITHOUT
+  // its secrets, which this proves field by field. (The one deliberate
+  // exception — rows an older build stored with a password, kept until the
+  // vault holds it — is covered by the migrateCredentialsToVault tests.)
+  it('stores the non-secret config of every account and none of its secrets', async () => {
+    const written: string[] = [];
+    const setItem = localStorage.setItem.bind(localStorage);
+    localStorage.setItem = (key: string, value: string) => { written.push(`${key}=${value}`); setItem(key, value); };
+    const mirrored: unknown[] = [];
+    const rekey = vi.fn().mockResolvedValue({ success: true });
+    installElectronAPI({ accounts: {
+      rekey,
+      save: (rows: unknown) => void mirrored.push(rows),
+      setActivePointer: (id: unknown) => void mirrored.push(id),
+    } });
+    const imap = { host: 'imap.x.com', port: 993, secure: true, username: 'a@x.com', authMethod: 'oauth2', oauthProvider: 'gmail', ...SECRETS };
+    const smtp = { host: 'smtp.x.com', port: 465, secure: true, username: 'a@x.com', from: 'a@x.com', ...SECRETS } as SMTPConfig;
+    const legacy = account({ id: 'acct-a-x-com', imapConfig: imap, smtpConfig: smtp, smtpConfigured: true });
+    const other = account({ id: 'acct-b-x-com--imap-x-com', email: 'b@x.com', imapConfig: { ...imap, username: 'b@x.com' }, smtpConfig: smtp });
+
+    saveCredentials(imap);
+    saveSmtpCredentials(smtp);
+    const accounts = upsertAccount(upsertAccount([], legacy), other);
+    saveActiveAccountId(legacy.id);
+    await canonicalizeAccountIds();
+    // A remaining account with no stored row yet is written as saveAccounts would.
+    localStorage.removeItem('sarvinbox-accounts');
+    removeAccount(accounts, other.id);
+
+    expect(written.length).toBeGreaterThan(5);
+    expect(written.flatMap(leaked)).toEqual([]);
+    expect(leaked(JSON.stringify(mirrored))).toEqual([]);
+    // Stripping removes only the secrets: the rest of the config survives.
+    expect(loadSavedCredentials()).toMatchObject({ host: 'imap.x.com', port: 993, username: 'a@x.com', oauthProvider: 'gmail' });
+    expect(loadSavedSmtpCredentials()).toMatchObject({ host: 'smtp.x.com', port: 465, username: 'a@x.com' });
+    expect(loadAccounts()).toEqual([expect.objectContaining({ id: legacy.id, imapConfig: expect.objectContaining({ host: 'imap.x.com', username: 'a@x.com' }) })]);
+    // The active pointer is the account id, which names an address and a host only.
+    expect(loadActiveAccountId()).toBe(accountIdFor('a@x.com', 'imap.x.com'));
+  });
+});
+
 // Every vault entry now also records the transport relaxations chosen with the
 // secret. Changed deliberately (transport binding): the expected entries that
 // spread this used to be the bare secret and host.
