@@ -109,8 +109,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Google sign-in secret stays out of the app window.** Only the part of
   the app that signs you in is given it, and a release fails to build if the
   secret ever appears in the window's code.
+- **A crafted email can no longer freeze the app.** An email built with a huge
+  run of `<`, spaces, `+` or similar characters in its body, subject or address
+  fields could stall Sarv Inbox for seconds or minutes while it was sorted,
+  threaded, scored, opened or used for a reply suggestion. Each of those steps
+  now takes time in proportion to the email's size.
+- **AI features read an email as you see it.** Categorization, reply drafts and
+  contact details no longer pick up the code inside an email's scripts and
+  styles or its Outlook-only blocks, and text a sender wrote out literally, such
+  as `&lt;script&gt;`, is no longer turned back into markup.
 
 ### Fixed
+- **Sending setup no longer guesses the wrong provider.** For a mail server whose
+  name merely contains a big provider's domain, such as `imap.acme.com` (which
+  contains "me.com"), the sending server is no longer filled in as that
+  provider's.
+- **Contact cards keep links that Outlook Safe Links wrapped,** even when the
+  link itself mentions the Safe Links domain.
+- **Closing an empty reply no longer offers to save a draft** when the reply holds
+  nothing but blank lines or spaces.
+- **A very long meeting request typed into the assistant no longer stalls the
+  app.**
 - **Antivirus sign-in always shows you what happened.** On Windows, the page
   saying an antivirus sign-in was declined or incomplete could show up as a
   connection error in your browser instead.
