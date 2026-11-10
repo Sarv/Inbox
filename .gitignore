@@ -98,6 +98,9 @@ apps/mobile/ios/
 *.pem
 *.cer
 *.crt
+# Except the BIMI test PKI: public test certificates only (no keys), generated
+# by its generate.mjs. bimi.test.ts cannot load without them.
+!packages/core/test/unit/utils/fixtures/bimi/*.pem
 *.pfx
 *.der
 *.keystore
