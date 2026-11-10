@@ -174,6 +174,39 @@ describe('stripHtmlTags', () => {
   });
 });
 
+describe('stripHtmlTags — lines', () => {
+  // Breaks: a prompt transcript loses its paragraphs (blocks fuse into one line)
+  // or its words (an inline tag between two words joins them).
+  it('turns <br> and block edges into newlines and other tags into a space', () => {
+    expect(stripHtmlTags('<p>Hi <b>Ann</b>,</p><p>See<br>you</p>', { lines: true })).toBe('\nHi  Ann ,\n\nSee\nyou\n');
+    expect(stripHtmlTags('<ul><li>a</li><li>b</li></ul>', { lines: true })).toBe(' \na\n\nb\n\n');
+  });
+
+  // Breaks: the page title, head or style of a mail is read to the model as
+  // part of the message.
+  it('drops head, title, script and style, leaving a space where they stood', () => {
+    const out = stripHtmlTags('<head><title>Invoice</title><style>p{}</style></head>a<script>x()</script>b', { lines: true });
+    expect(out).toBe(' a b');
+  });
+
+  // Breaks: a comment between two words joins them.
+  it('reads a comment as a space', () => {
+    expect(stripHtmlTags('a<!-- note -->b', { lines: true })).toBe('a b');
+  });
+
+  // Breaks: a block the author never closed, or a void element, adds blank lines
+  // the source never had.
+  it('breaks only at closing tags written in the source', () => {
+    expect(stripHtmlTags('<p>a<p>b', { lines: true })).toBe('\na\nb');
+    expect(stripHtmlTags('a<img src="x">b<br/>c', { lines: true })).toBe('a b\nc');
+  });
+
+  // Breaks: plain text with no tags changes shape.
+  it('leaves text with no tags as it is', () => {
+    expect(stripHtmlTags('line one\n\nline two', { lines: true })).toBe('line one\n\nline two');
+  });
+});
+
 describe('repairedCleanBody', () => {
   // Regression: the repair must be a no-op for healthy rows. Returning a string
   // here would rewrite a ~250 KB inline-body record for every email in the

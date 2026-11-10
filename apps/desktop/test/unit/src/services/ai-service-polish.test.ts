@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { composeAiTurns } from '../../../../src/components/email-detail/ai-view-compose';
 import { polishEntriesOf, threadTurns } from '../../../../src/components/email-detail/chat-message-adapter';
-import { buildPolishThreadContext, type PolishEntry } from '../../../../src/services/ai-service';
+import { buildPolishThreadContext, htmlToPlainTextForPrompt, type PolishEntry } from '../../../../src/services/ai-service';
 import { email, ME } from '../components/email-detail/email-fixture';
 import {
   ALICE_TEXT,
@@ -115,5 +115,28 @@ describe('buildPolishThreadContext — from the chat turns', () => {
     expect(transcript).toContain('[Me (you)]');
     expect(transcript).not.toContain('Ghost');
     expect(buildPolishThreadContext({ entries: [], currentUserEmail: ME })).toBe('');
+  });
+});
+
+describe('htmlToPlainTextForPrompt', () => {
+  // Breaks: one mail in the thread freezes reply polish. The converter was a
+  // chain of tag regexes, quadratic on unclosed runs: 40 K `<p ` took 3.2 s and
+  // 40 K `<!--` 2.7 s (measured 2026-11-10), so these time out under it.
+  it('converts a body of 100 K unclosed "<p" or "<!--" at once', () => {
+    expect(htmlToPlainTextForPrompt(`${'<p '.repeat(100_000)}x`)).toBe('');
+    expect(htmlToPlainTextForPrompt(`a ${'<!--'.repeat(100_000)}`)).toBe('a');
+  });
+
+  // Breaks: a plain-text reply loses its line breaks, or the address in a quote
+  // header is read as text the old converter never showed.
+  it('keeps a plain-text body\'s lines and drops an <address> as the tag it parses as', () => {
+    expect(htmlToPlainTextForPrompt('Thanks,\nAnn\n\nOn Mon, Bob <bob@x.com> wrote:\n> hi')).toBe(
+      'Thanks,\nAnn\n\nOn Mon, Bob wrote:\n> hi'
+    );
+  });
+
+  // Breaks: `&amp;lt;` (the text "&lt;" on screen) reaches the model as "<".
+  it('decodes entities once', () => {
+    expect(htmlToPlainTextForPrompt('<p>a &amp;lt;b&amp;gt; &nbsp;c</p>')).toBe('a &lt;b&gt; c');
   });
 });

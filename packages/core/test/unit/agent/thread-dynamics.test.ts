@@ -26,9 +26,10 @@ describe('computeThreadDynamics — name mention', () => {
 
   // Breaks: a body of unclosed `<` stalls priority scoring. The strip was
   // `/<[^>]+>/g`, quadratic (CodeQL js/polynomial-redos): 200 K `<` took about
-  // 14 s, so this test timed out under it.
+  // 14 s, so this test timed out under it. (The space keeps `ann` text: a body
+  // ENDING in `<ann` is an unfinished tag, which a browser does not show either.)
   it('scores a body of 200 K unclosed "<" at once', () => {
-    expect(computeThreadDynamics(null, `${'<'.repeat(200_000)}ann`, 'Ann', false).role).toBe('mentioned');
+    expect(computeThreadDynamics(null, `${'<'.repeat(200_000)} ann`, 'Ann', false).role).toBe('mentioned');
     expect(computeThreadDynamics(stats({}), '<'.repeat(200_000), 'Ann', false).role).toBe('late_addition');
   });
 });

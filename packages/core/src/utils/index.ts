@@ -14,7 +14,6 @@ export * from './timeout';
 export * from './atomic-file';
 export * from './trailing-slash';
 export * from './trim-chars';
-export * from './strip-tags';
 export * from './address-tokens';
 export * from './error-class-name';
 export * from './bearer-retry';

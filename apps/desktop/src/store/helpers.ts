@@ -1007,7 +1007,7 @@ export const saveActiveAccountId = (id: string | null) => {
 // node 'stream', which the renderer bundle can't load). Any change here must be
 // mirrored there, or account ids drift and vault-key lookups break.
 const normIdPart = (s: string): string =>
-  (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 export const accountIdFor = (email: string, host?: string): string => {
   const base = normIdPart(email || 'default');

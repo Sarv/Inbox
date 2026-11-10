@@ -5,7 +5,7 @@
  * No LLM call — fast and free. LLM only used when other signals > 40 AND regex is ambiguous.
  */
 
-import { stripTags } from '../../utils/strip-tags';
+import { stripHtmlTags } from '../../utils/html-text';
 
 import type { ContentUrgencySignal } from './types';
 
@@ -64,7 +64,7 @@ export function computeContentUrgency(
   body: string,
   userName: string,
 ): ContentUrgencySignal {
-  const text = stripTags(`${subject}\n${body}`.slice(0, MAX_URGENCY_TEXT_CHARS));
+  const text = stripHtmlTags(`${subject}\n${body}`.slice(0, MAX_URGENCY_TEXT_CHARS));
   const textLower = text.toLowerCase();
 
   const hasDeadline = DEADLINE_PATTERNS.some(p => p.test(text));

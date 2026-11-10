@@ -14,6 +14,7 @@
 // ESM loader (see "Dynamic require of 'events' is not supported" errors).
 
 import { createLogger } from '@sarvinbox/core/logger';
+import { trimTrailingSlashes } from '@sarvinbox/core/trailing-slash';
 
 const log = createLogger('sarv-cai-api');
 
@@ -249,6 +250,6 @@ export function buildSarvEdgeBaseUrl(
   fallbackEdgeBaseUrl: string | null | undefined,
 ): string {
   const root = zoneApiDomain || (fallbackEdgeBaseUrl ?? '').replace(/\/edge\/v1\/llm\/?$/, '');
-  const trimmed = root.replace(/\/+$/, '');
+  const trimmed = trimTrailingSlashes(root);
   return trimmed ? `${trimmed}/edge/v1/llm` : '';
 }

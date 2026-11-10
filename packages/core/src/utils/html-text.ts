@@ -72,6 +72,31 @@ export function htmlToPlainText(html: string, options: HtmlToPlainTextOptions = 
 /** Elements whose content is code, never text a reader sees. */
 const NON_TEXT_ELEMENTS: ReadonlySet<string> = new Set(['script', 'style']);
 
+/** With `lines`, the head and its title go too: nothing in them is the message. */
+const NON_TEXT_ELEMENTS_FOR_LINES: ReadonlySet<string> = new Set(['script', 'style', 'head', 'title']);
+
+/** With `lines`, where a line starts: the opening tag of a paragraph-like block. */
+const LINE_OPENING_ELEMENTS: ReadonlySet<string> = new Set([
+  'p', 'div', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre',
+]);
+
+/** With `lines`, where a line ends: the closing tag of a block or a list or table. */
+const LINE_CLOSING_ELEMENTS: ReadonlySet<string> = new Set([
+  'p', 'div', 'li', 'ul', 'ol', 'tr', 'table', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'blockquote', 'pre', 'section', 'header', 'footer',
+]);
+
+export interface StripHtmlTagsOptions {
+  /**
+   * Keep the line structure, for text read line by line such as a prompt
+   * transcript: `<br>` and the edges of paragraph-like blocks become a newline,
+   * every other tag (and a comment) a space so the words either side don't fuse,
+   * and `<head>`/`<title>` content goes with script and style. The caller
+   * collapses the whitespace.
+   */
+  lines?: boolean;
+}
+
 /**
  * The text of an HTML fragment with every tag removed and the text itself left
  * exactly as written — newlines, indentation and runs of spaces included.
@@ -100,17 +125,32 @@ const NON_TEXT_ELEMENTS: ReadonlySet<string> = new Set(['script', 'style']);
  * `''` for empty or non-string input. Capped at {@link MAX_HTML_PARSE_BYTES}
  * like {@link htmlToPlainText}.
  */
-export function stripHtmlTags(html: string): string {
+export function stripHtmlTags(html: string, options: StripHtmlTagsOptions = {}): string {
   if (typeof html !== 'string' || html === '') return '';
   const capped = html.length > MAX_HTML_PARSE_BYTES ? html.slice(0, MAX_HTML_PARSE_BYTES) : html;
+  const lines = options.lines === true;
+  const skipped = lines ? NON_TEXT_ELEMENTS_FOR_LINES : NON_TEXT_ELEMENTS;
   const text: string[] = [];
   let skipDepth = 0;
   const parser = new Parser({
     onopentagname(name) {
-      if (NON_TEXT_ELEMENTS.has(name)) skipDepth += 1;
+      if (skipped.has(name)) skipDepth += 1;
+      if (!lines || skipDepth > 0) return;
+      text.push(name === 'br' || LINE_OPENING_ELEMENTS.has(name) ? '\n' : ' ');
     },
-    onclosetag(name) {
-      if (NON_TEXT_ELEMENTS.has(name) && skipDepth > 0) skipDepth -= 1;
+    onclosetag(name, isImplied) {
+      if (skipped.has(name) && skipDepth > 0) {
+        skipDepth -= 1;
+        if (lines && skipDepth === 0) text.push(' ');
+        return;
+      }
+      // Only a closing tag written in the source: an implied one (a void
+      // element's, or a block the parser closed for the author) breaks nothing.
+      if (!lines || isImplied || skipDepth > 0) return;
+      text.push(LINE_CLOSING_ELEMENTS.has(name) ? '\n' : ' ');
+    },
+    oncomment() {
+      if (lines && skipDepth === 0) text.push(' ');
     },
     ontext(chunk) {
       if (skipDepth === 0) text.push(chunk);

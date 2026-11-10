@@ -1,4 +1,5 @@
 import { checkAIEndpoint, type AIEndpointRefusal } from '@sarvinbox/core/ai-provider-auth';
+import { trimTrailingSlashes } from '@sarvinbox/core/trailing-slash';
 
 import { aiFailureReason, aiProviderFetch, PROVIDER_CONFIGS, type AIProvider, type AIProviderType } from './ai-service';
 import {
@@ -66,7 +67,7 @@ export function normalizeAIEndpoint(endpoint: string): string {
   const check = checkAIEndpoint(endpoint);
   if (!check.ok) throw new Error(ENDPOINT_FIELD_ERRORS[check.reason]);
   if (check.url.search || check.url.hash) throw new Error(ENDPOINT_FIELD_ERRORS.credentials);
-  return check.url.toString().replace(/\/+$/, '');
+  return trimTrailingSlashes(check.url.toString());
 }
 
 export function providerFromConnection(connection: OnboardingAIConnection): AIProvider {

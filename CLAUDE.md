@@ -309,9 +309,16 @@ Established shared helpers (extend this list as you add more):
   null when there is none; THROWS when the store cannot be read, where `getBlob`
   answers null. Use it for any store whose readers decide what is gone or what to
   overwrite (the OAuth token store does).
-- `trimTrailingSlashes(value)` — `packages/core/src/utils/trailing-slash.ts`. A URL
-  or key without its trailing `/`s, in linear time. Use it instead of
-  `replace(/\/+$/, '')`, which is quadratic on a long run of slashes.
+- `trimChars` / `trimCharsStart` / `trimCharsEnd(value, set)` —
+  `packages/core/src/utils/trim-chars.ts` (and `trimTrailingSlashes(value)` in
+  `trailing-slash.ts`, built on it). Trim a set of characters (a string, or a
+  predicate such as `isWhitespaceChar`) off the ends in linear time. Use them
+  instead of `replace(/^[…]+|[…]+$/g, '')`, which is quadratic on a long run of a
+  trimmed character followed by something else.
+- `addressTokens(text)` / `angleBracketed(text)` —
+  `packages/core/src/utils/address-tokens.ts`. Every address-shaped token, and the
+  `<…>` part of `Name <addr>`, exactly what `/[\w.+-]+@[\w.-]+/g` and `/<([^>]+)>/`
+  return, in linear time. Use them on headers and bodies instead of those regexes.
 - `readRegularFile(path, maxBytes?)` / `readRegularFileSync(path, { minBytes, maxBytes })` —
   `packages/core/src/utils/regular-file.ts`. Read a file from one open handle,
   refusing a link, a folder, a pipe or a swapped-in file. The async one answers

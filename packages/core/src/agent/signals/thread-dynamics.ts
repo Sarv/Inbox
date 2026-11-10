@@ -8,7 +8,7 @@
  * User's name mentioned in body = needs attention
  */
 
-import { stripTags } from '../../utils/strip-tags';
+import { stripHtmlTags } from '../../utils/html-text';
 
 import type { ThreadSignal, ThreadRole, ThreadStats } from './types';
 
@@ -98,7 +98,7 @@ export function computeThreadDynamics(
 function isNameMentioned(body: string, userName: string): boolean {
   if (!userName || userName.length < 2) return false;
   // Linear tag strip — a regex here went quadratic on a body of unclosed `<`.
-  const lower = stripTags(body.toLowerCase());
+  const lower = stripHtmlTags(body.toLowerCase());
   const nameParts = userName.toLowerCase().split(/\s+/);
   // Check if first name or full name appears
   return nameParts.some(part => part.length >= 2 && lower.includes(part));
