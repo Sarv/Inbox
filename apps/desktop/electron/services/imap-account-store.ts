@@ -84,6 +84,24 @@ export async function clearImapAccount(): Promise<void> {
   try { await fs.unlink(legacyFilePath()); } catch { /* nothing to clear */ }
 }
 
+/**
+ * Forget the saved account only if it is `account` (same server, same user). The
+ * slot holds whichever account connected last, so another account's rejected
+ * sign-in must not delete it. A slot that is empty or cannot be read is left
+ * alone: this deletes, so it acts only on a read that succeeded. True if it cleared.
+ */
+export async function forgetImapAccountFor(account: { host?: unknown; username?: unknown }): Promise<boolean> {
+  const saved = await loadImapAccount();
+  if (!saved || !sameImapAccount(saved, account)) return false;
+  await clearImapAccount();
+  return true;
+}
+
+function sameImapAccount(a: { host?: unknown; username?: unknown }, b: { host?: unknown; username?: unknown }): boolean {
+  const key = (value: unknown) => (typeof value === 'string' ? value.trim().toLowerCase() : '');
+  return key(a.host) !== '' && key(a.host) === key(b.host) && key(a.username) !== '' && key(a.username) === key(b.username);
+}
+
 /** True if the legacy imap-account.json (or its rename) still exists — used by
  *  the startup cleanup to remove it after migration. */
 export function legacyImapFilesExist(): boolean {

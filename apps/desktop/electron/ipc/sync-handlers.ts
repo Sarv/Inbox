@@ -22,7 +22,7 @@ import { ensureAccountRuntime, accountInboxUnread, accountDbExists } from '../se
 import { kickBackfillScheduler } from '../services/backfill-scheduler';
 import { kickBodyPrefetchScheduler } from '../services/body-prefetch-scheduler';
 import { markConnectionUnstable } from '../services/connection-health';
-import { saveImapAccount, loadImapAccount, clearImapAccount } from '../services/imap-account-store';
+import { saveImapAccount, loadImapAccount, clearImapAccount, forgetImapAccountFor } from '../services/imap-account-store';
 import { getAccessTokenForMailHost, attachImapBearer } from '../services/oauth-service';
 import { createQuotaBackoff } from '../services/quota-backoff';
 import {
@@ -54,6 +54,10 @@ const noteIdleEvent = (key: string): void => idleEvents.note(key);
 // EventEmitter.on, never removed), so one real disconnect fanned out K
 // events → reconnect amplification. WeakSet keys on the engine instance.
 const disconnectBridged = new WeakSet<object>();
+
+// The account each engine last connected as. Its event bridges are set up once,
+// on its first connect, so they read this rather than that first config.
+const lastConnectConfig = new WeakMap<object, IMAPConfig>();
 
 /**
  * Resolve an account's IMAP password from the encrypted vault, trying every id
@@ -583,6 +587,8 @@ export function registerSyncHandlers(): void {
       });
       logger.info('[Main] Connection pool initialized for parallel sync');
 
+      lastConnectConfig.set(syncEngine, config);
+
       // Set up disconnect handler to notify UI — exactly once per engine
       // (see disconnectBridged above). Resolve the window at emit time so
       // the bridge survives window close/reopen.
@@ -649,11 +655,15 @@ export function registerSyncHandlers(): void {
             win.webContents.send('imap:disconnected');
           }
         });
-        // Credentials rejected (terminal). Forget the bad saved config so
-        // startup recovery can't re-supply it, and tell the renderer to
-        // prompt re-authentication.
+        // Credentials rejected (terminal). Forget this account's saved config so
+        // startup recovery can't re-supply it, and if it is the account on
+        // screen, tell the renderer to prompt re-authentication. The saved slot
+        // holds whichever account connected last, and the prompt speaks for the
+        // active account, so a background account's rejection (a revoked grant
+        // now latches here too) must not delete the one or raise the other.
         syncEngine.onAuthError(() => {
-          clearImapAccount().catch(() => {});
+          forgetImapAccountFor(lastConnectConfig.get(syncEngine) ?? config).catch(() => {});
+          if (!isActiveEngine()) return;
           const win = getMainWindow();
           if (win && !win.isDestroyed()) {
             win.webContents.send('imap:auth-error');

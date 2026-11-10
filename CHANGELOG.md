@@ -93,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconnecting with the old sign-in at once and asks you to sign in again.
   Before, it could keep retrying the revoked sign-in in the background for up
   to 45 minutes. A brief network drop still reconnects on its own.
+- With more than one account, a sign-in rejected on an account in the background
+  no longer marks the account you are looking at as disconnected, and no longer
+  makes the next launch forget that account's connection. The rejected account
+  asks you to sign in again when you open it.
 
 ## [1.4.10] - 2026-10-30
 
