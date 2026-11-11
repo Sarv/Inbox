@@ -48,7 +48,7 @@ export interface InboxAssistantReviewApplyOptions {
   action?: InboxAssistantReviewAction;
 }
 
-const LIMIT = { threads: 200, page: 25, pages: 80, items: 1_000, members: 100, bodyChars: 12_000, promptChars: 64_000, calls: 40, responseChars: 40_000, duration: 240_000, expiry: 15 * 60_000 } as const;
+const LIMIT = { threads: 200, page: 25, pages: 80, items: 1_000, members: 100, bodyChars: 12_000, scanChars: 1_000_000, promptChars: 64_000, calls: 40, responseChars: 40_000, duration: 240_000, expiry: 15 * 60_000 } as const;
 // Bump when the classifier contract or recommendation policy changes.
 const REVIEW_POLICY_VERSION = 'unread-triage-v10-bounded-message-age';
 const PROTECTED = new Set(['important', 'starred', 'flagged', 'needs_response', 'needsresponse', 'invoice', 'invoices', 'finance', 'meeting', 'meetings', 'reminders']);
@@ -386,7 +386,14 @@ export async function prepareInboxAssistantReview(
               }
               if (!email || !text) { bodyUnavailable = true; continue; }
               if (email.calendarIcs) protection.push('Business, financial, meeting or security content requires your review.');
-              protection.push(...unreadReviewContentProtections(email, text));
+              // The keep-unread gates are a dozen full regex passes over the text, and a
+              // stranger sizes it: 64 million characters took 0.4 s on a fast Mac and
+              // over 30 s on a busy CI runner, all on the main thread. They scan the
+              // first LIMIT.scanChars only. Anything longer has already put the
+              // conversation over LIMIT.bodyChars, which keeps it unread on its own, so
+              // the cut can leave a reason off the list but never changes the
+              // recommendation.
+              protection.push(...unreadReviewContentProtections(email, text.slice(0, LIMIT.scanChars)));
               if (email.hasAttachments || parseAttachmentNames(email.attachmentNames).length || (await storage.getAttachments(email.id)).length) attachmentsUnknown = true;
               const messageId = `M${contentMessages.length + 1}`;
               const header = `Message: ${messageId}\nFrom: ${email.fromAddress}\nTo: ${email.toAddress}${email.ccAddress ? `\nCc: ${email.ccAddress}` : ''}\nSubject: ${email.subject ?? ''}\nDate: ${email.date}\n`;
