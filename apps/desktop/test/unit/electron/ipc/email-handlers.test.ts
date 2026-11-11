@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
     bulkUpdateTags: vi.fn(),
     recalculateFolderCounts: vi.fn(),
     searchEmails: vi.fn(),
+    getEmailsByFolder: vi.fn(),
     upsertSenderStats: vi.fn(),
     deleteEmails: vi.fn(),
     deleteEmail: vi.fn(),
@@ -95,6 +96,7 @@ beforeEach(() => {
   h.storage.bulkUpdateTags.mockReset().mockResolvedValue(undefined);
   h.storage.recalculateFolderCounts.mockReset().mockResolvedValue(undefined);
   h.storage.searchEmails.mockReset().mockResolvedValue([]);
+  h.storage.getEmailsByFolder.mockReset().mockResolvedValue([]);
   h.storage.upsertSenderStats.mockReset().mockResolvedValue(undefined);
   h.storage.deleteEmails.mockReset().mockResolvedValue(undefined);
   h.storage.deleteEmail.mockReset().mockResolvedValue(undefined);
@@ -116,6 +118,65 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('emails:list — which folders open as Starred', () => {
+  const list = (folderId: string) => h.handlers.get('emails:list')!({}, folderId, 50, 0);
+  const OWN = [{ id: 'own-mail' }];
+  const FLAGGED = [{ id: 'flagged-mail' }];
+
+  beforeEach(() => {
+    // The background star pass in this branch is not what is being tested.
+    h.syncEngine.isConnected.mockReturnValue(false);
+    h.storage.getEmailsByFolder.mockResolvedValue(OWN);
+    h.storage.searchEmails.mockResolvedValue(FLAGGED);
+  });
+
+  // Breaks: a folder whose name merely contains "star" opens as the Starred list,
+  // and the mail filed in it cannot be seen there.
+  it.each(['Startups', 'Restart', 'Mustard', 'Projects/Stardust', 'INBOX.Starters', 'Clients/Starred Leads'])(
+    'lists the mail filed in %s, not the starred mail',
+    async (path) => {
+      h.storage.getFolder.mockResolvedValue({ id: 'f1', path, specialUse: null });
+
+      expect(await list('f1')).toEqual({ success: true, data: OWN });
+      expect(h.storage.getEmailsByFolder).toHaveBeenCalledWith('f1', { limit: 50, offset: 0 });
+      expect(h.storage.searchEmails).not.toHaveBeenCalled();
+    }
+  );
+
+  // Breaks: the provider's own Starred mailbox stops listing the starred mail.
+  it.each([
+    { path: '[Gmail]/Starred', specialUse: null },
+    { path: 'Starred', specialUse: null },
+    { path: 'Flagged', specialUse: null },
+    { path: 'Lists/Favourites', specialUse: '\\Flagged' },
+  ])('lists the starred mail for a Starred mailbox ($path)', async (folder) => {
+    h.storage.getFolder.mockResolvedValue({ id: 'f2', ...folder });
+
+    expect(await list('f2')).toEqual({ success: true, data: FLAGGED });
+    expect(h.storage.searchEmails).toHaveBeenCalledWith(expect.objectContaining({ isFlagged: true, limit: 50, offset: 0 }));
+    expect(h.storage.getEmailsByFolder).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a folder id the store no longer knows is treated as a Starred view.
+  it('lists an unknown folder as itself', async () => {
+    h.storage.getFolder.mockResolvedValue(null);
+
+    expect(await list('gone')).toEqual({ success: true, data: OWN });
+    expect(h.storage.searchEmails).not.toHaveBeenCalled();
+  });
+
+  // Breaks: with several accounts, a folder is judged by another account's record,
+  // or its mail is read from another account's store.
+  it('decides from, and reads, the active account\'s own store', async () => {
+    const other = { ...h.storage, getFolder: vi.fn().mockResolvedValue({ id: 'f3', path: 'Startups', specialUse: null }), getEmailsByFolder: vi.fn().mockResolvedValue([{ id: 'other-account-mail' }]), searchEmails: vi.fn() };
+    h.activeStorage = other;
+
+    expect(await list('f3')).toEqual({ success: true, data: [{ id: 'other-account-mail' }] });
+    expect(other.searchEmails).not.toHaveBeenCalled();
+    expect(h.storage.getFolder).not.toHaveBeenCalled();
+  });
 });
 
 describe('restoreEmailsFromTrash', () => {

@@ -6,7 +6,7 @@
 
 import path from 'path';
 
-import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
+import { classifyFolder, createDeferredFetchError, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
 import { app, ipcMain, dialog, shell, type IpcMainInvokeEvent } from 'electron';
 import ICAL from 'ical.js';
 
@@ -622,10 +622,13 @@ export function registerEmailHandlers(): void {
       const syncEngine = getSyncEngine();
 
       const folder = await storage.getFolder(folderId);
-      const folderPath = folder?.path?.toLowerCase() || '';
 
-      // Handle virtual folders (Gmail's Starred)
-      if (folderPath.includes('starred') || folderPath.includes('star')) {
+      // A provider's Starred mailbox (Gmail's [Gmail]/Starred, a "Flagged" folder)
+      // lists the flagged mail. Decided by the folder's role, by the one rule the
+      // rest of the app uses (special-use \Flagged, then the known paths, then the
+      // folder's own name), never by a substring of its path: "star" anywhere opened
+      // "Startups", "Restart" and "Mustard" as Starred instead of their own mail.
+      if (folder && classifyFolder(folder) === 'starred') {
         logger.info('[Main] Loading starred emails (virtual folder)');
 
         // Sync starred in background

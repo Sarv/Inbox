@@ -84,6 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret ever appears in the window's code.
 
 ### Fixed
+- **A folder with "star" in its name opens as itself.** Folders such as
+  Startups, Restart or Mustard opened showing your starred mail instead of the
+  mail filed in them. Only your mail provider's Starred or Flagged mailbox shows
+  starred mail now.
 - **Antivirus sign-in always shows you what happened.** On Windows, the page
   saying an antivirus sign-in was declined or incomplete could show up as a
   connection error in your browser instead.
