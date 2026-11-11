@@ -121,9 +121,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A huge email can no longer close the app.** An email with an enormous body
   could make Sarv Inbox quit without warning while it was logged, reviewed by
   the Inbox Agent or used to draft a reply. The Inbox Agent now leaves such an
-  email as it is for you to deal with, and a reply draft is refused with a
-  message saying the email is too large. The same limit now protects the app from oversized extension
-  manifests and AI requests.
+  email as it is for you to deal with, without stalling over it, and a reply
+  draft is refused with a message saying the email is too large. The same limit
+  now protects the app from oversized extension manifests and AI requests.
 
 ### Fixed
 - **Sending setup no longer guesses the wrong provider.** For a mail server whose
