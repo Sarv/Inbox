@@ -1236,18 +1236,17 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
    * Also emits to main's console for the case where the user IS
    * tailing the Electron stderr — so we don't lose logs to either side.
    */
-  private emitLog(level: 'info' | 'warn' | 'error', message: string, extra?: any): void {
-    const tag = '[AICategorizationService]';
-    const line = extra !== undefined ? `${tag} ${message}` : `${tag} ${message}`;
-    if (level === 'error') logger.error(line, extra ?? '');
-    else if (level === 'warn') logger.warn(line, extra ?? '');
-    else logger.info(line, extra ?? '');
+  private emitLog(level: 'info' | 'warn' | 'error', message: string): void {
+    const line = `[AICategorizationService] ${message}`;
+    if (level === 'error') logger.error(line);
+    else if (level === 'warn') logger.warn(line);
+    else logger.info(line);
     try {
       const win = getMainWindow();
       if (win && !win.isDestroyed()) {
         win.webContents.send('ai-categorization:log', {
           level,
-          message: extra !== undefined ? `${message} ${typeof extra === 'string' ? extra : JSON.stringify(extra).slice(0, 500)}` : message,
+          message,
           ts: Date.now(),
         });
       }

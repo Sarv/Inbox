@@ -1,7 +1,9 @@
-import type { EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
+import { createHash } from 'node:crypto';
+
+import { MAX_MESSAGE_BYTES, type EmailRecord, type FolderRecord, type SearchQuery } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
-import { applyInboxAssistantReview, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps, type InboxAssistantReadReceipt } from '../../../../electron/services/inbox-assistant-actions';
+import { applyInboxAssistantReview, inboxAssistantSourceDigest, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps, type InboxAssistantReadReceipt } from '../../../../electron/services/inbox-assistant-actions';
 import { InboxAssistantRecommendationCache } from '../../../../electron/services/inbox-assistant-recommendation-cache';
 import type { InboxAssistantAIWorkload } from '../../../../src/types/inbox-assistant';
 import { emailRecord } from '../../../helpers/email-fixtures';
@@ -1416,4 +1418,59 @@ describe('explicit scoped read-flag commands', () => {
     await expect(prepareInboxAssistantReview([accounts[0]!], 'mark_read', f.deps, undefined, undefined, { scope: { field: 'any', query: 'all' } })).rejects.toThrow('Specify');
     expect(f.setRead).not.toHaveBeenCalled();
   });
+});
+
+// The review snapshots every member of a conversation — the whole record, body
+// included — to refuse an action if anything changed since it was reviewed. A
+// stranger sizes that body. Breaks if the snapshot stringifies a record whose
+// body is large enough to end the app (uncatchably, in Electron 44), or if the
+// bounded digest stops noticing a change to that body.
+describe('a stranger-sized message in a reviewed conversation', () => {
+  const huge = (fill: string) => fill.repeat(MAX_MESSAGE_BYTES + 1);
+  const holdsHugeBody = (value: unknown, body: string) => typeof value === 'object' && value !== null
+    && Object.values(value as Record<string, unknown>).includes(body);
+
+  // Breaks: ordinary records get a different digest than before (the cache keys
+  // and every pending review's snapshot would stop matching).
+  it('digests an ordinary record exactly as its JSON, as before', () => {
+    const state = { id: 'e1', rawBody: '<p>hi</p>', tags: '|INBOX|' };
+    expect(inboxAssistantSourceDigest(state)).toBe(createHash('sha256').update(JSON.stringify(state)).digest('hex'));
+  });
+
+  // Breaks: the over-limit record is stringified to be hashed — the crash.
+  it('digests a huge record without stringifying its body, and still sees a change to it', () => {
+    const body = huge('x');
+    const changed = `${body.slice(0, -1)}y`;
+    const stringify = vi.spyOn(JSON, 'stringify');
+
+    const first = inboxAssistantSourceDigest({ id: 'e1', rawBody: body });
+    const again = inboxAssistantSourceDigest({ id: 'e1', rawBody: body });
+    const after = inboxAssistantSourceDigest({ id: 'e1', rawBody: changed });
+
+    expect(stringify.mock.calls.some(([value]) => holdsHugeBody(value, body) || holdsHugeBody(value, changed))).toBe(false);
+    stringify.mockRestore();
+    expect(again).toBe(first);
+    expect(after).not.toBe(first);
+    expect(inboxAssistantSourceDigest({ id: 'e2', rawBody: body })).not.toBe(first);
+  });
+
+  // Breaks: a review of a conversation holding such a message crashes the app,
+  // or reaches the AI / an action instead of being kept for the reader.
+  it('reviews the conversation without stringifying the huge record, and keeps it unread', async () => {
+    const body = huge('z');
+    const f = fixture([email('big', { rawBody: body, contentType: 'text', cleanBody: 'Big' })]);
+    const stringify = vi.spyOn(JSON, 'stringify');
+
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+
+    expect(stringify.mock.calls.some(([value]) => holdsHugeBody(value, body))).toBe(false);
+    stringify.mockRestore();
+    expect(review.items).toHaveLength(1);
+    expect(review.items[0]!.recommendation).toBe('keep_unread');
+    expect(review.items[0]!.protectedReasons).toContain('The complete conversation exceeds the reading limit.');
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+    // A 64-million-character body is read for its review protections; under a
+    // full parallel run that takes longer than the default 5 s.
+  }, 30_000);
 });

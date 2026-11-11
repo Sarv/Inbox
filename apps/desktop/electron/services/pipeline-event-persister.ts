@@ -5,7 +5,7 @@
  * Uses a write buffer to batch inserts for performance.
  */
 
-import { getEventBus, createLogger } from '@sarvinbox/core';
+import { getEventBus, createLogger, messageBytes } from '@sarvinbox/core';
 import type { PipelineEvent } from '@sarvinbox/core';
 
 import { getStorage } from '../shared';
@@ -51,6 +51,39 @@ function extractThreadId(event: PipelineEvent): string | null {
   return (event as any).threadId || (event as any).email?.threadId || null;
 }
 
+/** A string field longer than this is cut to it. */
+const MAX_DATA_STRING = 500;
+
+/**
+ * A structured field larger than this (an email record, a workflow result) is kept
+ * only as a summary: its own long strings cut like the event's, or, if that is still
+ * too large, a note saying it was left out.
+ *
+ * Not a nicety. `email:synced` carries the whole email record, body included when
+ * the folder syncs in full, and `email:processed` carries an extension's workflow
+ * result; both are sized by a stranger. Stringified whole, a large enough one ends
+ * the process (see MAX_MESSAGE_BYTES in @sarvinbox/core) — on the event bus, for
+ * every account, with no try/catch able to see it.
+ */
+const MAX_DATA_FIELD_BYTES = 64 * 1024;
+
+function cutString(value: string): string {
+  return value.length > MAX_DATA_STRING ? value.substring(0, MAX_DATA_STRING) + '...' : value;
+}
+
+function sanitizeField(value: object): unknown {
+  if (messageBytes(value, MAX_DATA_FIELD_BYTES) <= MAX_DATA_FIELD_BYTES) return value;
+  if (!Array.isArray(value)) {
+    const summary: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (typeof entry === 'string') summary[key] = cutString(entry);
+      else if (typeof entry !== 'function') summary[key] = entry;
+    }
+    if (messageBytes(summary, MAX_DATA_FIELD_BYTES) <= MAX_DATA_FIELD_BYTES) return summary;
+  }
+  return `[omitted: over ${MAX_DATA_FIELD_BYTES / 1024} KB]`;
+}
+
 function serializeEventData(event: PipelineEvent): string | null {
   try {
     // Strip non-serializable fields (Error objects, large content). `type` and
@@ -62,9 +95,11 @@ function serializeEventData(event: PipelineEvent): string | null {
 
     for (const [key, value] of Object.entries(rest)) {
       if (value instanceof Error) {
-        sanitized[key] = { message: value.message, name: value.name };
-      } else if (typeof value === 'string' && value.length > 500) {
-        sanitized[key] = value.substring(0, 500) + '...';
+        sanitized[key] = { message: cutString(String(value.message)), name: cutString(String(value.name)) };
+      } else if (typeof value === 'string') {
+        sanitized[key] = cutString(value);
+      } else if (value !== null && typeof value === 'object') {
+        sanitized[key] = sanitizeField(value);
       } else if (typeof value !== 'function') {
         sanitized[key] = value;
       }

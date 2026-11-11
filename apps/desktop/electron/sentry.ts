@@ -37,7 +37,7 @@ import { createHash } from 'crypto';
 import { rmSync } from 'fs';
 import { join } from 'path';
 
-import { redactSecrets, scrubBreadcrumb, scrubEvent, setLogSink, type LogLevel } from '@sarvinbox/core';
+import { redactSecrets, scrubBreadcrumb, scrubEvent, setLogSink, stringifyBounded, type LogLevel } from '@sarvinbox/core';
 import { setSlowQueryReporter, type SlowQueryEvent } from '@sarvinbox/storage-node';
 import * as Sentry from '@sentry/electron/main';
 import { app } from 'electron';
@@ -179,15 +179,26 @@ const LEVEL_TO_SEVERITY: Record<LogLevel, Sentry.SeverityLevel> = {
   error: 'error',
 };
 
+// A breadcrumb keeps 500 characters of a log call's extra args, so no argument is
+// worth stringifying past a few kilobytes — and one whose size a stranger chose (an
+// email record, a server's answer) must not be stringified at all: every log line of
+// the whole app passes through here, and stringifying a large enough value ends the
+// process (see MAX_MESSAGE_BYTES in @sarvinbox/core). Each part is cut before the
+// parts are joined and redacted, so redaction never scans more than it keeps.
+const ARG_SUMMARY_BYTES = 64 * 1024;
+const ARG_SUMMARY_CHARS = 4 * 1024;
+
 // Compact, crash-safe stringify for the extra args passed to a log call. We
 // never want breadcrumb serialization to throw or balloon, so cap the size.
-function summarizeArgs(args: unknown[]): string | undefined {
+export function summarizeArgs(args: unknown[]): string | undefined {
   if (!args.length) return undefined;
   try {
     const parts = args.map((a) => {
-      if (a instanceof Error) return `${a.name}: ${a.message}`;
-      if (typeof a === 'object' && a !== null) return JSON.stringify(a);
-      return String(a);
+      let text: string;
+      if (a instanceof Error) text = `${a.name}: ${a.message}`;
+      else if (typeof a === 'object' && a !== null) text = stringifyBounded(a, ARG_SUMMARY_BYTES) ?? '[too large to summarize]';
+      else text = String(a);
+      return text.length > ARG_SUMMARY_CHARS ? text.slice(0, ARG_SUMMARY_CHARS) : text;
     });
     const joined = parts.join(' ');
     // Redact secrets (tokens/passwords/keys/Bearer) BEFORE the breadcrumb leaves
