@@ -1470,7 +1470,32 @@ describe('a stranger-sized message in a reviewed conversation', () => {
     expect(review.items[0]!.protectedReasons).toContain('The complete conversation exceeds the reading limit.');
     expect(f.callAI).not.toHaveBeenCalled();
     expect(f.setRead).not.toHaveBeenCalled();
-    // A 64-million-character body is read for its review protections; under a
-    // full parallel run that takes longer than the default 5 s.
-  }, 30_000);
+    // Building and digesting a 64-million-character body takes about 0.1 s here
+    // and runs ~20x slower on a loaded CI runner, past the default 5 s.
+  }, 15_000);
+
+  // Breaks if the keep-unread gates scan the whole of a stranger-sized body again
+  // (seconds of main-thread regex work per message; it timed this suite out on
+  // CI), or if the bound drops a reason found inside it or the message's
+  // keep-unread verdict. Deliberate limit: a reason past the first
+  // LIMIT.scanChars (1,000,000) characters is not listed, because the message is
+  // already kept unread for exceeding the reading limit.
+  it('scans only the first million characters of a huge message, and still keeps it unread', async () => {
+    const early = 'Your bank statement for October is ready.';
+    const late = 'Your password has been changed.';
+    const body = `${early}\n${'z'.repeat(1_000_000)}\n${late}`;
+    const f = fixture([email('big', { rawBody: body, contentType: 'text', cleanBody: 'Big' })]);
+
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+
+    expect(review.items).toHaveLength(1);
+    expect(review.items[0]!.recommendation).toBe('keep_unread');
+    expect(review.items[0]!.protectedReasons).toEqual(expect.arrayContaining([
+      'Financial notifications, statements or investment reports require your review.',
+      'The complete conversation exceeds the reading limit.',
+    ]));
+    expect(review.items[0]!.protectedReasons).not.toContain('Business, financial, meeting or security content requires your review.');
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
 });
