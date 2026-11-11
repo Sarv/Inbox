@@ -16,6 +16,7 @@ import {
 import pRetry, { AbortError } from 'p-retry';
 
 import { aiApiKeyHeaders, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl } from '../utils/ai-provider-auth';
+import { MAX_MESSAGE_BYTES } from '../utils/json-size';
 import { logger } from '../utils/logger';
 import { SarvApiError, parseSarvApiError, type SarvErrorCode } from '../utils/sarv-api-error';
 
@@ -811,6 +812,19 @@ function outputTokenLimit(config: AIProviderConfig): number {
     ? Math.max(1, Math.min(16_000, Math.floor(value))) : 16_000;
 }
 
+/**
+ * The request body is the prompt stringified, and a prompt can carry text a stranger
+ * sized (an email body). Past the limit, stringifying it ends the app (see
+ * MAX_MESSAGE_BYTES), and no provider would accept it anyway, so it is refused here,
+ * before any request, as a 413: terminal for this request, never retried, never a
+ * reason to pause the provider for everyone.
+ */
+function assertPromptSize(systemPrompt: string, userMessage: string): void {
+  if (systemPrompt.length + userMessage.length > MAX_MESSAGE_BYTES) {
+    throw Object.assign(new Error('This request is too large to send to the AI provider.'), { status: 413 });
+  }
+}
+
 export async function callAIProvider(
   config: AIProviderConfig,
   systemPrompt: string,
@@ -818,6 +832,7 @@ export async function callAIProvider(
   signal?: AbortSignal,
 ): Promise<string> {
   signal?.throwIfAborted();
+  assertPromptSize(systemPrompt, userMessage);
   if (config.type === 'gemini') {
     return callGeminiAPI(config, systemPrompt, userMessage, signal);
   }

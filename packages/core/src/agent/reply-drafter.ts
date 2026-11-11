@@ -12,6 +12,7 @@
 
 import type { EmailRecord } from '../types/models';
 import { parseAddressList, parseAddresses } from '../utils/email-address';
+import { stringifyBounded } from '../utils/json-size';
 import { logger } from '../utils/logger';
 
 import { cleanLLMJsonResponse, tryParseLLMJson } from './llm-response-utils';
@@ -71,6 +72,29 @@ export interface DraftResult {
 }
 
 const MAX_SEARCH_ROUNDS = 3;
+/**
+ * A search query is a phrase. The plan's queries come from the AI provider's answer,
+ * whose size the provider chooses, and each one reaches a full-text search and (with
+ * web search on) a request body, so one is cut to this many characters first.
+ */
+const MAX_SEARCH_QUERY_CHARS = 1_000;
+
+/**
+ * The prompt's JSON for one part of the request. The incoming email's body is the
+ * sender's, whole, and the thread is every member: stringified past the limit either
+ * ends the app (see MAX_MESSAGE_BYTES), so an email that large is refused before any
+ * provider call — no reply could be drafted from it anyway.
+ */
+function promptJson(value: unknown): string {
+  const json = stringifyBounded(value);
+  if (json === null) throw new Error('This email is too large to draft a reply to.');
+  return json;
+}
+
+/** The plan is untyped LLM JSON; anything that is not a string passes on as before. */
+function searchQuery<T>(value: T): T | string {
+  return typeof value === 'string' && value.length > MAX_SEARCH_QUERY_CHARS ? value.slice(0, MAX_SEARCH_QUERY_CHARS) : value;
+}
 const INCOMING_BODY_REFERENCE = 'bodyRef.threadIndex is the 1-based position in FULL THREAD below. Its exact body is the incoming target, supplied once. Read it in full; do not answer other thread messages.';
 
 function matchingRecipients(labels: string[], addresses: string | null | undefined, names?: string | null): boolean {
@@ -151,7 +175,7 @@ export class AgentReplyDrafter {
       : [];
     for (let i = 0; i < Math.min(emailSearches.length, MAX_SEARCH_ROUNDS); i++) {
       const search = emailSearches[i];
-      const query = typeof search === 'string' ? search : search.query || search;
+      const query = searchQuery(typeof search === 'string' ? search : search.query || search);
       const from = typeof search === 'object' ? search.from : undefined;
 
       try {
@@ -173,7 +197,7 @@ export class AgentReplyDrafter {
     const webSearches = plan.web_searches || [];
     if (this.deps.searchWeb && Array.isArray(webSearches)) {
       for (let i = 0; i < Math.min(webSearches.length, MAX_SEARCH_ROUNDS); i++) {
-        const query = typeof webSearches[i] === 'string' ? webSearches[i] : webSearches[i]?.query || '';
+        const query = searchQuery(typeof webSearches[i] === 'string' ? webSearches[i] : webSearches[i]?.query || '');
         if (!query) continue;
 
         try {
@@ -273,7 +297,7 @@ If the thread mentions "${this.deps.userName}" or any of your addresses, that is
     // Full thread, no truncation. Even if the user was looped into the thread
     // midway, every earlier message is included so the model has the same
     // context the chat view shows.
-    const threadJson = JSON.stringify(thread);
+    const threadJson = promptJson(thread);
     const bodyRef = this.incomingBodyReference(email, thread);
 
     const incoming = {
@@ -284,7 +308,7 @@ If the thread mentions "${this.deps.userName}" or any of your addresses, that is
     };
 
     return `INCOMING EMAIL TO REPLY TO:
-${JSON.stringify(incoming)}${bodyRef ? `\n${INCOMING_BODY_REFERENCE}` : ''}
+${promptJson(incoming)}${bodyRef ? `\n${INCOMING_BODY_REFERENCE}` : ''}
 
 EXISTING NOTES ABOUT THIS SENDER:
 ${notes || '(none)'}
@@ -318,7 +342,7 @@ What research do I need before drafting a reply? Read the whole thread first.`;
     // The index is authoritative even when Message-IDs are absent or repeated.
     const myReplies = thread.flatMap((message, index) => message.isFromUser
       ? [{ threadIndex: index + 1, messageId: message.messageId }] : []);
-    const threadJson = JSON.stringify(thread);
+    const threadJson = promptJson(thread);
     const bodyRef = this.incomingBodyReference(email, thread);
     const myRepliesJson = myReplies.length > 0
       ? JSON.stringify(myReplies)
@@ -339,7 +363,7 @@ What research do I need before drafting a reply? Read the whole thread first.`;
       : '';
 
     return `INCOMING EMAIL TO REPLY TO — this is the ONLY message you are replying to:
-${JSON.stringify(incoming)}${bodyRef ? `\n${INCOMING_BODY_REFERENCE}` : ''}
+${promptJson(incoming)}${bodyRef ? `\n${INCOMING_BODY_REFERENCE}` : ''}
 
 CONTACT NOTES:
 ${notes || '(none)'}
