@@ -23,6 +23,7 @@ export * from './deferred-fetch-error';
 export * from './event-loop';
 export * from './flush-scheduler';
 export * from './byte-budget';
+export * from './json-size';
 export * from './blocklist-prefs';
 export * from './circuit-breaker';
 export * from './db-compaction';
