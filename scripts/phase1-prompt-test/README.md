@@ -15,6 +15,9 @@ This script is a fast feedback loop: edit `prompt.mjs`, run, see results.
 
 ## Setup
 
+0. Build the core package once (`pnpm build:core`): `compress.mjs` converts
+   HTML to text with the app's own `htmlToPlainText`, loaded from
+   `packages/core/dist`.
 1. Get a bearer token from a running Sarvinbox session — DevTools →
    Network → any LLM request → copy the `Authorization` header value
    (just the token after "Bearer ").
@@ -76,6 +79,7 @@ to evaluate the live split.
 | File | Purpose |
 |---|---|
 | `run.mjs` | The runner. Loads fixture/email, builds prompt, hits LLM, scores. |
+| `compress.mjs` | Shrinks a body for small-context models: the app's HTML-to-text conversion, then quoted-history truncation. |
 | `prompt.mjs` | The retired V1 system + user prompt (not the app's live prompt — see above). |
 | `fixtures/*.json` | Pre-saved test cases — body + expected message count + expected senders. Fully synthetic (pseudonymous cast, `partner.example` customer, ticket 400123) — never commit a real mailbox body here. |
 | `scorer.mjs` | Quality checks (grounding, parse, truncation). |

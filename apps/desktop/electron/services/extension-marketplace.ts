@@ -58,6 +58,7 @@ import * as tar from 'tar';
 
 import { getExtensionManager } from '../shared';
 
+import { isAllowedArchiveEntry } from './extension-archive-rules.mjs';
 import { chromiumFetch } from './net-fetch';
 
 const logger = createLogger('extension-marketplace');
@@ -91,27 +92,6 @@ const RELEASES_PER_PAGE = 100;
  */
 const MAX_RELEASE_PAGES = 5;
 
-/** Only these paths are unpacked from an archive. */
-const ALLOWED_ARCHIVE_ENTRY = /^(?:\.\/)?(?:sarvinbox-extension\.json|dist\/[\w.-]+\.js|icon\.svg|README\.md|LICENSE)$/;
-
-/**
- * The directory entries a well-formed archive carries.
- *
- * The publisher builds the tarball from a staging folder (`tar -czf … -C … .`),
- * so tar records `./` and `./dist/` as entries of their own beside the files.
- * They can create nothing the file allowlist does not already permit — and
- * counting them as unexpected made every ordinary install warn about the one
- * log line that should only ever name a real surprise.
- */
-const ALLOWED_ARCHIVE_DIRECTORY = /^(?:\.|\.\/|(?:\.\/)?dist\/)$/;
-
-/**
- * The archive entry types an extension ships: plain files and folders. The path
- * allowlist says nothing about type, so without this a symbolic or hard link named
- * `dist/index.js` would be unpacked as that link, pointing wherever its author chose
- * on this computer; a device or a FIFO is nothing an extension ships either.
- */
-export const ALLOWED_ARCHIVE_ENTRY_TYPES: ReadonlySet<string> = new Set(['File', 'OldFile', 'ContiguousFile', 'Directory']);
 
 export interface RegistryStatus {
   url: string;
@@ -650,13 +630,9 @@ async function extractToStaging(root: string, extensionId: string, archive: Buff
     file: archivePath,
     cwd: unpacked,
     filter: (entryPath, entry) => {
-      const normalized = entryPath.replace(/\\/g, '/');
+      if (isAllowedArchiveEntry(entryPath, entry)) return true;
       const type = 'type' in entry ? entry.type : undefined;
-      if (type !== undefined && ALLOWED_ARCHIVE_ENTRY_TYPES.has(type)) {
-        if (ALLOWED_ARCHIVE_DIRECTORY.test(normalized)) return true;
-        if (ALLOWED_ARCHIVE_ENTRY.test(normalized)) return true;
-      }
-      skipped.push(type === undefined || ALLOWED_ARCHIVE_ENTRY_TYPES.has(type) ? normalized : `${normalized} (${type})`);
+      skipped.push(`${entryPath.replace(/\\/g, '/')}${type && type !== 'File' ? ` (${type})` : ''}`);
       return false;
     },
   });

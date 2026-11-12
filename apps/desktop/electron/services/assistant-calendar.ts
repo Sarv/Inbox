@@ -11,6 +11,13 @@ const guidance = 'Choose an exact meeting date/time range in the meeting fields 
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const DAY = '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?';
 const CLOCK = '(?:\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?)';
+// CLOCK followed by the whitespace before a separator. The space after a
+// meridiem is part of the meridiem's own optional group: `${CLOCK}\s*` puts two
+// `\s*` side by side when there is no meridiem, and they split a long space run
+// every possible way before failing — quadratic ("from 1" + 150 K spaces took
+// about 17 s). It matches the same text; the capture just keeps a trailing space
+// after "pm", which clockMinute and the meridiem read both ignore.
+const CLOCK_BEFORE_SEPARATOR = '(?:\\d{1,2}(?::\\d{2})?\\s*(?:(?:a\\.?m\\.?|p\\.?m\\.?)\\s*)?)';
 interface DateWindow { first: string; after: string; kind: 'week' | 'specific' }
 interface ClockWindow { from: number; until?: number }
 interface ScheduleParts { date?: DateWindow; weekDays?: number[]; times?: ClockWindow[]; duration?: number }
@@ -30,12 +37,17 @@ function instructionZone(text: string): string | undefined {
 function durationParts(text: string): { text: string; duration?: number } {
   if (/\b(?:in|within)\s+\d+(?:\.\d+)?\s*(?:minutes?|mins?|hours?|hrs?)\b/i.test(text)) ambiguous();
   const found: number[] = [];
-  let remaining = text.replace(/\bone(?:\s+|-)+and(?:\s+|-)+a(?:\s+|-)+half(?:\s+|-)+hours?\b/gi, () => { found.push(90); return ' '; });
+  // `[\s-]+`, never `(?:\s+|-)+`: the nested `+` tried every split of a space
+  // run, exponential in its length (CodeQL js/redos; "one and a half" + 28
+  // spaces took 0.3 s, each 2 more x4). Both match any run of spaces and dashes.
+  let remaining = text.replace(/\bone[\s-]+and[\s-]+a[\s-]+half[\s-]+hours?\b/gi, () => { found.push(90); return ' '; });
   remaining = remaining.replace(/\b(?:half\s+(?:an?\s+)?hour|half-hour)\b/gi, () => { found.push(30); return ' '; });
   remaining = remaining.replace(/\b(?:(?:an?|one)\s+hour|two\s+hours)\b/gi, value => { found.push(/^two/i.test(value) ? 120 : 60); return ' '; });
   const numbers: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
   remaining = remaining.replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten)[ -]+(minutes?|hours?)\b/gi, (_value, amount: string, unit: string) => { found.push(numbers[amount.toLowerCase()]! * (/^h/i.test(unit) ? 60 : 1)); return ' '; });
-  remaining = remaining.replace(/\b(\d{1,4}(?:\.\d+)?)\s*-?\s*(minutes?|mins?|hours?|hrs?)\b/gi, (_value, amount: string, unit: string) => { found.push(Number(amount) * (/^h/i.test(unit) ? 60 : 1)); return ' '; });
+  // `\s*(?:-\s*)?`, not `\s*-?\s*`: with no dash the two `\s*` sat side by side
+  // and went quadratic on a digit followed by a long space run. Same language.
+  remaining = remaining.replace(/\b(\d{1,4}(?:\.\d+)?)\s*(?:-\s*)?(minutes?|mins?|hours?|hrs?)\b/gi, (_value, amount: string, unit: string) => { found.push(Number(amount) * (/^h/i.test(unit) ? 60 : 1)); return ' '; });
   if (new Set(found).size > 1) ambiguous();
   const duration = found[0];
   if (duration !== undefined && (!Number.isInteger(duration) || duration < 5 || duration > 480)) throw new Error('Choose a meeting duration between 5 and 480 minutes.');
@@ -62,7 +74,7 @@ function timeParts(text: string): { times?: ClockWindow[]; text: string } {
   const parts = [...new Set(dayParts)].map(part => part === 'morning' ? { from: 9 * 60, until: 12 * 60 } : part === 'afternoon' ? { from: 12 * 60, until: 17 * 60 } : { from: 17 * 60, until: 21 * 60 });
   remaining = remaining.replace(/\b(?:mornings?|afternoons?|evenings?)\b/gi, ' ');
   const times: ClockWindow[] = [];
-  const rangePattern = new RegExp(`\\b(?:between|from)\\s+(${CLOCK})\\s*(?:and|to|until|through|-)\\s*(${CLOCK})(?![\\d:])`, 'gi');
+  const rangePattern = new RegExp(`\\b(?:between|from)\\s+(${CLOCK_BEFORE_SEPARATOR})(?:and|to|until|through|-)\\s*(${CLOCK})(?![\\d:])`, 'gi');
   remaining = remaining.replace(rangePattern, (_whole, first: string, last: string) => {
     const meridiem = (value: string) => /([ap])\.?m\.?\s*$/i.exec(value)?.[1]?.toLowerCase().concat('m');
     let from = clockMinute(first, meridiem(last));

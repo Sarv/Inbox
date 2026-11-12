@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { cleanEmailHtmlForLLM } from '../../../src/parser/html-clean';
 
+import { OUTLOOK_REPLY_HTML } from './fixtures/outlook-reply';
+
 // This cleaner shapes untrusted email HTML for an LLM prompt (and, in practice,
 // its output is the text that gets embedded in prompts and shown in summaries).
 // Two classes of guarantee are tested:
@@ -167,12 +169,22 @@ describe('cleanEmailHtmlForLLM — structure and text the LLM needs', () => {
     expect(out).toContain('😀');
   });
 
-  // Double-encoded entities (`&amp;#65;`) are common in forwarded/re-wrapped
-  // email HTML: sanitize-html leaves them alone, so the decoder must resolve
-  // them itself rather than leaving numeric escapes in the prompt.
-  it('decodes double-encoded numeric entities and leaves out-of-range ones literal', () => {
-    expect(cleanEmailHtmlForLLM('<p>&amp;#65;&amp;#x42;</p>')).toBe('<p>AB</p>');
+  // Breaks: the double-unescape. `&amp;#65;` is what a mailer writes for the
+  // literal text "&#65;", and that is what the reader sees; decoding it twice
+  // hands the LLM an "A" that is not on the screen. (This test used to expect
+  // "AB" — that was the double-decoding pinned as a feature.)
+  it('decodes a double-encoded entity once, to the text the reader sees', () => {
+    expect(cleanEmailHtmlForLLM('<p>&amp;#65;&amp;#x42;</p>')).toBe('<p>&#65;&#x42;</p>');
     expect(cleanEmailHtmlForLLM('<p>&amp;#1114112; &amp;#x110000;</p>')).toBe('<p>&#1114112; &#x110000;</p>');
+  });
+
+  // Breaks: the same double-unescape, where it matters most. The reader sees
+  // the literal text "&lt;script&gt;"; decoding twice put a `<script>` tag into
+  // an HTML-shaped prompt, indistinguishable from the tags the cleaner keeps.
+  it('never turns a double-encoded tag into markup', () => {
+    const out = cleanEmailHtmlForLLM('<p>Type &amp;lt;script&amp;gt; &amp;amp; &amp;quot;go&amp;quot;</p>');
+    expect(out).toBe('<p>Type &lt;script&gt; &amp; &quot;go&quot;</p>');
+    expect(out).not.toMatch(/<script/i);
   });
 
   it('does not throw on out-of-range numeric entities (they degrade to U+FFFD)', () => {
@@ -190,6 +202,29 @@ describe('cleanEmailHtmlForLLM — structure and text the LLM needs', () => {
     const out = cleanEmailHtmlForLLM('<p>a</p><br><br><br><br><br><p>b</p><span> </span><p></p>');
     expect(out.match(/<br/g)?.length ?? 0).toBeLessThanOrEqual(2);
     expect(out).not.toContain('<p></p>');
+  });
+
+  // Breaks: ordinary Outlook mail reaches the LLM in a different shape. This is
+  // the exact output of the hand-rolled decoder; the library decoder must
+  // match it on mail with no double-encoded entities. (U+00A0 is the `&nbsp;`
+  // sanitize-html leaves as a character.)
+  it('cleans a representative Outlook reply exactly as before', () => {
+    expect(cleanEmailHtmlForLLM(OUTLOOK_REPLY_HTML)).toBe([
+      '<div>',
+      '<p>Hi Priya,</p>',
+      '<p>The quote for <b>Q3\u00a0renewal</b> is below & the tag is <draft>.</p>',
+      '<table><tr><td>',
+      '<table><tr><td><b>Item</b></td><td><b>Price</b></td></tr>',
+      '<tr><td>Licences</td><td>$1,200</td></tr></table>',
+      '</td></tr></table>',
+      '',
+      '<p>Shown everywhere else</p>',
+      '',
+      '<p>Questions? <a href="mailto:ravi@vendor.example">ravi@vendor.example</a>',
+      ' or <a href="https://vendor.example/quote/42">the quote page</a>.<br /><br /></p>',
+      '<div>Regards,<br />Ravi Menon<br />Vendor Ltd</div>',
+      '</div>',
+    ].join('\n'));
   });
 
   it('unwraps <span>/<small> wrappers but keeps their text', () => {

@@ -13,8 +13,9 @@
 import { promises as fs } from 'fs';
 import { extname, join } from 'path';
 
+import { readRegularFile } from '@sarvinbox/core';
+
 import { SANDBOX_DEFINE_GLOBAL } from '../extension-sandbox/constants';
-import { readRegularFile } from '../utils/read-regular-file';
 
 /** What `require` can load. Nothing else in the folder is any of a Worker's business. */
 const MODULE_EXTENSIONS = new Set(['.js', '.cjs', '.json']);

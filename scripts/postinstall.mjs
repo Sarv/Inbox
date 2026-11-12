@@ -194,7 +194,15 @@ const brandDevAppName = () => {
     const bundleIcns = join(appPath, 'Contents', 'Resources', 'electron.icns');
     if (existsSync(brandIcns)) {
       const next = readFileSync(brandIcns);
-      const cur = existsSync(bundleIcns) ? readFileSync(bundleIcns) : null;
+      // Read and compare instead of asking whether it exists first: a check
+      // followed by a write can race with whatever replaced the file between
+      // the two. A missing icon reads as null, like any other mismatch.
+      let cur = null;
+      try {
+        cur = readFileSync(bundleIcns);
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+      }
       if (!cur || !cur.equals(next)) {
         writeFileSync(bundleIcns, next);
         log('Set dev app icon to the Sarv Inbox logo');

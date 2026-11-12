@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { X509Certificate, createHash } from 'node:crypto';
-import {
+import fs, {
   chmodSync,
   existsSync,
   mkdirSync,
@@ -953,6 +953,30 @@ describe('signers and jsignArgs', () => {
       /environment variable name/
     );
   });
+
+  // Breaks if the refusal quotes what it refused. The likely mistake is passing
+  // the password or token ITSELF where its variable name belongs, and the
+  // message lands in a CI log (the self-test prints any error it dies of).
+  it('never echoes a rejected variable name, which may be the secret itself', () => {
+    const secret = 'hunter2-Sup3r-secret';
+    const thrown = (fn: () => unknown): string => {
+      try {
+        fn();
+      } catch (error) {
+        return (error as Error).message;
+      }
+      throw new Error('expected a throw');
+    };
+    const fromSigner = thrown(() => pkcs12Signer({ keystore: '/k', passwordEnv: secret }));
+    expect(fromSigner).toMatch(/passwordEnv is not an environment variable name/);
+    expect(fromSigner).not.toContain(secret);
+    for (const field of ['storepassEnv', 'keypassEnv'] as const) {
+      const signer = { ...pkcs12Signer({ keystore: '/k', passwordEnv: 'P_W' }), [field]: secret };
+      const fromArgs = thrown(() => jsignArgs({ jar: '/j.jar', signer, file: '/b.exe', settings }));
+      expect(fromArgs).toMatch(new RegExp(`signer\\.${field} is not an environment variable name`));
+      expect(fromArgs).not.toContain(secret);
+    }
+  });
 });
 
 describe('classifyJsignFailure', () => {
@@ -1178,6 +1202,34 @@ describe('readFileCertificateTable', () => {
       signed: false,
     });
   });
+
+  // Breaks if the reader goes back to the PATH between its reads (a stat for
+  // the size, a second open for the table entry): a file replaced meanwhile is
+  // then judged by the headers of one file and the table of another. Windows
+  // cannot replace a file that is open, so the swap is POSIX-only.
+  it.skipIf(process.platform === 'win32')(
+    'judges the file it opened even if the path is replaced mid-read',
+    () => {
+      const file = writeFile('swap.exe', fullPe({ certificate: winCertificate() }));
+      const replacement = writeFile('replacement.bin', Buffer.from('not a PE file'));
+      const realReadSync = fs.readSync;
+      let swapped = false;
+      const spy = vi.spyOn(fs, 'readSync').mockImplementation(((...args: unknown[]) => {
+        const read = (realReadSync as (...a: unknown[]) => number)(...args);
+        if (!swapped) {
+          swapped = true;
+          fs.renameSync(replacement, file);
+        }
+        return read;
+      }) as typeof fs.readSync);
+      try {
+        expect(readFileCertificateTable(file)).toMatchObject({ pe: true, signed: true });
+        expect(swapped).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  );
 });
 
 describe('builderOptionsProblems', () => {

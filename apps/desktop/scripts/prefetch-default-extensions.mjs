@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 
 import { x as extract } from 'tar';
 
+import { isAllowedArchiveEntry, isSeedableId, seedPaths } from './extension-seed.mjs';
+
 const DESKTOP_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CONFIG_PATH = join(DESKTOP_DIR, 'extensions.config.json');
 const OUTPUT_DIR = join(DESKTOP_DIR, 'build', 'default-extensions');
@@ -35,7 +37,6 @@ const TRUSTED_HOSTS = new Set([
   'objects.githubusercontent.com',
   'release-assets.githubusercontent.com',
 ]);
-const ALLOWED_ENTRY = /^(?:\.\/)?(?:sarvinbox-extension\.json|dist\/[\w.-]+\.js|icon\.svg|README\.md|LICENSE)$/;
 
 function isTrusted(url) {
   try {
@@ -96,20 +97,17 @@ async function seed(entry) {
     fail(`${entry.id}: checksum mismatch - registry pins ${entry.download.sha256}, downloaded ${digest}`);
   }
 
-  const target = join(OUTPUT_DIR, entry.id);
+  // Only bytes that match the registry's pinned digest reach the disk, and
+  // only inside OUTPUT_DIR: the id is checked as a folder name, whatever the
+  // registry document said.
+  const { target, archivePath } = seedPaths(OUTPUT_DIR, entry.id);
   await rm(target, { recursive: true, force: true });
   await mkdir(target, { recursive: true });
 
-  const archivePath = join(OUTPUT_DIR, `${entry.id}.tgz`);
   await writeFile(archivePath, archive);
-  await extract({
-    file: archivePath,
-    cwd: target,
-    filter: (path) => {
-      const normalized = path.replace(/\\/g, '/');
-      return normalized === '.' || normalized === './' || ALLOWED_ENTRY.test(normalized);
-    },
-  });
+  // The allowlisted paths, as plain files only: a link under an allowed name
+  // would point the shipped folder at some other file on the build machine.
+  await extract({ file: archivePath, cwd: target, filter: isAllowedArchiveEntry });
   await rm(archivePath, { force: true });
 
   const manifestPath = join(target, 'sarvinbox-extension.json');
@@ -125,6 +123,11 @@ async function seed(entry) {
 async function main() {
   const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
   const wanted = Array.isArray(config.systemExtensions) ? config.systemExtensions : [];
+  // Ids become folder names under OUTPUT_DIR: one that is not a valid id is a
+  // broken config, not something to skip quietly.
+  for (const id of wanted) {
+    if (!isSeedableId(id)) fail(`systemExtensions entry ${JSON.stringify(id)} is not a valid extension id`);
+  }
   const registries = Array.isArray(config.registries) ? config.registries.filter(isTrusted) : [];
 
   await rm(OUTPUT_DIR, { recursive: true, force: true });

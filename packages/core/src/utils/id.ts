@@ -226,7 +226,7 @@ export function generateFolderId(path: string): string {
  * renderer and the Electron main process derive byte-identical ids.
  */
 export function normAccountIdPart(s?: string): string {
-  return (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 /**

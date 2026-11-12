@@ -13,6 +13,7 @@ import { parseAuthenticationHeaders } from '@sarv-in/mailguard/headers';
 import type { AuthStatus } from '@sarv-in/mailguard/verdict';
 
 import type { EmailRecord } from '../types/models';
+import { addressTokens } from '../utils/address-tokens';
 import { bulkHeaderSignals, headerLookupFromText } from '../utils/bulk-mail';
 import { hasTag } from '../utils/tags';
 
@@ -238,8 +239,9 @@ export function calculateImportanceScore(
 
   // 5. Direct recipient check — extract bare addresses and compare exactly,
   // otherwise "joann@example.com" substring-matches user "ann@example.com".
-  const toAddresses = email.toAddress?.toLowerCase().match(/[\w.+-]+@[\w.-]+/g) || [];
-  const ccAddresses = email.ccAddress?.toLowerCase().match(/[\w.+-]+@[\w.-]+/g) || [];
+  // addressTokens, not a regex: the regex went quadratic on a crafted header.
+  const toAddresses = addressTokens((email.toAddress ?? '').toLowerCase());
+  const ccAddresses = addressTokens((email.ccAddress ?? '').toLowerCase());
   const userEmailLower = userEmail.toLowerCase();
 
   if (toAddresses.some((addr: string) => addr === userEmailLower)) {

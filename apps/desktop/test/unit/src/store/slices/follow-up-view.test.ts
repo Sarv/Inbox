@@ -6,6 +6,8 @@ vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
 
 import { createEmailsSlice } from '../../../../../src/store/slices/emails-slice';
 
+import { sliceOver } from './slice-over';
+
 // The Follow-ups view and opening a reminder's thread. What breaks: the view
 // keeps a stale search or folder selection (the list shows one thing, the
 // pane another), or clicking a reminder opens nothing because its sent
@@ -26,7 +28,7 @@ const harness = (state: Record<string, unknown> = {}) => {
   };
   const set = (patch: Record<string, unknown>) => { Object.assign(h.state, patch); };
   const get = () => ({ ...h.slice, ...h.state, loadThread: async (threadId: string) => { h.loaded.push(threadId); } });
-  h.slice = createEmailsSlice(set as any, get as any, undefined as any);
+  h.slice = sliceOver(createEmailsSlice, set, get);
   return h;
 };
 

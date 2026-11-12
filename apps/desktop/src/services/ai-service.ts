@@ -1,6 +1,7 @@
 // AI Service - Handles AI provider configuration and API calls
 
 import { aiApiKeyHeaders, buildAIAuthHeaders, buildAIChatRequestOptions, checkAIEndpoint, effectiveAIBaseUrl } from '@sarvinbox/core/ai-provider-auth';
+import { stripHtmlTags } from '@sarvinbox/core/html-text';
 
 // Canonical AI feature defaults live in settings/types (a types+consts
 // leaf module — safe to import here, no component code, no cycle).
@@ -51,8 +52,8 @@ export interface PolishResponse {
 // buildPolishThreadContext turns the thread the user is replying to into a
 // compact plain-text transcript that the polish prompt can ground itself in.
 //
-// PURE FUNCTION — implemented with regex/string operations only, NO DOM
-// APIs (DOMParser, document.createElement). The renderer does have a DOM,
+// PURE FUNCTION — core's HTML tokenizer (stripHtmlTags) and string operations,
+// NO DOM APIs (DOMParser, document.createElement). The renderer does have a DOM,
 // but keeping this DOM-free means it can be executed and verified under
 // plain Node (`node -e` / unit tests) and reused from the main process
 // unchanged. Email HTML here is feeding an LLM prompt, not a screen, so a
@@ -76,44 +77,18 @@ function formatShortDate(unixSeconds: number): string {
   return `${SHORT_MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
-/** Decode the small set of HTML entities that actually appear in email bodies. */
-function decodeBasicEntities(text: string): string {
-  return text
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&apos;/gi, "'")
-    .replace(/&#(\d+);/g, (m, code) => {
-      const n = parseInt(code, 10);
-      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
-    })
-    .replace(/&#x([0-9a-f]+);/gi, (m, code) => {
-      const n = parseInt(code, 16);
-      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
-    })
-    .replace(/&amp;/gi, '&'); // last, so "&amp;lt;" decodes to "&lt;" not "<"
-}
-
 /**
- * HTML → readable plain text (regex/string ops only — see section comment).
+ * HTML → readable plain text (a tokenizer, no DOM — see section comment).
  * Block-level closers and <br> become newlines so paragraph structure
  * survives; all other tags are stripped to spaces; whitespace is collapsed.
  * Plain-text/markdown input passes through unharmed.
  */
 export function htmlToPlainTextForPrompt(html: string): string {
   if (!html) return '';
-  let text = String(html)
-    // Non-content subtrees disappear entirely.
-    .replace(/<(script|style|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    // Line-break-ish tags → newlines so paragraphs don't fuse together.
-    .replace(/<br\s*\/?\s*>/gi, '\n')
-    .replace(/<\/(p|div|li|ul|ol|tr|table|h[1-6]|blockquote|pre|section|header|footer)\s*>/gi, '\n')
-    .replace(/<(p|div|li|tr|h[1-6]|blockquote|pre)\b[^>]*>/gi, '\n')
-    // Everything else (<a>, <span>, <strong>, …) → space.
-    .replace(/<[^>]+>/g, ' ');
-  text = decodeBasicEntities(text);
+  // One linear pass of an HTML tokenizer: script/style/head/title dropped, <br>
+  // and block edges to newlines, other tags to spaces, entities decoded once. A
+  // chain of tag regexes here was quadratic on a run of unclosed `<p` or `<`.
+  const text = stripHtmlTags(String(html), { lines: true });
   return text
     .replace(/\r\n?/g, '\n')
     .replace(/[ \t\u00a0]+/g, ' ') // collapse runs of horizontal whitespace

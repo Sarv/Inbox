@@ -55,7 +55,7 @@ import { promisify } from 'node:util';
 import { parseDn } from 'builder-util-runtime';
 import { parse as parseYaml } from 'yaml';
 
-import { readFileHeader, readTreeOnDisk } from './native-addons.mjs';
+import { readFromHandle, readTreeOnDisk } from './native-addons.mjs';
 import {
   certificateTableProblem,
   isPeBinary,
@@ -122,6 +122,20 @@ const PROVIDER_PATTERN =
   /^projects\/[0-9]+\/locations\/global\/workloadIdentityPools\/[a-z0-9-]+\/providers\/[a-z0-9-]+$/;
 const SERVICE_ACCOUNT_PATTERN = /^[a-z][a-z0-9-]*@[a-z][a-z0-9-]*\.iam\.gserviceaccount\.com$/;
 const ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+
+/**
+ * The error for a password/token field that is not an environment variable
+ * NAME. The rejected value is deliberately left out: the likeliest mistake is
+ * passing the secret itself where its name belongs, and this message ends up
+ * in CI logs.
+ *
+ * @param {string} field
+ * @returns {string}
+ */
+function notAnEnvName(field) {
+  return `${field} is not an environment variable name (A-Z, 0-9, _); the value is not shown, in case it is the secret itself`;
+}
+
 /**
  * The characters a publisher CN may use. Windows renders a certificate subject
  * as "CN=…, O=…" with its own quoting, Node as one "KEY=value" per line with
@@ -825,8 +839,7 @@ export function googleCloudSigner(loaded) {
  * @returns {Signer}
  */
 export function pkcs12Signer({ keystore, passwordEnv, alias }) {
-  if (!ENV_NAME_PATTERN.test(passwordEnv))
-    throw new Error(`not an environment variable name: ${passwordEnv}`);
+  if (!ENV_NAME_PATTERN.test(passwordEnv)) throw new Error(notAnEnvName('passwordEnv'));
   return {
     storetype: 'PKCS12',
     keystore,
@@ -863,9 +876,9 @@ export const TIMESTAMP_RETRY_WAIT_SECONDS = 10;
  * @returns {string[]}
  */
 export function jsignArgs({ jar, signer, file, settings }) {
-  for (const name of [signer.storepassEnv, signer.keypassEnv].filter(Boolean)) {
-    if (!ENV_NAME_PATTERN.test(/** @type {string} */ (name)))
-      throw new Error(`not an environment variable name: ${name}`);
+  for (const field of /** @type {const} */ (['storepassEnv', 'keypassEnv'])) {
+    const name = signer[field];
+    if (name && !ENV_NAME_PATTERN.test(name)) throw new Error(notAnEnvName(`signer.${field}`));
   }
   // electron-builder always passes absolute paths; anything else could be read
   // by jsign's option parser as a flag.
@@ -985,19 +998,50 @@ export function classifyJsignFailure(output, error = {}) {
 /* ------------------------------------------------------------------------ */
 
 /**
- * Read enough of a file to cover its PE headers: the first 4 KB, or more when
- * a large DOS stub puts the PE signature further in (the headers end a few
+ * Open `file` once and give `read` the descriptor and the size of the file it
+ * refers to. Every read (and the size that bounds them) is then of ONE file:
+ * re-opening or re-stat-ing the path between reads could find another file put
+ * there meanwhile, and judge the headers of one file by the table of another.
+ *
+ * @template T
+ * @param {string} file
+ * @param {(handle: number, size: number) => T} read
+ * @returns {T}
+ */
+function withOpenFile(file, read) {
+  const handle = fs.openSync(file, 'r');
+  try {
+    return read(handle, fs.fstatSync(handle).size);
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
+/**
+ * Read enough of an open file to cover its PE headers: the first 4 KB, or more
+ * when a large DOS stub puts the PE signature further in (the headers end a few
  * hundred bytes after it). Never the whole file -- the installer is hundreds
  * of MB.
+ *
+ * @param {number} handle
+ * @param {number} size The file's size, from the same descriptor.
+ * @returns {Buffer}
+ */
+function readPeHeadersFrom(handle, size) {
+  const header = readFromHandle(handle, 4096);
+  if (header.length < 0x40 || header.toString('binary', 0, 2) !== 'MZ') return header;
+  const needed = Math.min(size, header.readUInt32LE(0x3c) + 1024);
+  return needed <= header.length ? header : readFromHandle(handle, needed);
+}
+
+/**
+ * {@link readPeHeadersFrom} for a path.
  *
  * @param {string} file
  * @returns {Buffer}
  */
 function readPeHeaders(file) {
-  const header = readFileHeader(file, 4096);
-  if (header.length < 0x40 || header.toString('binary', 0, 2) !== 'MZ') return header;
-  const needed = Math.min(fs.statSync(file).size, header.readUInt32LE(0x3c) + 1024);
-  return needed <= header.length ? header : readFileHeader(file, needed);
+  return withOpenFile(file, readPeHeadersFrom);
 }
 
 /**
@@ -1008,30 +1052,26 @@ function readPeHeaders(file) {
  * @returns {{ pe: false } | { pe: true, format: string, hasTable: boolean, signed: boolean, problem: string | null }}
  */
 export function readFileCertificateTable(file) {
-  const size = fs.statSync(file).size;
-  const header = readPeHeaders(file);
-  if (!isPeBinary(header)) return { pe: false };
+  return withOpenFile(file, (handle, size) => {
+    const header = readPeHeadersFrom(handle, size);
+    if (!isPeBinary(header)) return { pe: false };
 
-  const table = readPeCertificateTable(header);
-  /** @type {Buffer | undefined} */
-  let entry;
-  if (table.size > 0 && table.offset > 0 && table.offset + WIN_CERTIFICATE_HEADER_BYTES <= size) {
-    entry = Buffer.alloc(WIN_CERTIFICATE_HEADER_BYTES);
-    const handle = fs.openSync(file, 'r');
-    try {
+    const table = readPeCertificateTable(header);
+    /** @type {Buffer | undefined} */
+    let entry;
+    if (table.size > 0 && table.offset > 0 && table.offset + WIN_CERTIFICATE_HEADER_BYTES <= size) {
+      entry = Buffer.alloc(WIN_CERTIFICATE_HEADER_BYTES);
       fs.readSync(handle, entry, 0, WIN_CERTIFICATE_HEADER_BYTES, table.offset);
-    } finally {
-      fs.closeSync(handle);
     }
-  }
-  const problem = certificateTableProblem(table, size, entry);
-  return {
-    pe: true,
-    format: table.format,
-    hasTable: table.size > 0,
-    signed: problem === null,
-    problem,
-  };
+    const problem = certificateTableProblem(table, size, entry);
+    return {
+      pe: true,
+      format: table.format,
+      hasTable: table.size > 0,
+      signed: problem === null,
+      problem,
+    };
+  });
 }
 
 /**

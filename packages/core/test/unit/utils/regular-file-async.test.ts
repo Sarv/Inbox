@@ -6,7 +6,7 @@ import { join } from 'path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { readRegularFile } from '../../../../electron/utils/read-regular-file';
+import { readRegularFile } from '../../../src/utils/regular-file';
 
 // readRegularFile serves an extension's panel files and the modules its sandbox loads.
 // If it follows a link, a panel can read any file the user can; if it hangs, so does

@@ -24,17 +24,51 @@ export interface CleanedContent {
   removedForwarded: boolean;
 }
 
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
+
+/**
+ * `/^Am .+ schrieb .+:$/m` — a German attribution, "Am <date> schrieb <name>:" —
+ * as a scan. The regex tried every " schrieb " in the line for its first `.+`
+ * and ran the second `.+` to the end of the line from each one, so a line of
+ * many " schrieb " with no closing colon was quadratic (CodeQL
+ * js/polynomial-redos; 40 K of them took 6.5 s). If the FIRST " schrieb " that
+ * leaves a character after "Am " can't be followed by one more character and
+ * the closing colon, no later one can.
+ */
+function isGermanAttribution(line: string): boolean {
+  const marker = ' schrieb ';
+  for (const part of line.split(LINE_TERMINATOR)) {
+    if (!part.startsWith('Am ') || !part.endsWith(':')) continue;
+    const at = part.indexOf(marker, 'Am '.length + 1);
+    if (at !== -1 && at + marker.length < part.length - 1) return true;
+  }
+  return false;
+}
+
 /**
  * Quote patterns
  *
  * NOTE: these are used with .test() per line — no `g` flag, or lastIndex
  * persists across calls and alternates false negatives on repeated lines.
+ *
+ * Each must stay linear on one long line — a body line is a stranger's text:
+ *
+ *   * The `>` and `|` markers allow leading whitespace that is NOT a line
+ *     terminator (`[^\S\n\r\u2028\u2029]`, not `\s`). Under `m` every `\r`
+ *     inside a line starts a new `^`, and a leading `\s*` — which also eats
+ *     terminators — rescanned the rest of a long `\r` run from each one:
+ *     quadratic (40 K `\r` took 0.7 s per pattern). The same lines match: the
+ *     last `^` in such a run sits right after its last terminator.
+ *   * There is no separate "On [date], [name] wrote:" pattern: `/^On .+, .+
+ *     wrote:$/m` matched only lines `/^On .+ wrote:$/m` already matches, and
+ *     its two `.+` around ", " made a long line of ", " with no "wrote:"
+ *     quadratic (CodeQL js/polynomial-redos; 40 K took 2.2 s).
+ *   * The German attribution is a scan, see {@link isGermanAttribution}.
  */
-const QUOTE_PATTERNS = [
-  /^[\s]*>+\s/m,                                    // > quote markers
-  /^[\s]*\|[\s]*/m,                                 // | quote markers (Outlook)
-  /^On .+ wrote:$/m,                                // On [date] [name] wrote:
-  /^On .+, .+ wrote:$/m,                            // On [date], [name] wrote:
+const QUOTE_PATTERNS: ReadonlyArray<{ test(line: string): boolean }> = [
+  /^[^\S\n\r\u2028\u2029]*>+\s/m,                  // > quote markers
+  /^[^\S\n\r\u2028\u2029]*\|/m,                     // | quote markers (Outlook)
+  /^On .+ wrote:$/m,                                // On [date] [name] wrote:, On [date], [name] wrote:
   /^From: .+$/m,                                    // From: [name]
   /^Sent: .+$/m,                                    // Sent: [date]
   /^To: .+$/m,                                      // To: [name]
@@ -42,7 +76,7 @@ const QUOTE_PATTERNS = [
   /^-----Original Message-----$/m,                  // Outlook original message
   /^________________________________$/m,             // Outlook separator
   /^Le .+ a écrit :$/m,                            // French: Le [date] a écrit :
-  /^Am .+ schrieb .+:$/m,                          // German: Am [date] schrieb [name]:
+  { test: isGermanAttribution },                    // German: Am [date] schrieb [name]:
   /^El .+ escribió:$/m,                            // Spanish: El [date] escribió:
 ];
 
@@ -66,11 +100,17 @@ const SIGNATURE_PATTERNS = [
 
 /**
  * Forwarded message patterns
+ *
+ * "Forwarded by … on …" ends in a single `.`: it was `.+$`, which under `m`
+ * matches as soon as one character follows " on " (`.` and `$` stop at the same
+ * line terminators), so `search()` finds the same line start either way. With
+ * one `.+` per line start there is nothing to backtrack between (CodeQL
+ * js/polynomial-redos flagged the pair).
  */
 const FORWARDED_PATTERNS = [
   /^-+\s*Forwarded message\s*-+/gmi,                // Gmail forwarded
   /^Begin forwarded message:/gmi,                    // Apple Mail
-  /^Forwarded by .+ on .+$/gmi,                     // Generic forwarded
+  /^Forwarded by .+ on ./gmi,                       // Generic forwarded
   /^FW:/gmi,                                         // FW: prefix
   /^Fwd:/gmi,                                        // Fwd: prefix
 ];

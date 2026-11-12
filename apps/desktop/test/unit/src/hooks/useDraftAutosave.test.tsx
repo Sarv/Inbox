@@ -193,6 +193,20 @@ describe('useDraftAutosave — closeAction', () => {
     expect(actionFor({ ...base, inReplyTo: '<p@x>' })).toBe('discard');
   });
 
+  // Breaks: a reply whose words are only in the HTML body (plain mirror empty)
+  // would close without the question and lose what was typed.
+  it('counts text that is only in the HTML body as work', () => {
+    expect(actionFor({ ...base, inReplyTo: '<p@x>', htmlBody: '<p>Thanks, <b>see you</b> then</p>' })).toBe('ask');
+    expect(actionFor({ ...base, inReplyTo: '<p@x>', htmlBody: '<p>&lt;</p>' })).toBe('ask');
+  });
+
+  // Breaks: a reply the user only pressed Space or Enter in would nag on close
+  // and save a blank draft. `&nbsp;` is whitespace, as the plain body's spaces
+  // are; the old tag regex counted the entity's letters as typed text.
+  it('treats an HTML body of only tags and non-breaking spaces as empty', () => {
+    expect(actionFor({ ...base, inReplyTo: '<p@x>', body: ' ', htmlBody: '<p>&nbsp;</p><p><br></p>' })).toBe('discard');
+  });
+
   // Breaks: peeking at a saved draft and closing it would nag, or — worse —
   // a "Discard" answer would delete a draft the user never touched.
   it('keeps an opened draft closed unchanged', () => {

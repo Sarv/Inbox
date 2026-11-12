@@ -1278,6 +1278,60 @@ describe('AgentRepository — sender memory (writing style)', () => {
     });
   });
 
+  // Breaks: an Outlook-shaped body's stylesheet text became the "first line"
+  // and the greeting was lost — the old tag regex removed the tags around the
+  // CSS but kept the CSS itself.
+  it('reads the greeting past a <style> block in an HTML body', () => {
+    seedEmail(db, {
+      id: 'sm-style',
+      from: user,
+      to: 'bob@corp.example',
+      tags: '|Sent|',
+      date: FIXED_NOW_SEC,
+      cleanBody: '<style>p.MsoNormal{margin:0cm}</style >\n<p>Hi Bob,</p>\nCould you sign the SOW?\n<p>Best regards,</p>\nMe',
+    });
+
+    expect(repo.buildSenderMemory('bob@corp.example', user)).toEqual({
+      greeting: 'Hi Bob,',
+      closing: 'Best regards,',
+      tone: 'brief',
+    });
+  });
+
+  // Breaks: the user's greeting is learned with raw entities ("Hi Bob &amp;
+  // Ann,") and the drafter copies them into a reply. The regex never decoded.
+  it('decodes the entities of an HTML body once', () => {
+    seedEmail(db, {
+      id: 'sm-entity',
+      from: user,
+      to: 'bob@corp.example',
+      tags: '|Sent|',
+      date: FIXED_NOW_SEC,
+      cleanBody: '<p>Hi Bob &amp; Ann,</p>\nPlease review.\n<p>Thanks &amp;amp; regards,</p>',
+    });
+
+    expect(repo.buildSenderMemory('bob@corp.example', user)).toMatchObject({
+      greeting: 'Hi Bob & Ann,',
+      closing: 'Thanks &amp; regards,',
+    });
+  });
+
+  // Breaks: plain-text sent mail — the normal case — loses every word between
+  // a bare "<" and a later ">", which the regex took for a tag.
+  it('keeps a "<" that opens no tag in a plain-text body', () => {
+    seedEmail(db, {
+      id: 'sm-lt',
+      from: user,
+      to: 'bob@corp.example',
+      tags: '|Sent|',
+      date: FIXED_NOW_SEC,
+      cleanBody: 'Hi Bob, under < 5 days and > 2 is fine\nThanks,\nMe',
+    });
+
+    expect(repo.buildSenderMemory('bob@corp.example', user).greeting)
+      .toBe('Hi Bob, under < 5 days and > 2 is fine');
+  });
+
   // Mixed registers cancel out to 'brief' — pinned because a "Hi <name>," open
   // with a "Best regards," close counts as BOTH, and the drafter must then fall
   // back rather than guess.

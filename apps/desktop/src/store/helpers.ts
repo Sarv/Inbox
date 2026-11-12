@@ -3,6 +3,7 @@ import type { SMTPConfig } from '@sarvinbox/core';
 import { readBlocklistPrefs, type BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
 import { transportOptInsOf, type TransportOptIns } from '@sarvinbox/core/connection-security';
 import { conversationFoldersOf, isDraftRow } from '@sarvinbox/core/conversation-membership';
+import { hostIsOrUnder } from '@sarvinbox/core/host-match';
 
 import { clearCategoryBadgeCache, applyEmailCategories } from '../components/email-list/CategoryBadges';
 import type { ClassifiableFolder, StandardFolderType } from '../config/folder-mapping';
@@ -820,24 +821,38 @@ export const forgetLegacySecretsFor = (removed: StoredAccount | undefined, remai
 };
 
 /**
+ * The SMTP host each known provider's IMAP domains send through. A host
+ * matches a domain only when it IS that domain or lies under it
+ * (`hostIsOrUnder`): `imap.acme.com` is not iCloud because it contains
+ * `me.com`, and `imap.gmail.com.example.net` is not Gmail.
+ */
+const PROVIDER_SMTP_HOSTS: ReadonlyArray<readonly [smtpHost: string, imapDomains: readonly string[]]> = [
+  ['smtp.gmail.com', ['gmail.com', 'googlemail.com']],
+  ['smtp.office365.com', ['outlook.com', 'office365.com']],
+  ['smtp.mail.yahoo.com', ['yahoo.com']],
+  ['smtp.mail.me.com', ['icloud.com', 'me.com']],
+];
+
+/**
  * Best-effort SMTP defaults derived from the IMAP config — used to PREFILL the
- * SMTP setup form (the user reviews/edits + verifies before it's used). Known
+ * SMTP setup form (the user reviews/edits + verifies before it's used), and to
+ * derive an OAuth account's sending host (`effectiveSmtpConfig`). Known
  * providers map to their SMTP host; otherwise `imap.` → `smtp.`. Defaults to
  * implicit-TLS 465 (a sane secure default; the user can switch to 587/STARTTLS).
  * NOTE: the password is deliberately NOT carried over — an SMTP password can
  * differ from the IMAP one, so it must be entered explicitly.
+ *
+ * The provider match is by domain, never substring: a self-hosted server whose
+ * name merely contained a provider's domain used to be prefilled with that
+ * provider's SMTP host, and the password typed into that form went there.
  */
 export const deriveSmtpFromImap = (imap: {
   host: string; username: string;
   authMethod?: 'password' | 'oauth2'; oauthProvider?: 'gmail' | 'microsoft' | 'yahoo';
 }): SMTPConfig => {
   const h = imap.host || '';
-  let host = h;
-  if (h.includes('gmail.com') || h.includes('googlemail.com')) host = 'smtp.gmail.com';
-  else if (h.includes('outlook.com') || h.includes('office365.com')) host = 'smtp.office365.com';
-  else if (h.includes('yahoo.com')) host = 'smtp.mail.yahoo.com';
-  else if (h.includes('icloud.com') || h.includes('me.com')) host = 'smtp.mail.me.com';
-  else host = h.replace(/^imap\./i, 'smtp.');
+  const provider = PROVIDER_SMTP_HOSTS.find(([, domains]) => domains.some((d) => hostIsOrUnder(h, d)));
+  const host = provider ? provider[0] : h.replace(/^imap\./i, 'smtp.');
   return {
     host,
     port: 465,
@@ -992,7 +1007,7 @@ export const saveActiveAccountId = (id: string | null) => {
 // node 'stream', which the renderer bundle can't load). Any change here must be
 // mirrored there, or account ids drift and vault-key lookups break.
 const normIdPart = (s: string): string =>
-  (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 export const accountIdFor = (email: string, host?: string): string => {
   const base = normIdPart(email || 'default');

@@ -40,11 +40,32 @@ describe('contact profile information', () => {
     expect(contactProfileCoverage(contact)).toMatchObject({ completed: 5, total: 5 });
   });
 
+  // Breaks if a legacy profile (saved before extraction validation) renders a
+  // clickable javascript:, data:, vbscript: or file: link, or a link carrying
+  // credentials, on the contact card: one click runs or opens whatever was stored.
   it('does not turn legacy unsafe URLs into clickable social links', () => {
-    expect(contactWebUrl('javascript:alert(1)')).toBeUndefined();
-    expect(contactWebUrl('https://user:secret@example.com')).toBeUndefined();
-    const view = render(<ContactProfile contact={{ ...contact, enrichment: { linkedinUrl: 'javascript:alert(1)' } }} />);
-    expect(view.all('a').some((link) => link.getAttribute('href')?.startsWith('javascript:'))).toBe(false);
+    const unsafe = [
+      'javascript:alert(1)',
+      'JavaScript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'vbscript:msgbox(1)',
+      'file:///etc/passwd',
+      'https://user:secret@example.com',
+    ];
+    for (const url of unsafe) expect(contactWebUrl(url)).toBeUndefined();
+    const view = render(<ContactProfile contact={{ ...contact, enrichment: {
+      linkedinUrl: unsafe[0], companyLinkedinUrl: unsafe[2], companyWebsite: unsafe[3],
+      twitterUrl: unsafe[4], githubUrl: 'https://github.com/alice',
+      otherSocials: unsafe.map((url) => ({ platform: 'Other', url })),
+    } }} />);
+    const hrefs = view.all('a').map((link) => link.getAttribute('href') ?? '');
+    // The safe profile still renders, so the scheme check below sees real links.
+    expect(hrefs).toContain('https://github.com/alice');
+    // An allowlist of schemes, not a list of bad ones: a scheme nobody thought
+    // of here fails the test instead of passing it.
+    const schemes = hrefs.map((href) => new URL(href, 'https://relative.invalid/').protocol);
+    expect(schemes.filter((scheme) => !['https:', 'http:', 'tel:', 'mailto:'].includes(scheme))).toEqual([]);
+    expect(hrefs.some((href) => href.includes('secret@'))).toBe(false);
   });
 
   it('shows profile coverage, missing fields and the email review watermark without inventing details', () => {

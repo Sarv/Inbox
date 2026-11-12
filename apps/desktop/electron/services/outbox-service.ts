@@ -75,7 +75,7 @@ export function armOutboxWakeup(): void {
   const storage = getStorage();
   if (!storage || !sendFnRef) return;
   void (async () => {
-    let delayMs = OUTBOX_DRAIN_INTERVAL_MS;
+    let delayMs: number;
     try {
       const sends = await (storage as unknown as IEmailStorage).getAllSends();
       delayMs = nextDrainDelayMs(sends, Date.now(), {

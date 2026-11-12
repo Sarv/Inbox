@@ -20,7 +20,6 @@
  *   3. Launch: sh scripts/dev.sh   (see printed DevTools snippet to unlock the UI)
  *   4. To restore your real inbox: quit the app and run the printed restore cmd.
  */
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -34,6 +33,9 @@ import { appDataBase } from './lib/userdata-dirs.mjs';
 // Run this under Electron-as-Node so better-sqlite3's Electron-ABI binary loads:
 //   ELECTRON_RUN_AS_NODE=1 <electron> scripts/seed-demo-db.mjs
 const require = createRequire(import.meta.url);
+// The app's own content_hash rule (a SHA-256 of the body), so seeded rows hash
+// exactly as synced mail does. storage-node loads this same core build anyway.
+const { emailContentHash } = require('../packages/core/dist/index.js');
 const { SQLiteStorage } = require('../packages/storage-node/dist/index.js');
 
 // SARVINBOX_DB overrides the target DB (used for safe testing); by default we
@@ -62,7 +64,6 @@ if (existsSync(DB_PATH)) {
 const HOUR = 3600;
 const NOW = Math.floor(Date.now() / 1000);
 const tags = (...names) => `|INBOX|${names.length ? names.join('|') + '|' : ''}`;
-const hash = (s) => createHash('sha1').update(s).digest('hex').slice(0, 16);
 
 // Each entry becomes one email row. `thread` groups messages into a conversation.
 // Omit 'read' to render as unread (bold). Category tags (needs_response, meeting,
@@ -108,6 +109,7 @@ for (const e of DATA) {
   const date = NOW - e.ageH * HOUR;
   const messageId = `<demo-${uid}@sarv.com>`;
   const threadId = e.thread || `th-${uid}`;
+  const rawBody = `<p>${e.body}</p>`;
   const record = {
     id: `demo-${uid}`,
     messageId,
@@ -124,9 +126,9 @@ for (const e of DATA) {
     date,
     receivedDate: date,
     cleanBody: e.body,
-    rawBody: `<p>${e.body}</p>`,
+    rawBody,
     contentType: 'html',
-    contentHash: hash(messageId + e.body),
+    contentHash: emailContentHash({ cleanBody: e.body, rawBody, messageId }),
     inReplyTo: null,
     references: null,
     priority: e.tags.includes('important') ? 'high' : 'normal',
