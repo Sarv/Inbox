@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { growthRatio, linearGrowthLimit } from '../../../src/test-support/complexity';
 import {
   INLINE_IMAGE_SCHEME,
   MIN_INLINE_IMAGE_CHARS,
@@ -149,13 +150,13 @@ describe('inline-images — finding data: URIs', () => {
 
   // The input is attacker-controlled HTML up to 21 MB. A backtracking pattern
   // here is a hang, not a slow path — so a pathological body must still finish
-  // in linear time. The assertion is a wall-clock ceiling, generous enough not
-  // to be flaky but far below what catastrophic backtracking would take.
+  // in linear time. Breaks: 8x the unterminated payload costs ~64x (quadratic
+  // backtracking) instead of ~8x. Compared, not timed against a wall-clock
+  // ceiling, so a loaded runner cannot fail it; 20 K keeps a regression's
+  // failing run to about a second.
   it('does not backtrack on a pathological body', () => {
-    const hostile = `<img src="data:image/png;base64,${'='.repeat(200_000)}`;
-    const startedAt = Date.now();
-    findDataImages(hostile);
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    const hostile = (n: number) => `<img src="data:image/png;base64,${'='.repeat(n)}`;
+    expect(growthRatio(hostile, (html) => findDataImages(html), { size: 2_500 })).toBeLessThan(linearGrowthLimit(8));
   });
 });
 

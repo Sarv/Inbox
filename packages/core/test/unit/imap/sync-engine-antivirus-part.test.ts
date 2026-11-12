@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { SyncEngine } from '../../../src/imap/sync-engine';
+import { ciTimeout } from '../../../src/test-support/ci-timeout';
 import type { BodyStructure } from '../../../src/types/imap';
 
 const structure = (): BodyStructure => ({ type: 'multipart', subtype: 'mixed', parts: [
@@ -42,7 +43,11 @@ describe('exact MIME attachment antivirus source', () => {
     expect(client.downloadPartRaw).not.toHaveBeenCalled();
   });
 
-  it('recovers the reported 107 KB PDF from stripped metadata and revalidates its exact part before reading', async () => {
+  // Breaks: an attachment whose BODYSTRUCTURE lost its name and size (the
+  // reported 107 KB PDF) is never scanned, or is read without revalidating its
+  // part first. Heavy but linear (a 107 KB part through the scan path): 226 ms
+  // under local coverage, 2.5 s on CI (run 43089649771).
+  it('recovers the reported 107 KB PDF from stripped metadata and revalidates its exact part before reading', { timeout: ciTimeout(230) }, async () => {
     const { engine, client } = fixture();
     const filename = 'GeM-Bidding-10000604 (1).pdf';
     const bodyStructure = structure(); bodyStructure.parts = [bodyStructure.parts![1]];

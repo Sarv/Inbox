@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { BehaviorIntelligence } from '../../../src/agent/behavior-intelligence';
 import { MAX_URGENCY_TEXT_CHARS, computeContentUrgency } from '../../../src/agent/signals/content-urgency';
+import { ciTimeout } from '../../../src/test-support/ci-timeout';
+import { costRatio, growthRatio, linearGrowthLimit } from '../../../src/test-support/complexity';
 import type { EmailRecord } from '../../../src/types/models';
 
 // Priority scoring runs synchronously in the Electron main process on every
@@ -10,42 +12,41 @@ import type { EmailRecord } from '../../../src/types/models';
 // line of "what" ~0.6 s, an 80 KB address header ~3.5 s), so ONE email froze
 // the whole app, again after every restart while it stayed unscored.
 //
-// Sizing: inputs are 100 KB — past MAX_URGENCY_TEXT_CHARS, so the cap is
-// exercised, yet small enough that a full revert fails in seconds rather than
-// hanging CI for minutes (the regexes are synchronous; a test timeout can't
-// interrupt them). The 50 ms body budget is ~25x the measured post-fix cost but
-// below the ~180 ms the old regexes need even on the CAPPED 20 K text, so it
-// catches a regex revert on its own, not only a cap revert.
-
-/** Wall-clock ms of `fn`. */
-function timed(fn: () => void): number {
-  const start = performance.now();
-  fn();
-  return performance.now() - start;
-}
-
-/**
- * Fastest of `runs` wall-clock timings of `fn`. Scheduler noise on a shared CI
- * runner only ever ADDS time (a single 57 ms run against the 50 ms budget
- * failed the v1.3.6 release), so the minimum is the honest cost — and a
- * quadratic regex is slow on every run, so it still fails.
- */
-function fastest(fn: () => void, runs = 3): number {
-  return Math.min(...Array.from({ length: runs }, () => timed(fn)));
-}
+// These check the SHAPE of the cost, not a wall-clock budget: a 50 ms budget
+// failed CI twice on a call that takes 1.3 ms locally (57 ms in the v1.3.6
+// release, 59 ms fastest-of-three on PR #116). See test-support/complexity.ts.
 
 const HOSTILE = 100_000;
 
+/** The 100 KB hostile body against one of an eighth of the cap. */
+const CAPPED_SMALL = MAX_URGENCY_TEXT_CHARS / 8;
+
+/**
+ * Cost of scoring a 100 KB body over scoring a MAX_URGENCY_TEXT_CHARS / 8 one
+ * of the same pattern. The cap cuts the large one to MAX_URGENCY_TEXT_CHARS, so
+ * linear scoring costs ~8x, and quadratic ~64x. A revert of the cap alone shows
+ * as ~40x (100 KB / 2.5 KB), which fails too. Sized so a full revert fails in
+ * seconds rather than hanging CI (the regexes are synchronous; a test timeout
+ * can't interrupt them).
+ */
+function cappedGrowth(pattern: (chars: number) => string): number {
+  const large = pattern(HOSTILE);
+  const small = pattern(CAPPED_SMALL);
+  return costRatio(
+    () => computeContentUrgency('s', large, 'Ann'),
+    () => computeContentUrgency('s', small, 'Ann'),
+  );
+}
+
 describe('computeContentUrgency — bounded work on hostile bodies', () => {
   // Breaks: a body of unclosed `<` stalls the main process (the tag strip).
-  it('scores a 100 KB run of "<" quickly', () => {
-    expect(fastest(() => computeContentUrgency('s', '<'.repeat(HOSTILE), 'Ann'))).toBeLessThan(50);
+  it('scores a 100 KB run of "<" in time linear in the capped text', () => {
+    expect(cappedGrowth((chars) => '<'.repeat(chars))).toBeLessThan(linearGrowthLimit(8));
   });
 
   // Breaks: a long line of question words with no "?" stalls the main process.
-  it.each(['what ', 'can you ', 'which '])('scores a 100 KB line of %j with no "?" quickly', (word) => {
-    const body = word.repeat(Math.ceil(HOSTILE / word.length));
-    expect(fastest(() => computeContentUrgency('s', body, 'Ann'))).toBeLessThan(50);
+  it.each(['what ', 'can you ', 'which '])('scores a 100 KB line of %j with no "?" in time linear in the capped text', (word) => {
+    expect(cappedGrowth((chars) => word.repeat(Math.ceil(chars / word.length)))).toBeLessThan(linearGrowthLimit(8));
   });
 
   // Breaks: markup the tag strip can't pair up (`<<b>`, a bare `<`) hides a
@@ -145,21 +146,18 @@ describe('BehaviorIntelligence recipient role — parsed, not regex-scanned', ()
   });
 
   // Breaks: a crafted To/Cc header stalls the main process. The old regex was
-  // quadratic (~7 s on 120 KB); the parser is linear but its absolute time
-  // swings 10x between a laptop and a coverage-instrumented CI runner, so this
-  // checks GROWTH: 8x the header costs ~8x the time when linear, ~64x when
-  // quadratic, and the line sits at 24 — a 3x margin either side. (At 4x
-  // sizes the two were 4 vs 16 with the line at 8, and a busy CI runner
-  // measured the linear parser at 8.3.) Best of several runs per size keeps
-  // one GC pause from deciding it; the timeout is explicit because a slow
-  // coverage runner outlasts the 5 s default.
+  // quadratic (~7 s on 120 KB); the parser is linear, so 8x the header costs
+  // ~8x when linear and ~64x when quadratic (limit 22.6). The two sides are
+  // timed interleaved on this thread's CPU clock, so a busy runner no longer
+  // decides it: timed wall-clock, back to back, this linear parser measured 48
+  // and 59 against a limit of 24 with the CPU 8x oversubscribed (and 8.3 against
+  // 8 at 4x sizes on a busy CI runner). Heavy but linear: 470 ms under
+  // local coverage (the parser is slow on 24 KB), so its timeout is sized for CI.
   it('scores hostile To and Cc headers in time linear in their length', () => {
     const headers = (n: number) => ({
       toAddress: 'a'.repeat(n),
       ccAddress: `${'x@y.com, '.repeat(n / 120)}${'"'.repeat(n / 6)}`,
     });
-    const small = fastest(() => role(headers(6_000)), 5);
-    const large = fastest(() => role(headers(48_000)), 3);
-    expect(large / Math.max(small, 1)).toBeLessThan(24);
-  }, 20_000);
+    expect(growthRatio(headers, role, { size: 3_000 })).toBeLessThan(linearGrowthLimit(8));
+  }, ciTimeout(470));
 });

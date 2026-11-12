@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { ciTimeout } from '../../../src/test-support/ci-timeout';
+import { growthRatio, linearGrowthLimit } from '../../../src/test-support/complexity';
 import { htmlMiningWindow, htmlToPlainText, repairedCleanBody, stripHtmlTags } from '../../../src/utils/html-text';
 import { MAX_HTML_PARSE_BYTES } from '../../../src/utils/mail-parse';
 
@@ -72,8 +74,9 @@ describe('htmlToPlainText', () => {
 
   // Regression: bodies are attacker-controlled and conversion is synchronous
   // main-thread CPU. Without the cap a single huge part pins the UI (the same
-  // reason SIMPLE_PARSER_OPTIONS caps mailparser).
-  it('caps the HTML it will convert', () => {
+  // reason SIMPLE_PARSER_OPTIONS caps mailparser). Heavy but linear (converts
+  // 5 MB): 232 ms under local coverage, 1.9 s on CI (run 43089649771).
+  it('caps the HTML it will convert', { timeout: ciTimeout(240) }, () => {
     const oversized = `<p>head</p>${'x'.repeat(MAX_HTML_PARSE_BYTES)}<p>tail</p>`;
 
     const text = htmlToPlainText(oversized);
@@ -141,11 +144,11 @@ describe('stripHtmlTags', () => {
   });
 
   // Breaks: a body that is a long run of `<` stalls the main thread. The regex
-  // backtracked quadratically: about 4 s for 100,000 characters.
+  // backtracked quadratically: about 4 s for 100,000 characters. 8x the run
+  // costs ~8x when linear, ~64x when quadratic; 40 K keeps a regression's
+  // failing run under a second.
   it('is linear on a run of "<"', () => {
-    const started = performance.now();
-    stripHtmlTags('<'.repeat(100_000));
-    expect(performance.now() - started).toBeLessThan(1000);
+    expect(growthRatio((n) => '<'.repeat(n), stripHtmlTags, { size: 5_000 })).toBeLessThan(linearGrowthLimit(8));
   });
 
   // Breaks: a header-only row or a missing body throws in the middle of a
@@ -158,8 +161,9 @@ describe('stripHtmlTags', () => {
   });
 
   // Breaks: an attacker-sized body pins the main thread; the cap is the same
-  // one htmlToPlainText and mailparser use.
-  it('caps the HTML it will read', () => {
+  // one htmlToPlainText and mailparser use. Heavy but linear (parses 5 MB):
+  // 288 ms under local coverage, 2.4 s on CI (run 43089649771).
+  it('caps the HTML it will read', { timeout: ciTimeout(290) }, () => {
     const text = stripHtmlTags(`<p>head</p>${'x'.repeat(MAX_HTML_PARSE_BYTES)}<p>tail</p>`);
     expect(text.startsWith('head')).toBe(true);
     expect(text).not.toContain('tail');

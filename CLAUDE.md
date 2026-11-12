@@ -343,6 +343,12 @@ Established shared helpers (extend this list as you add more):
 - `hostIsOrUnder(host, domain)` — `packages/core/src/utils/host-match.ts` (renderer:
   `@sarvinbox/core/host-match`). Whether a host is a domain or a subdomain of it,
   never a substring match.
+- `growthRatio` / `costRatio` / `linearGrowthLimit` / `cappedGrowthLimit` —
+  `packages/core/src/test-support/complexity.ts` (tests only). How a test proves
+  a slow pattern (ReDoS, quadratic scan) is gone: compare costs, timed on this
+  thread's CPU, never assert a wall-clock budget, which a loaded CI runner fails.
+  `ciTimeout(localMs)` (`test-support/ci-timeout.ts`) sizes the timeout of a test
+  that is heavy because its input is big.
 - `isAllowedArchiveEntry(path, entry)` —
   `apps/desktop/electron/services/extension-archive-rules.mjs`. What may come out of
   an extension archive (allowlisted paths, plain files and the expected folders,

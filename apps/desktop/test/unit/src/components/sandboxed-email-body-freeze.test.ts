@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { growthRatio, linearGrowthLimit } from '../../../../../../packages/core/src/test-support/complexity';
 import {
   buildSrcdoc,
   estimateInitialHeight,
@@ -48,18 +49,23 @@ const renderPipeline = (html: string, normalize: boolean) => {
   htmlLooksDesigned(html);
 };
 
+/** Every transform the viewer runs on opening a body, normalized and not. */
+const renderAll = (html: string) => {
+  renderPipeline(html, false);
+  renderPipeline(html, true);
+  collapseExcessBlankSpace(html);
+};
+
 describe('no email body can freeze the viewer', () => {
-  // Sized so a regression FAILS in seconds instead of hanging CI (a regex
-  // can't be interrupted): at 100 KB the linear code takes a few ms, the old
-  // quadratic code took seconds — and at 1 MB, 38 s to 6.5 minutes for ONE
-  // email. The budget is generous so a loaded runner never flakes.
-  it.each(Object.keys(HOSTILE))('renders 100 KB of %s quickly', (name) => {
-    const html = HOSTILE[name](100_000);
-    const start = performance.now();
-    renderPipeline(html, false);
-    renderPipeline(html, true);
-    collapseExcessBlankSpace(html);
-    expect(performance.now() - start).toBeLessThan(750);
+  // Breaks: one crafted email body freezes the viewer every time it is opened.
+  // Checks the SHAPE of the cost, not a wall-clock budget, so a loaded CI
+  // runner cannot fail it: 8x the body (5 KB to 40 KB) costs ~8x when every
+  // transform is linear and ~64x when one is quadratic (limit 22.6). Sized so
+  // a regression FAILS in seconds instead of hanging CI (a regex can't be
+  // interrupted): the old quadratic code took 1.7 s on 40 KB of `<p<p<p…`,
+  // and at 1 MB, 38 s to 6.5 minutes for ONE email.
+  it.each(Object.keys(HOSTILE))('renders %s in time linear in its length', (name) => {
+    expect(growthRatio(HOSTILE[name], renderAll, { size: 5_000 })).toBeLessThan(linearGrowthLimit(8));
   });
 });
 

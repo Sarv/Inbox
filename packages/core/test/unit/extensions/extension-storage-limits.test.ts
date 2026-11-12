@@ -20,6 +20,7 @@ import {
 } from '../../../src/extensions/extension-manager';
 import { MAX_MESSAGE_BYTES } from '../../../src/extensions/runtime/flood-budget';
 import { createEventBus } from '../../../src/pipeline/event-bus';
+import { ciTimeout } from '../../../src/test-support/ci-timeout';
 
 let base: string;
 let store: ExtensionStorageBackend;
@@ -70,7 +71,10 @@ describe('extension storage limits', () => {
   });
 
   // Many values each under the limit: the total is what costs on every read.
-  it('refuses a write that would take the total over the limit, and keeps what is there', async () => {
+  // Breaks: an extension stores past the total, or a refused write loses data.
+  // Heavy but linear (writes the whole 25 MB total, 4 MB at a time): 386 ms under
+  // local coverage, 3.7 s on CI (run 43089649771).
+  it('refuses a write that would take the total over the limit, and keeps what is there', { timeout: ciTimeout(390) }, async () => {
     const count = Math.floor(STORAGE_MAX_TOTAL_BYTES / (4 * 1024 * 1024));
     for (let i = 0; i < count; i += 1) await store.set('ext', `k${i}`, mb(4));
 

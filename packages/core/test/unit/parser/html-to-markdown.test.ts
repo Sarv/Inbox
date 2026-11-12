@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { HtmlToMarkdown, convertHtmlToMarkdown, htmlToMarkdown } from '../../../src/parser/html-to-markdown';
+import { growthRatio, linearGrowthLimit } from '../../../src/test-support/complexity';
 
 import { OUTLOOK_REPLY_HTML } from './fixtures/outlook-reply';
 
@@ -267,10 +268,11 @@ describe('HtmlToMarkdown.convert — failure fallback', () => {
 
   // Breaks: a body that is a long run of `<` AND crashes Turndown pinned the
   // thread — the fallback's `<[^>]*>` was quadratic (about 4 s for 100,000).
+  // 8x the run costs ~8x when linear, ~64x when quadratic.
   it('stays linear on a run of "<"', () => {
-    const started = performance.now();
-    failingConverter().convert(`<p>x</p>${'<'.repeat(100_000)}`);
-    expect(performance.now() - started).toBeLessThan(1000);
+    const converter = failingConverter();
+    const growth = growthRatio((n) => `<p>x</p>${'<'.repeat(n)}`, (html) => converter.convert(html), { size: 5_000 });
+    expect(growth).toBeLessThan(linearGrowthLimit(8));
   });
 });
 

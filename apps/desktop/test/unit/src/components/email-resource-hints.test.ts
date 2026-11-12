@@ -1,6 +1,7 @@
 import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { describe, expect, it } from 'vitest';
 
+import { growthRatio, linearGrowthLimit } from '../../../../../../packages/core/src/test-support/complexity';
 import { buildPrintDocument } from '../../../../src/components/email-detail/print-document';
 import { buildSrcdoc, stripBlockingResources } from '../../../../src/components/SandboxedEmailBody';
 
@@ -115,19 +116,15 @@ describe('stripBlockingResources — resource hints', () => {
   });
 
   // Breaks: a crafted email freezes the window (the regex rewrite this file
-  // sits beside exists for that). One split per pass: linear.
+  // sits beside exists for that). One split per pass: linear, so 8x the input
+  // costs ~8x, where a quadratic pass costs ~64x (limit 22.6). Timed
+  // interleaved on this thread's CPU clock rather than wall-clock back to back,
+  // so a loaded runner cannot decide it; 144 KB keeps a quadratic regression's
+  // failing run under two seconds.
   it('stays linear on hostile input', () => {
-    const timed = (n: number) => {
-      const input = `${'<link '.repeat(n)}${'<lin<link>k>'.repeat(n)}`;
-      const start = performance.now();
-      stripBlockingResources(input);
-      return performance.now() - start;
-    };
-    timed(1_000); // warm up
-    const small = Math.min(timed(20_000), timed(20_000));
-    const large = Math.min(timed(160_000), timed(160_000));
-    expect(large / Math.max(small, 0.5)).toBeLessThan(24); // 8x input: ~8x linear, ~64x quadratic
-  }, 20_000);
+    const hostile = (n: number) => `${'<link '.repeat(n)}${'<lin<link>k>'.repeat(n)}`;
+    expect(growthRatio(hostile, stripBlockingResources, { size: 1_000 })).toBeLessThan(linearGrowthLimit(8));
+  });
 });
 
 describe('buildSrcdoc — the frame document', () => {

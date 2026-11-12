@@ -144,13 +144,26 @@ describe('messageBytes', () => {
   });
 
   // Measuring must not itself be the flood. `new Array(4294967295)` costs a few bytes to
-  // send and four billion iterations to walk naively.
+  // send and four billion iterations to walk naively. Breaks: the walk reads every element
+  // instead of stopping once the limit is passed. It counts the reads rather than timing
+  // them, so a loaded runner cannot fail it, and a regression fails before the four
+  // billion holes below are ever walked.
   it('stops at the limit instead of walking the rest', () => {
-    const started = Date.now();
+    let reads = 0;
+    const strings = new Proxy(Array.from({ length: 10_000 }, () => 'x'.repeat(1_000)), {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && Number.isInteger(Number(key))) reads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    // 80 KB of slots, then ~120 of the 1 KB strings pass 200 KB: the other ~9,900 are never read.
+    expect(messageBytes(strings, 200_000)).toBeGreaterThan(200_000);
+    expect(reads).toBeGreaterThan(0);
+    expect(reads).toBeLessThan(200);
+
     expect(messageBytes(new Array(4_294_967_295))).toBeGreaterThan(MAX_MESSAGE_BYTES);
     expect(messageBytes(new Array(20_000_000).fill(0))).toBeGreaterThan(MAX_MESSAGE_BYTES);
     expect(messageBytes(['x'.repeat(100), { a: 'x'.repeat(100) }], 50)).toBeGreaterThan(50);
-    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it('counts what it can stop at inside a Map, a Set and an object too', () => {

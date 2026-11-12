@@ -5,6 +5,8 @@ import { join } from 'path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ciTimeout } from '../../../../../../packages/core/src/test-support/ci-timeout';
+
 /**
  * The confinement of extension code. These pin the settings and the supervision;
  * whether those settings really stop a fetch is proved against real Electron by
@@ -255,7 +257,9 @@ afterEach(() => {
 describe('the renderer extension code runs in', () => {
   // Each of these is a step towards Node or the disk. A renderer with a Node bridge or
   // no isolation would make everything else in this file decoration.
-  it('is sandboxed, isolated and has no Node, with only its own preload', async () => {
+  // Slow to set up (it loads the runtime and opens a sandbox): 861 ms under local
+  // coverage, 2.1 s on CI (run 43089649771).
+  it('is sandboxed, isolated and has no Node, with only its own preload', { timeout: ciTimeout(870) }, async () => {
     const { view, ses } = await startChannel();
 
     expect(view.options.webPreferences).toMatchObject({
@@ -494,7 +498,9 @@ describe('what a sandbox can read', () => {
   });
 
   // Once each still adds up across a folder of large files read at the same moment.
-  it('stops serving past the total for one sandbox', async () => {
+  // Heavy but linear (it writes and serves 15 MB files past that total): 374 ms
+  // under local coverage, 2.35 s on CI (run 43089649771).
+  it('stops serving past the total for one sandbox', { timeout: ciTimeout(380) }, async () => {
     const { MAX_SERVED_BYTES_PER_SANDBOX } = await loadRuntime();
     const size = 15 * 1024 * 1024;
     const count = Math.ceil(MAX_SERVED_BYTES_PER_SANDBOX / size) + 1;
