@@ -10,15 +10,27 @@
  * decided in one place.
  */
 
-import { ATTACHMENT_SCHEME } from '@sarvinbox/core';
+import { ATTACHMENT_SCHEME, parsePanelUrl } from '@sarvinbox/core';
 
 export type NavigationVerdict = 'allow' | 'external' | 'block';
 
 /**
  * `top` is the window itself; `frame` is anything nested inside it (the email
- * body iframe, the attachment viewer's PDF frame).
+ * body iframe, the attachment viewer's PDF frame, an extension panel).
  */
 export type NavigationScope = 'top' | 'frame';
+
+/**
+ * Where a frame navigation comes from, as far as Electron can tell. Only the
+ * extension-panel rule reads it. A field that could not be read is left out,
+ * and a missing field never allows anything.
+ */
+export interface NavigationSource {
+  /** What the navigating frame shows now (`''` before its first load). */
+  frameUrl?: string;
+  /** The document that started the navigation, when it came from one. */
+  initiatorUrl?: string;
+}
 
 /**
  * Chromium's built-in PDF viewer, by its fixed extension id. Pointing an iframe
@@ -87,10 +99,38 @@ export function isAppUrl(url: string, appUrl: string): boolean {
 }
 
 /**
+ * May a frame load this extension's panel page? The app shows a panel by
+ * pointing an iframe at `sarv-extension://<extension-id>/...`
+ * (ExtensionPanelFrame), and the panel may then move between its own pages.
+ * Nothing else may put a panel page in a frame:
+ *
+ *  - not another extension's panel. The renderer attributes every request a
+ *    panel frame makes to the extension it pointed the frame at, so a frame
+ *    that wandered into a second extension's page would run that code under
+ *    the first one's grants, labelled with the first one's name.
+ *  - not an email body or attachment frame, which a link in a message could
+ *    otherwise turn into a panel page inside the reading pane.
+ */
+function isPanelNavigationAllowed(
+  extensionId: string,
+  appUrl: string,
+  source: NavigationSource
+): boolean {
+  // The app set the frame's src: it chose the extension, and attributes the
+  // frame to the one it chose.
+  if (source.initiatorUrl !== undefined && isAppUrl(source.initiatorUrl, appUrl)) return true;
+
+  // The panel moving to another page of its own extension. The id is the
+  // URL's host, and `standard` makes it the page's origin too.
+  return source.frameUrl !== undefined && parsePanelUrl(source.frameUrl)?.host === extensionId;
+}
+
+/**
  * @param url    the navigation target, exactly as Electron reports it
  * @param appUrl the dev server URL in development; in production the file URL
  *               of the bundled entry (`pathToFileURL(dist/index.html)`)
  * @param scope  which of the two guards is asking
+ * @param source where a frame navigation comes from (frame scope only)
  *
  * Fails closed: anything that throws while deciding (a missing or non-string
  * URL from a changed Electron event) is blocked, never let through.
@@ -98,16 +138,22 @@ export function isAppUrl(url: string, appUrl: string): boolean {
 export function classifyNavigation(
   url: string,
   appUrl: string,
-  scope: NavigationScope
+  scope: NavigationScope,
+  source: NavigationSource = {}
 ): NavigationVerdict {
   try {
-    return classify(url, appUrl, scope);
+    return classify(url, appUrl, scope, source);
   } catch {
     return 'block';
   }
 }
 
-function classify(url: string, appUrl: string, scope: NavigationScope): NavigationVerdict {
+function classify(
+  url: string,
+  appUrl: string,
+  scope: NavigationScope,
+  source: NavigationSource
+): NavigationVerdict {
   // The app's own page, wherever it is served from.
   if (isAppUrl(url, appUrl)) return 'allow';
 
@@ -123,6 +169,14 @@ function classify(url: string, appUrl: string, scope: NavigationScope): Navigati
 
   // The PDF plugin's own render frame (see PDF_VIEWER_ORIGIN above).
   if (scope === 'frame' && url.startsWith(PDF_VIEWER_ORIGIN)) return 'allow';
+
+  // Extension panels, frame scope only for the same reason as the attachment
+  // scheme: a window-level navigation to a panel would replace the app with
+  // an extension's page. Which frames may load one: isPanelNavigationAllowed.
+  if (scope === 'frame') {
+    const panel = parsePanelUrl(url);
+    if (panel) return isPanelNavigationAllowed(panel.host, appUrl, source) ? 'allow' : 'block';
+  }
 
   // Real web destinations leave for the user's browser rather than rendering
   // inside the inbox.

@@ -144,6 +144,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes the next launch forget that account's connection. The rejected account
   asks you to sign in again when you open it.
 
+### Fixed
+- **Extension panels now open.** The window's navigation guard refused every
+  extension panel, so a panel such as the ClamAV scanner's stayed blank. A
+  panel now loads where the app places it and can follow links between its own
+  pages. It still cannot replace the app window, move to another extension's
+  pages, or be opened by a link in an email.
+
 ## [1.4.10] - 2026-10-30
 
 ### Added

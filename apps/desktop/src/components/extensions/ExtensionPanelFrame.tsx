@@ -61,7 +61,8 @@ export function ExtensionPanelFrame({
       // The ONLY identity check that means anything here: the message came from
       // this panel's own frame. Origin cannot be compared — a sandboxed frame
       // sends "null" — so the window reference is what ties a request to the
-      // extension it will be attributed to.
+      // extension it will be attributed to. That holds because main's frame
+      // guard keeps this frame on its own extension's pages (navigation-policy.ts).
       if (!frameRef.current || event.source !== frameRef.current.contentWindow) return;
 
       const request = parsePanelRequest(event.data);
