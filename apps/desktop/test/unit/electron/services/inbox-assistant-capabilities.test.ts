@@ -30,6 +30,24 @@ describe('Inbox Agent deterministic capability guidance', () => {
     expect(result).not.toMatch(/\b(?:Deleted|Archived) \d|done|successfully/i);
   });
 
+  // Regression: "Categorize my uncategorized emails" used to start an unread
+  // triage whose only outcome is marking mail read. If these stop returning the
+  // app-owned reply, a categorize request reaches triage or a paid search again.
+  it.each(['Categorize my uncategorized emails', 'Please categorise all my mails', 'Can you classify these messages?', 'Label emails from Acme as Finance',
+    'Tag my inbox', 'Categorize them', 'Sort my emails into categories', 'Uncategorized mails ko categorize kar do'])('explains that categories cannot be assigned from chat for %s', question => {
+    const result = inboxAssistantCapabilityReply(question)!;
+    expect(result).toContain('cannot assign or change categories');
+    expect(result).toContain('No mail was changed');
+    expect(result).toContain('AI Assist');
+    expect(result).toContain('does not assign categories');
+  });
+
+  // A search that only mentions classifying or sorting must stay a search.
+  it.each(['How did the CA classify the invoice under GST?', 'Find the email about how to categorize expenses', 'Sort my emails by date',
+    'What label did Priya suggest for the carton?', 'Which emails are categorized as finance?', 'Review my uncategorized unread emails.'])('does not hijack the search or review %s', question => {
+    expect(inboxAssistantCapabilityReply(question)).toBeUndefined();
+  });
+
   it.each(['Send an email to buyer@example.com', 'Please send this draft now', 'Could you send a reply to TCS?'])('requires composer review for %s', question => {
     const result = inboxAssistantCapabilityReply(question)!;
     expect(result).toContain('No email was sent');

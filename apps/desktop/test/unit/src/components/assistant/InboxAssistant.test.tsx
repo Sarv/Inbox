@@ -350,13 +350,13 @@ describe('Inbox Agent', () => {
     fire(view.byLabel('Stop answering'), 'click');
     expect((view.byLabel('Stopping request') as HTMLButtonElement).disabled).toBe(true);
     expect(view.byLabel('View stopping activity')?.textContent).toContain('Stopping…');
-    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(true);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(true);
     fire(view.find('form'), 'submit');
     expect(api.ask).toHaveBeenCalledOnce();
     emit(activity(2, 'Stale quote source', { requestId }));
     await act(async () => resolveCancel(ok({ requestId, cancelled: true })));
     expect(view.byLabel('Stopping request')).toBeNull();
-    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(false);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(false);
     fire(view.byLabel('Edit question: Find the current customer quote.'), 'click');
     typeInto(view.find('#inbox-assistant-question'), 'Find the revised customer quote.');
     expect(api.rewindChat).not.toHaveBeenCalled();
@@ -377,13 +377,13 @@ describe('Inbox Agent', () => {
     fire(view.byLabel('Stop answering'), 'click');
     await settle();
     expect(view.find('[role="alert"]')?.textContent).toContain('Could not acknowledge Stop.');
-    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(true);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(true);
     fire(view.find('form'), 'submit');
     expect(api.ask).toHaveBeenCalledOnce();
     fire(view.byLabel('Retry stop'), 'click');
     await settle();
     expect(api.cancel).toHaveBeenNthCalledWith(2, requestId);
-    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(false);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(false);
   });
 
   it('retains a stopped automatic-action receipt without losing a newer question or treating the late result as a new answer', async () => {
@@ -510,7 +510,7 @@ describe('Inbox Agent', () => {
     const view = await mount();
     const choices = [
       ['Review unread', 'Review my unread emails and mark low-value conversations as read.'],
-      ['Check uncategorized', 'Review my uncategorized unread emails.'],
+      ['Review uncategorized', 'Review my uncategorized unread emails.'],
       ['Find an answer', 'What quote did I send to TCS?'],
       ['Find what needs a reply', 'Which recent customer emails need a response?'],
     ];

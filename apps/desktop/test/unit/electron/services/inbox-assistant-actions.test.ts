@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { MAX_MESSAGE_BYTES, type EmailRecord, type FolderRecord, type SearchQuery } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
-import { applyInboxAssistantReview, inboxAssistantSourceDigest, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps, type InboxAssistantReadReceipt } from '../../../../electron/services/inbox-assistant-actions';
+import { applyInboxAssistantReview, inboxAssistantSourceDigest, inboxAssistantHeaderMatchedItems, inboxAssistantReadCommandReference, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps, type InboxAssistantReadReceipt } from '../../../../electron/services/inbox-assistant-actions';
 import { InboxAssistantRecommendationCache } from '../../../../electron/services/inbox-assistant-recommendation-cache';
 import type { InboxAssistantAIWorkload } from '../../../../src/types/inbox-assistant';
 import { emailRecord } from '../../../helpers/email-fixtures';
@@ -1231,6 +1231,43 @@ describe('explicit scoped read-flag commands', () => {
     expect(parseInboxAssistantReadCommand(question)).toBeUndefined();
   });
 
+  // Regression: the scope was whatever sat between "mark" and "read", so
+  // "Mark all as read" searched for the word "as" and "Mark them as read" for
+  // "them", and unrelated mail was marked. If any of these parses to a command
+  // again, a pointing word is being matched literally against the mailbox.
+  it.each([
+    ['Mark all as read', 'as'], ['Mark as read', 'as'], ['Can you mark all as read?', 'as'], ['Mark them as read', 'them'], ['mark them unread', 'them'],
+    ['Mark it read', 'it'], ['Mark these as read', 'these'], ['Mark those as unread', 'those'], ['Mark that as read', 'that'], ['Mark both as read', 'both'],
+    ['Mark all of them as read', 'of them'], ['mark both of them as read', 'both of them'], ['Mark them all as read', 'them all'], ['Mark those two as read', 'those two'],
+    ['Mark the rest as read', 'rest'], ['Mark the above as read', 'above'], ['mark the same as read', 'same'], ['mark everything unread', 'everything'],
+    ['Mark all mails read', 'mails'], ['mark my mails as read', 'mails'], ['Mark these mails as read', 'these'], ['Mark all new emails as read', 'new'],
+    ['mark all emails from them as read', 'them'], ['mark sab mails as read', 'sab'], ['Mark all emails unread', 'emails'], ['mark all inbox unread', 'inbox'],
+  ])('refuses a mark command whose scope only points at mail: %s', (question, reference) => {
+    expect(parseInboxAssistantReadCommand(question)).toBeUndefined();
+    expect(inboxAssistantReadCommandReference(question)).toBe(reference);
+  });
+
+  // The guard must not cost real scopes: a name next to a mail noun, a selector
+  // with a real value, and a quoted pointing word (the explicit escape hatch).
+  it.each([
+    ['Mark all quotation emails as read', 'mark_read', 'any', 'quotation'],
+    ['mark Naukri mails as read', 'mark_read', 'any', 'Naukri'],
+    ['mark linkedin e-mails unread', 'mark_unread', 'any', 'linkedin'],
+    ['mark emails from IT department as read', 'mark_read', 'sender', 'IT department'],
+    ['mark all "IT" emails as read', 'mark_read', 'any', 'IT'],
+    ['mark "them" as read', 'mark_read', 'any', 'them'],
+    ['Mark all New Relic emails as read', 'mark_read', 'any', 'New Relic'],
+  ])('still parses a named scope: %s', (question, kind, field, query) => {
+    expect(parseInboxAssistantReadCommand(question)).toEqual({ kind, scope: { field, query } });
+    expect(inboxAssistantReadCommandReference(question)).toBeUndefined();
+  });
+
+  // Unsupported restrictions keep their own explanation, and non-commands and
+  // hostile input are neither a command nor a "which emails?" case.
+  it.each(['mark all promotions emails read', 'mark all emails except bigbluebutton unread', 'Review my unread emails', 'mark this as read', `mark ${'x'.repeat(4_100)} as read`, 'mark \u0000them as read'])('reports no pointing reference for %s', question => {
+    expect(inboxAssistantReadCommandReference(question)).toBeUndefined();
+  });
+
   it('marks only matching currently read messages unread across selected accounts, preserving unrelated siblings and prior unread messages', async () => {
     const records = [
       email('sender', { tags: '|INBOX|read|important|', fromAddress: 'news@bigbluebutton.org', threadId: 'mixed', hasAttachments: true }),
@@ -1268,6 +1305,27 @@ describe('explicit scoped read-flag commands', () => {
     await applyInboxAssistantReview(review, review.items.map(item => item.id), f.deps);
     expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', [field], false, { source: 'user' });
     expect(f.callAI).not.toHaveBeenCalled();
+  });
+
+  // Regression guard for "Approve for me": it applies a bare phrase without
+  // asking only where the phrase is in a sender or subject. If a body-only
+  // match is reported as header-matched, mail that merely mentions a word is
+  // changed with no confirmation.
+  it('reports which scoped items matched in a sender or subject, never a body-only or mixed conversation', async () => {
+    const f = fixture([
+      email('by-sender', { tags: '|INBOX|read|', fromName: 'BigBlueButton' }),
+      email('by-subject', { tags: '|INBOX|read|', subject: 'BigBlueButton announcement' }),
+      email('by-body', { tags: '|INBOX|read|', rawBody: '<p>BigBlueButton announcement.</p>' }),
+      email('mixed-header', { tags: '|INBOX|read|', threadId: 'mixed', subject: 'BigBlueButton minutes' }),
+      email('mixed-body', { tags: '|INBOX|read|', threadId: 'mixed', rawBody: '<p>Notes from the BigBlueButton call.</p>' }),
+    ]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'bigbluebutton', field: 'any' } });
+    expect(review.items).toHaveLength(4);
+    const anchored = inboxAssistantHeaderMatchedItems(review);
+    expect(review.items.filter(item => anchored.has(item.id)).map(item => item.emailId).sort()).toEqual(['by-sender', 'by-subject']);
+    // A review object the host did not prepare (for example one rebuilt from
+    // saved history) authorises nothing.
+    expect(inboxAssistantHeaderMatchedItems({ ...review }).size).toBe(0);
   });
 
   it('marks a precise explicit business scope read and undoes only its original unread matches', async () => {

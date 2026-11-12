@@ -109,12 +109,12 @@ describe('Inbox Agent visible review Stop', () => {
     expect(workBar.querySelectorAll('button')).toHaveLength(1);
     fire(stopping, 'click');
     expect(api.cancel).toHaveBeenCalledOnce();
-    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(true);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(true);
 
     await act(async () => cancellation.resolve(ok({ requestId, cancelled: true })));
     expect(view.byLabel('Stop answering')).toBeNull();
     expect(view.byLabel('Stopping request')).toBeNull();
-    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(false);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(false);
     expect(view.container.textContent).toContain('Stopped');
   });
 

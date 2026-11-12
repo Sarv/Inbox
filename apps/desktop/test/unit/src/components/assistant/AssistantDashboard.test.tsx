@@ -263,7 +263,7 @@ describe('read-only assistant dashboard', () => {
     const onNewConversation = vi.fn();
     const view = render(<AssistantDashboard {...props({ onChoosePrompt, onNewConversation })} />);
     await settle();
-    for (const label of ['Review unread', 'Check uncategorized', 'Find what needs a reply', 'Find quotations', 'Find meeting invitations']) fire(button(view, label), 'click');
+    for (const label of ['Review unread', 'Review uncategorized', 'Find what needs a reply', 'Find quotations', 'Find meeting invitations']) fire(button(view, label), 'click');
     expect(onChoosePrompt.mock.calls).toEqual([
       ['Review my unread emails and mark low-value conversations as read.'],
       ['Review my uncategorized unread emails.'],

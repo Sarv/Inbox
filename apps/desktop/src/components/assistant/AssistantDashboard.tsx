@@ -106,7 +106,7 @@ export function AssistantDashboard({ accountIds, chats, visible = true, compact 
   const unavailable = data?.accounts.filter(account => account.status === 'unavailable') ?? [];
   const metricValues = [
     { label: 'Unread', name: 'Unread conversations', value: data?.counts.unreadConversations, prompt: dashboardPrompts.unread, description: 'Conversations with unread mail', Icon: Inbox, link: 'Review mail' },
-    { label: 'Uncategorized unread', name: 'Uncategorized unread conversations', value: data?.counts.uncategorizedUnreadConversations, prompt: dashboardPrompts.uncategorized, description: 'Unread mail without a saved category', Icon: ListFilter, link: 'Check categories' },
+    { label: 'Uncategorized unread', name: 'Uncategorized unread conversations', value: data?.counts.uncategorizedUnreadConversations, prompt: dashboardPrompts.uncategorized, description: 'Unread mail without a saved category', Icon: ListFilter, link: 'Review' },
     { label: 'Needs a reply', name: 'Saved needs-reply conversations', value: data?.counts.needsReplyConversations, description: 'Saved needs-response categories; show the reply worklist', Icon: ReplyAll, link: 'View worklist' },
   ];
   const chooseTask = (prompt: string) => onChoosePrompt(prompt);
@@ -144,7 +144,7 @@ export function AssistantDashboard({ accountIds, chats, visible = true, compact 
           <div className="assistant-dashboard-task-heading"><MailCheck aria-hidden="true" className="h-4 w-4" /><span>Put your inbox in order</span></div>
           <div className="assistant-dashboard-task-actions">
             <button type="button" onClick={() => chooseTask(dashboardPrompts.unread)} className={`${actionClass} assistant-dashboard-primary`}><MailCheck aria-hidden="true" className="h-4 w-4" />Review unread<ArrowRight aria-hidden="true" className="h-3.5 w-3.5" /></button>
-            <button type="button" onClick={() => chooseTask(dashboardPrompts.uncategorized)} className={actionClass}><ListFilter aria-hidden="true" className="h-4 w-4" />Check uncategorized</button>
+            <button type="button" onClick={() => chooseTask(dashboardPrompts.uncategorized)} className={actionClass}><ListFilter aria-hidden="true" className="h-4 w-4" />Review uncategorized</button>
             <button type="button" onClick={() => chooseTask(dashboardPrompts.quotations)} className={actionClass}><Search aria-hidden="true" className="h-4 w-4" />Find quotations</button>
             <button type="button" onClick={() => chooseTask(dashboardPrompts.invitations)} className={actionClass}><CalendarDays aria-hidden="true" className="h-4 w-4" />Find meeting invitations</button>
           </div>
