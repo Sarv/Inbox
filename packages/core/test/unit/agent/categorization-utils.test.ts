@@ -21,6 +21,8 @@ import {
   type EnrichedEmail,
 } from '../../../src/agent/categorization-utils';
 import { formatSenderBehaviorFacts, SENDER_BEHAVIOR_GUIDANCE, SENDER_BEHAVIOR_UNAVAILABLE, type SenderBehaviorSignals } from '../../../src/agent/sender-behavior-context';
+import { classifyAIError } from '../../../src/utils/ai-error';
+import { MAX_MESSAGE_BYTES } from '../../../src/utils/json-size';
 
 // This module is the whole contract with the LLM: what we SEND (prompt +
 // per-email facts) and what we accept BACK. The response side is the fragile
@@ -900,6 +902,41 @@ describe('callAIProvider — Gemini transport', () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ error: { message: 'quota' } }, { status: 429 }));
     await expect(callAIProvider(config({ type: 'gemini', fetchImpl }), 's', 'u'))
       .rejects.toMatchObject({ name: 'AIProviderApiError', code: 'rate_limit_exceeded', provider: 'gemini' });
+  });
+});
+
+// The request body is the prompt stringified, and a prompt can carry an email
+// body a stranger sized. Breaks if: an oversized prompt is stringified into a
+// request (in Electron 44 a large enough one ends the app, uncatchably), or the
+// refusal is retried, or it reads as a provider-wide failure that pauses AI for
+// every account instead of failing this one request.
+describe('callAIProvider — a prompt too large to send', () => {
+  const oversized = 'u'.repeat(MAX_MESSAGE_BYTES);
+
+  it.each(['sarv', 'gemini'] as const)('refuses it before any request or stringify (%s)', async (type) => {
+    const fetchImpl = vi.fn(async () => chatCompletion('never'));
+    const stringify = vi.spyOn(JSON, 'stringify');
+
+    const refused = await callAIProvider(config({ type, fetchImpl }), 'system', oversized).catch((error: unknown) => error);
+
+    expect(stringify).not.toHaveBeenCalled();
+    stringify.mockRestore();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(refused).toMatchObject({ status: 413, message: 'This request is too large to send to the AI provider.' });
+    expect(classifyAIError(refused)).toMatchObject({ kind: 'client', terminal: true });
+  });
+
+  it('is not retried', async () => {
+    const fetchImpl = vi.fn(async () => chatCompletion('never'));
+    await expect(callAIWithRetry(config({ fetchImpl }), 'system', oversized)).rejects.toMatchObject({ status: 413 });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the limit bites below the measured-safe size and real prompts are refused.
+  it('still sends a prompt at the limit', async () => {
+    const fetchImpl = vi.fn(async () => chatCompletion('sent'));
+    expect(await callAIProvider(config({ fetchImpl }), 's', oversized.slice(1))).toBe('sent');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 

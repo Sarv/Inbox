@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { automaticCategorizationDeferred, conversationFoldersOf, conversationMembers, existingCategoryClassification, htmlToPlainText, parseAttachmentNames, parseTags, SENDER_BEHAVIOR_GUIDANCE, waitForAbortableOperation, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
+import { automaticCategorizationDeferred, conversationFoldersOf, conversationMembers, existingCategoryClassification, htmlToPlainText, parseAttachmentNames, parseTags, SENDER_BEHAVIOR_GUIDANCE, stringifyBounded, waitForAbortableOperation, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantAIWorkload, InboxAssistantProgress } from '../../src/types/inbox-assistant';
 import type { InboxAssistantReadCommand, InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewCoverage, InboxAssistantReviewDateFilter, InboxAssistantReviewItem, InboxAssistantReviewItemResult, InboxAssistantReviewKind, InboxAssistantReviewScope } from '../../src/types/inbox-assistant-actions';
@@ -48,7 +48,7 @@ export interface InboxAssistantReviewApplyOptions {
   action?: InboxAssistantReviewAction;
 }
 
-const LIMIT = { threads: 200, page: 25, pages: 80, items: 1_000, members: 100, bodyChars: 12_000, promptChars: 64_000, calls: 40, responseChars: 40_000, duration: 240_000, expiry: 15 * 60_000 } as const;
+const LIMIT = { threads: 200, page: 25, pages: 80, items: 1_000, members: 100, bodyChars: 12_000, scanChars: 1_000_000, promptChars: 64_000, calls: 40, responseChars: 40_000, duration: 240_000, expiry: 15 * 60_000 } as const;
 // Bump when the classifier contract or recommendation policy changes.
 const REVIEW_POLICY_VERSION = 'unread-triage-v10-bounded-message-age';
 const PROTECTED = new Set(['important', 'starred', 'flagged', 'needs_response', 'needsresponse', 'invoice', 'invoices', 'finance', 'meeting', 'meetings', 'reminders']);
@@ -90,16 +90,40 @@ function sourceState(email: EmailRecord): Record<string, unknown> {
   for (const field of ['threadMessageCount', 'threadFirstSender', 'threadLastSender', 'threadIsStarred', 'threadIsImportant', 'threadHasDraft', 'threadUnreadCount']) delete state[field];
   return state;
 }
+function sha256(text: string): string { return createHash('sha256').update(text).digest('hex'); }
+/** A string field longer than this is represented by its own digest in an over-limit state. */
+const DIGESTED_FIELD_CHARS = 1_024;
+/**
+ * The digest of a message's state, for telling whether it changed between review and action.
+ *
+ * The state is the whole record, bodies included, and a stranger sizes the body: stringified
+ * whole, a large enough one ends the app (see MAX_MESSAGE_BYTES in @sarvinbox/core). So the
+ * JSON is measured first. Under the limit the digest is the JSON's, exactly as before; over
+ * it, each long string is replaced by its own digest — streamed, never escaped — so a change
+ * to any field still changes the result. A state too large even then is refused, and the
+ * conversation is reported unavailable rather than acted on.
+ */
+export function inboxAssistantSourceDigest(state: Record<string, unknown>): string {
+  const json = stringifyBounded(state);
+  if (json !== null) return sha256(json);
+  const reduced: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(state)) {
+    reduced[key] = typeof value === 'string' && value.length > DIGESTED_FIELD_CHARS ? { sha256: sha256(value), length: value.length } : value;
+  }
+  const reducedJson = stringifyBounded(reduced);
+  if (reducedJson === null) throw new Error('This message is too large to review.');
+  return sha256(`digested:${reducedJson}`);
+}
 function hash(email: EmailRecord): string {
   // Capture all source/flag/classification state, not just a renderer-provided ID.
-  return createHash('sha256').update(JSON.stringify(sourceState(email))).digest('hex');
+  return inboxAssistantSourceDigest(sourceState(email));
 }
 function identity(email: EmailRecord): string {
-  return createHash('sha256').update(JSON.stringify({ ...sourceState(email),
+  return inboxAssistantSourceDigest({ ...sourceState(email),
     tags: parseTags(email.tags).filter(tag => tag !== 'read').sort().join('|'),
     // SQLite derives this compatibility field from tags on every read. Ignore
     // only the expected Seen change; every other IMAP flag remains protected.
-    flags: email.flags?.filter(flag => flag.toLowerCase() !== '\\seen').sort(), updatedAt: 0 })).digest('hex');
+    flags: email.flags?.filter(flag => flag.toLowerCase() !== '\\seen').sort(), updatedAt: 0 });
 }
 function headers(email: EmailRecord): string {
   return JSON.stringify([email.id, email.messageId, email.threadId, email.folderId, email.uid, email.tags, email.subject, email.fromAddress, email.toAddress, email.date, email.manualCategories, email.serverCategories, email.gmailImportant, email.manualImportant]);
@@ -362,7 +386,14 @@ export async function prepareInboxAssistantReview(
               }
               if (!email || !text) { bodyUnavailable = true; continue; }
               if (email.calendarIcs) protection.push('Business, financial, meeting or security content requires your review.');
-              protection.push(...unreadReviewContentProtections(email, text));
+              // The keep-unread gates are a dozen full regex passes over the text, and a
+              // stranger sizes it: 64 million characters took 0.4 s on a fast Mac and
+              // over 30 s on a busy CI runner, all on the main thread. They scan the
+              // first LIMIT.scanChars only. Anything longer has already put the
+              // conversation over LIMIT.bodyChars, which keeps it unread on its own, so
+              // the cut can leave a reason off the list but never changes the
+              // recommendation.
+              protection.push(...unreadReviewContentProtections(email, text.slice(0, LIMIT.scanChars)));
               if (email.hasAttachments || parseAttachmentNames(email.attachmentNames).length || (await storage.getAttachments(email.id)).length) attachmentsUnknown = true;
               const messageId = `M${contentMessages.length + 1}`;
               const header = `Message: ${messageId}\nFrom: ${email.fromAddress}\nTo: ${email.toAddress}${email.ccAddress ? `\nCc: ${email.ccAddress}` : ''}\nSubject: ${email.subject ?? ''}\nDate: ${email.date}\n`;

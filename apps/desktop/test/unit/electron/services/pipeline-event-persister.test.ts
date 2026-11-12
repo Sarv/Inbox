@@ -1,3 +1,4 @@
+import { MAX_MESSAGE_BYTES } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -5,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * LOSING and not GROWING: a failed batch stays buffered for the next flush, only
  * one write is in flight at a time, and while storage is unavailable the buffer is
  * hard-capped (dropping the oldest) instead of growing without bound. Event data
- * is sanitised (Errors reduced, long strings truncated, functions dropped).
+ * is sanitised (Errors reduced, long strings truncated, functions dropped, and a
+ * structured field a stranger sized summarised before it can be stringified).
  */
 
 const MAX_BUFFER_SIZE = 50;
@@ -18,7 +20,10 @@ const h = vi.hoisted(() => ({
   unsubCalls: 0,
 }));
 
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async (importOriginal) => ({
+  // The real measure: what it decides is what keeps a stranger-sized field out of JSON.stringify.
+  messageBytes: (await importOriginal<typeof import('@sarvinbox/core')>()).messageBytes,
+  MAX_MESSAGE_BYTES: (await importOriginal<typeof import('@sarvinbox/core')>()).MAX_MESSAGE_BYTES,
   createLogger: () => ({
     info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
   }),
@@ -320,6 +325,47 @@ describe('the persisted row', () => {
   it('stores null instead of an empty object', async () => {
     const { row } = await flushOne({ type: 'x', timestamp: 1_700_000_000_000 });
     expect(row.data).toBeNull();
+  });
+
+  // Breaks: a structured field a stranger sized (the email record of a synced
+  // message, body and all) is stringified whole. Past ~256 MB that ends the app
+  // uncatchably; well before it, every synced email copies its body into the log.
+  it('keeps a large email record only as a summary, never stringifying the body', async () => {
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const rawBody = 'b'.repeat(MAX_MESSAGE_BYTES + 1);
+
+    const { row } = await flushOne({ type: 'email:synced', folder: 'INBOX', isNew: true,
+      email: { id: 'e1', threadId: 't1', subject: 'Hello', uid: 9, rawBody } });
+
+    const data = JSON.parse(row.data!) as { email: Record<string, unknown>; folder: string };
+    expect(data.folder).toBe('INBOX');
+    expect(data.email).toMatchObject({ id: 'e1', threadId: 't1', subject: 'Hello', uid: 9 });
+    expect(data.email.rawBody).toBe(`${'b'.repeat(500)}...`);
+    expect(stringify.mock.calls.flat().some((value) => typeof value === 'object' && value !== null
+      && (value as { email?: { rawBody?: string } }).email?.rawBody === rawBody)).toBe(false);
+    stringify.mockRestore();
+  });
+
+  // Breaks: a field still too large once its own strings are cut (an extension's
+  // workflow result nesting a body) is stringified whole instead of left out.
+  it('leaves out a field that is too large even as a summary', async () => {
+    const { row } = await flushOne({ type: 'email:processed', emailId: 'e1', workflowId: 'w',
+      result: { success: true, modifications: { rawBody: 'm'.repeat(200_000) } } });
+
+    expect(JSON.parse(row.data!)).toEqual({ emailId: 'e1', workflowId: 'w', result: '[omitted: over 64 KB]' });
+  });
+
+  // Breaks: ordinary structured fields stop being logged whole (pre-existing behaviour).
+  it('keeps an ordinary structured field whole', async () => {
+    const email = { id: 'e1', subject: 'Hi', tags: ['a', 'b'], rawBody: 'short body' };
+    const { row } = await flushOne({ type: 'email:synced', folder: 'INBOX', isNew: true, email });
+    expect(JSON.parse(row.data!)).toEqual({ folder: 'INBOX', isNew: true, email });
+  });
+
+  // Breaks: a stranger-sized Error message reaches the row whole.
+  it('cuts a long Error message too', async () => {
+    const { row } = await flushOne({ type: 'x', error: new Error('e'.repeat(10_000)) });
+    expect((JSON.parse(row.data!) as { error: { message: string } }).error.message).toHaveLength(503);
   });
 
   it('stores null when the payload cannot be serialised (circular)', async () => {

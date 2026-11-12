@@ -325,6 +325,14 @@ Established shared helpers (extend this list as you add more):
   null for "not a plain file" (an extension's files, a calendar the user opened);
   the sync one throws (fixed-path files the app wrote itself). Use them instead of
   `lstat` followed by `readFile`, which is a race.
+- `stringifyBounded(value, limit?)` / `messageBytes(value, stopAt?)` / `MAX_MESSAGE_BYTES` —
+  `packages/core/src/utils/json-size.ts`. In Electron 44, `JSON.stringify` of one
+  ~256 MB string ends the whole main process, uncatchably. Any main-process code
+  that stringifies a value a stranger sized (an email record or body, an
+  extension's data, a server's or the renderer's answer) measures it first:
+  `stringifyBounded` returns the JSON, or `null` without stringifying when it is
+  over the limit (64 M characters, measured safe; a lower limit for a log line).
+  Never `JSON.stringify(x).slice(…)` to bound a log line — that is the crash.
 - `writePrivateFileAtomicSync(file, data)` — `packages/core/src/utils/atomic-file.ts`.
   Replace a small on-disk store whole (write-file-atomic), readable by this user
   only. Use it instead of checking a path and writing it in place.

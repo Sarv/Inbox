@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { logger } from '../utils/logger';
+import { readRegularFile } from '../utils/regular-file';
 
 import { SDK_HOST } from './panel-assets';
 import type {
@@ -28,6 +29,25 @@ export const ALT_MANIFEST_FILENAME = 'package.json';
 
 /** Extension manifest fields in package.json */
 export const PACKAGE_JSON_EXTENSION_KEY = 'sarvinboxExtension';
+
+/**
+ * The most a manifest file may hold. A real one is a few kilobytes.
+ *
+ * It is the extension author's file, and every installed extension's manifest is kept
+ * in the registry's state, which is stringified whole on every change: a field large
+ * enough ends the app when stringified (see MAX_MESSAGE_BYTES), and would again on every
+ * launch, because the extension is still installed. A gzip archive within the download
+ * limit can unpack to far more than that, so the read stops at the limit.
+ */
+export const MAX_MANIFEST_BYTES = 1024 * 1024;
+
+async function readManifestText(filePath: string): Promise<string> {
+  const bytes = await readRegularFile(filePath, MAX_MANIFEST_BYTES);
+  if (bytes === null) {
+    throw new Error(`${path.basename(filePath)} must be a plain file; a manifest may be at most ${MAX_MANIFEST_BYTES} bytes`);
+  }
+  return bytes.toString('utf-8');
+}
 
 /**
  * Validation result
@@ -97,7 +117,7 @@ async function loadManifest(extensionPath: string): Promise<ExtensionManifest> {
   // Try sarvinbox-extension.json first
   const manifestPath = path.join(extensionPath, MANIFEST_FILENAME);
   if (fs.existsSync(manifestPath)) {
-    const content = fs.readFileSync(manifestPath, 'utf-8');
+    const content = await readManifestText(manifestPath);
     try {
       return JSON.parse(content) as ExtensionManifest;
     } catch (error) {
@@ -108,7 +128,7 @@ async function loadManifest(extensionPath: string): Promise<ExtensionManifest> {
   // Try package.json with sarvinboxExtension field
   const packagePath = path.join(extensionPath, ALT_MANIFEST_FILENAME);
   if (fs.existsSync(packagePath)) {
-    const content = fs.readFileSync(packagePath, 'utf-8');
+    const content = await readManifestText(packagePath);
     try {
       const pkg = JSON.parse(content);
       if (pkg[PACKAGE_JSON_EXTENSION_KEY]) {

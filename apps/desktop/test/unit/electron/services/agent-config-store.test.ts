@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from 'os';
 import { join } from 'path';
 
+import { MAX_MESSAGE_BYTES } from '@sarvinbox/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -19,7 +20,10 @@ vi.mock('electron', () => ({
 
 vi.mock('../../../../electron/services/core-db', async () => await import('../../../../electron/services/__testing__/fake-core-db'));
 
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async (importOriginal) => ({
+  // The real bounded stringify: what it refuses is what this store must not write.
+  stringifyBounded: (await importOriginal<typeof import('@sarvinbox/core')>()).stringifyBounded,
+  MAX_MESSAGE_BYTES: (await importOriginal<typeof import('@sarvinbox/core')>()).MAX_MESSAGE_BYTES,
   createLogger: () => ({
     info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
   }),
@@ -152,6 +156,22 @@ describe('saveAgentConfig', () => {
     db.blobs.set(BLOB_KEY, Buffer.from(JSON.stringify({ enabled: true, autoRead: true }), 'utf8'));
     store.saveAgentConfig({ autoRead: false });
     expect(blobOf(db)).toEqual({ enabled: true, autoRead: false });
+  });
+
+  // Breaks: a renderer-sent value (agent:setConfig takes any object) large enough
+  // to end the app when stringified is stringified — uncatchably, in Electron 44 —
+  // or replaces the saved settings.
+  it('refuses a config too large to be settings, without stringifying it, and keeps the saved one', async () => {
+    const { store, db } = await setup();
+    store.saveAgentConfig({ enabled: true });
+    const stringify = vi.spyOn(JSON, 'stringify');
+
+    expect(() => store.saveAgentConfig({ notes: 'n'.repeat(MAX_MESSAGE_BYTES + 1) })).not.toThrow();
+
+    expect(stringify).not.toHaveBeenCalled();
+    stringify.mockRestore();
+    expect(blobOf(db)).toEqual({ enabled: true });
+    expect(store.loadAgentConfig()).toEqual({ enabled: true });
   });
 
   it('never throws when persistence fails — the live update still applies', async () => {
