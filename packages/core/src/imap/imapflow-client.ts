@@ -526,8 +526,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
 
   /**
    * Race a command that STREAMS message data against a stall, not a deadline.
-   * Use this for the one command whose duration scales with the size of what it
-   * downloads; every other command is fixed-size work and belongs on `op`.
+   * Use this for the message FETCH, whose duration scales with what it returns
+   * (the size of a body, or how many messages' headers); every other command
+   * is fixed-size work and belongs on `op`.
    *
    * Progress is the connection's cumulative received-byte counter. On a pooled
    * connection — which serves one fetch at a time — that is exactly this
@@ -1015,12 +1016,16 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
         },
         { uid: useUid },
       );
-      // `source` above turns this into a whole-message download, whose duration
-      // is a property of the message rather than of the server's health — so it
-      // is judged on stalls, not on a flat clock. See `opStreaming`.
-      messages = await (options?.fetchBody
-        ? this.opStreaming('FETCH (body)', fetching)
-        : this.op('FETCH', fetching));
+      // Judged on stalls, not on a flat clock (see `opStreaming`). `source`
+      // above makes this a whole-message download, whose duration is a property
+      // of the message. A header fetch scales the same way, with the NUMBER of
+      // messages: on 2026-11-12 imap.sarv.com took about a second per header, so
+      // a 100-message drain batch needed ~100s and a flat 60s budget killed it
+      // on every attempt — the batch was thrown away, the connection recycled,
+      // and the same batch retried forever while new mail never arrived. A fetch
+      // that is still delivering messages is slow, not wedged; a silent one now
+      // fails at the stall window, sooner than the flat budget did.
+      messages = await this.opStreaming(options?.fetchBody ? 'FETCH (body)' : 'FETCH', fetching);
     } catch (err) {
       throw this.toImapError(err, 'FETCH_ERROR');
     }

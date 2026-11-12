@@ -337,18 +337,21 @@ describe('incremental sync on a far-behind folder', () => {
   // mail first and MUST stay bounded.
   it('fetches the NEWEST mail first instead of walking up from the watermark', async () => {
     const { server, db, fs } = setup();
-    server.addMessages(INBOX, 700);                              // UIDs 1..700
+    // 2,000 rather than the 700 this used before pacing: on a fast server the
+    // paced windows (64, 256, 500 UIDs) now cover a 699-UID gap completely in
+    // one pass, so the fixture has to be deeper for the cap to leave a hole.
+    server.addMessages(INBOX, 2000);                             // UIDs 1..2000
     // totalCount keeps this off the low-local-count recovery path, so the
     // INCREMENTAL branch is the one under test.
-    await db.updateFolder(db.folderId(INBOX), { lastSyncUid: 1, totalCount: 50 }); // 699 UIDs behind
+    await db.updateFolder(db.folderId(INBOX), { lastSyncUid: 1, totalCount: 50 }); // 1,999 UIDs behind
 
     const res = await fs.syncFolder(server, imapFolder(INBOX), db.asStorage());
 
     expect(res.success).toBe(true);
     // The newest UID on the server is in this pass — that is the mail the user
-    // is looking for. Before the fix it was ~700 messages away.
-    expect(res.messagesInserted).toBe(500);       // capped, not all 699
-    expect(db.allRows().some((e) => e.uid === 700)).toBe(true);
+    // is looking for. Before the fix it was ~2,000 messages away.
+    expect(res.messagesInserted).toBe(820);       // 64 + 256 + 500: stopped at the cap, not all 1,999
+    expect(db.allRows().some((e) => e.uid === 2000)).toBe(true);
   });
 
   // lastSyncUid means "everything at or below this is synced". Advancing it over
@@ -356,14 +359,88 @@ describe('incremental sync on a far-behind folder', () => {
   // incremental sync forever — the exact trap realtime-manager already documents.
   it('does NOT advance lastSyncUid across the hole the cap left below', async () => {
     const { server, db, fs } = setup();
-    server.addMessages(INBOX, 700);
+    server.addMessages(INBOX, 2000);
     await db.updateFolder(db.folderId(INBOX), { lastSyncUid: 1, totalCount: 50 });
 
     await fs.syncFolder(server, imapFolder(INBOX), db.asStorage());
 
-    // Scanned down to 201 only, so UIDs 2..200 are still missing: the watermark
-    // stays put and the background drain closes the gap.
+    // Scanned down to 1181 only, so UIDs 2..1180 are still missing: the
+    // watermark stays put and the background drain closes the gap.
     expect(db.folder(INBOX).lastSyncUid).toBe(1);
+  });
+
+  // The 2026-11-12 incident at this level. The server could not finish a large
+  // header fetch, so every pass failed with nothing and an INBOX only a few
+  // hundred messages behind showed no new mail. A pass must now keep the mail
+  // from the windows that completed, report success, and leave the watermark
+  // where it is because a hole remains underneath.
+  it('keeps the newest mail when the server cannot finish a larger window, without advancing over the hole', async () => {
+    const { server, db, fs } = setup();
+    server.addMessages(INBOX, 600);
+    await db.updateFolder(db.folderId(INBOX), { lastSyncUid: 100, totalCount: 50 });
+    const real = server.fetchMessagesByUidRange.bind(server);
+    const spans: number[] = [];
+    vi.spyOn(server, 'fetchMessagesByUidRange').mockImplementation(async (lo, hi, options) => {
+      spans.push(hi - lo + 1);
+      if (hi - lo + 1 > 100) throw new Error('IMAP FETCH timed out (no data for 30s)');
+      return real(lo, hi, options);
+    });
+
+    const first = await fs.syncFolder(server, imapFolder(INBOX), db.asStorage());
+
+    expect(first.success).toBe(true);
+    expect(first.messagesInserted).toBe(64);                                 // UIDs 537..600 arrived
+    expect(db.allRows().some((e) => e.uid === 600)).toBe(true);
+    expect(db.folder(INBOX).lastSyncUid).toBe(100);                          // hole below: do not advance
+    expect(spans).toEqual([64, 256]);
+
+    // Idempotent re-run: the same pass again adds no duplicate rows and still
+    // does not move the watermark. It also starts from the size that worked
+    // instead of repeating the window that failed.
+    spans.length = 0;
+    const again = await fs.syncFolder(server, imapFolder(INBOX), db.asStorage());
+    expect(again.success).toBe(true);
+    expect(again.messagesInserted).toBe(0);
+    expect(db.allRows().filter((e) => e.uid === 600)).toHaveLength(1);
+    expect(db.folder(INBOX).lastSyncUid).toBe(100);
+    expect(spans[0]).toBe(64);
+  });
+
+  // A failure before anything was fetched is still a failure: reporting an
+  // empty success here would read as "no new mail" while mail is waiting.
+  it('reports the sync as failed when not even the first window can be fetched', async () => {
+    const { server, db, fs } = setup();
+    server.addMessages(INBOX, 600);
+    await db.updateFolder(db.folderId(INBOX), { lastSyncUid: 100, totalCount: 50 });
+    vi.spyOn(server, 'fetchMessagesByUidRange').mockRejectedValue(new Error('IMAP FETCH timed out (no data for 30s)'));
+
+    const res = await fs.syncFolder(server, imapFolder(INBOX), db.asStorage());
+
+    expect(res.success).toBe(false);
+    expect(db.folder(INBOX).lastSyncUid).toBe(100);
+  });
+
+  // Multi-account: each account has its own syncer, so one account's slow
+  // server must not shrink the fetches of another.
+  it('does not let one account’s slow server shrink another account’s windows', async () => {
+    const slow = setup();
+    slow.server.addMessages(INBOX, 600);
+    await slow.db.updateFolder(slow.db.folderId(INBOX), { lastSyncUid: 100, totalCount: 50 });
+    vi.spyOn(slow.server, 'fetchMessagesByUidRange').mockRejectedValue(new Error('IMAP FETCH timed out (no data for 30s)'));
+    await slow.fs.syncFolder(slow.server, imapFolder(INBOX), slow.db.asStorage());
+    await slow.fs.syncFolder(slow.server, imapFolder(INBOX), slow.db.asStorage());
+
+    const healthy = setup();
+    healthy.server.addMessages(INBOX, 600);
+    await healthy.db.updateFolder(healthy.db.folderId(INBOX), { lastSyncUid: 100, totalCount: 50 });
+    const spans: number[] = [];
+    const real = healthy.server.fetchMessagesByUidRange.bind(healthy.server);
+    vi.spyOn(healthy.server, 'fetchMessagesByUidRange').mockImplementation(async (lo, hi, options) => { spans.push(hi - lo + 1); return real(lo, hi, options); });
+
+    const res = await healthy.fs.syncFolder(healthy.server, imapFolder(INBOX), healthy.db.asStorage());
+    expect(spans).toEqual([64, 256, 180]);
+    expect(res.messagesInserted).toBe(500);
+    expect(healthy.db.folder(INBOX).lastSyncUid).toBe(600);
   });
 
   // Once the gap is small enough to cover in one pass the watermark MUST advance,
