@@ -9,7 +9,7 @@ import { createMutex, type Mutex } from '../utils/mutex';
 
 import type { AutocryptSink } from './header-stage';
 import { isConnectionError } from './imap-errors';
-import { fetchNewMessagesWindowed } from './incremental-fetch';
+import { fetchNewMessagesWindowed, fetchPaceFor, NEW_MAIL_FETCH_BUDGET_MS, type FetchPace } from './incremental-fetch';
 import { MessageProcessor, type IngestServerActions } from './message-processor';
 import type { ReputationLookup } from './reputation-stage';
 import { withFolderSelected } from './with-folder';
@@ -107,6 +107,8 @@ export class RealtimeManager extends EventEmitter {
    *    mailbox out from under IDLE.
    */
   private epoch = 0;
+  /** Per-folder fetch pace for the IDLE new-mail path (see incremental-fetch.ts). */
+  private readonly newMailPaces = new Map<string, FetchPace>();
 
   /** Serializes start()/stop()/updateClient() so two callers can't interleave
    *  their awaits and end up with two half-built sessions. */
@@ -852,6 +854,9 @@ export class RealtimeManager extends EventEmitter {
       // every cycle and new mail never landed (see incremental-fetch.ts). Cap
       // per-cycle work so a big backlog drains across cycles (backfill/periodic
       // sync cover the rest) instead of one command that can't finish in time.
+      // Paced and time-boxed as well: on a server slow enough that even one
+      // 500-UID window cannot complete, the pass takes what fits in its budget
+      // and the watermark advances over that much instead of over nothing.
       const messages = await withFolderSelected(client, folderPath, async () => {
         const status = await client.selectFolder(folderPath);
         if (epoch !== this.epoch) return [];
@@ -860,7 +865,7 @@ export class RealtimeManager extends EventEmitter {
           lastUid,
           status.uidNext,
           { fetchHeaders: true, fetchBody: false, fetchBodyStructure: true },
-          { maxMessages: this.config.maxNewMessagesBatch * 100 },
+          { maxMessages: this.config.maxNewMessagesBatch * 100, pace: fetchPaceFor(this.newMailPaces, folderPath), budgetMs: NEW_MAIL_FETCH_BUDGET_MS },
         );
       });
       if (epoch !== this.epoch) return;

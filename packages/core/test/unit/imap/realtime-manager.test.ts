@@ -506,6 +506,31 @@ describe('RealtimeManager — IDLE events', () => {
     expect(storage.recalculateFolderCounts).toHaveBeenCalledWith(['INBOX']);
   });
 
+  // The 2026-11-12 incident on the IDLE path: with the watermark a few hundred
+  // messages behind and a server too slow for a full window, every wake-up
+  // failed ("Error handling new messages: IMAP FETCH timed out") and stored
+  // nothing. A wake-up must now keep the contiguous run it did fetch and move
+  // the watermark over exactly that much, so each one makes progress.
+  it('stores what it fetched and advances the watermark over it when a later window fails', async () => {
+    const { realtime, client, storage, processor, errors } = await makeRealtime();
+    for (let i = 0; i < 400; i++) client.addMessage('INBOX', { subject: `m${i}` });
+    const real = client.fetchMessagesByUidRange.bind(client);
+    vi.spyOn(client, 'fetchMessagesByUidRange').mockImplementation(async (lo, hi, options) => {
+      if (hi - lo + 1 > 100) throw new Error('IMAP FETCH timed out (no data for 30s)');
+      return real(lo, hi, options);
+    });
+    processor.processBatch.mockResolvedValueOnce({ ...EMPTY_BATCH, inserted: 64, insertedIds: [] });
+    await realtime.start('INBOX');
+
+    client.emitIdle({ type: 'new' } as any);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(processor.processBatch).toHaveBeenCalledTimes(1);
+    expect(processor.processBatch.mock.calls[0]![0].map((m: { uid: number }) => m.uid)).toEqual(Array.from({ length: 64 }, (_, k) => k + 1));
+    expect(storage.updateFolder).toHaveBeenCalledWith('f1', { lastSyncUid: 64 });
+    expect(errors).toEqual([]);
+  });
+
   it('does nothing when the server pushed a NEW notice but there is no new UID', async () => {
     const { realtime, client, storage, processor } = await makeRealtime();
     await realtime.start('INBOX');

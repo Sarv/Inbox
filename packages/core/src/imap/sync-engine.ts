@@ -35,6 +35,7 @@ import { isFolderSyncEnabled, folderHeadersOnly } from './folder-sync-policy';
 import { FolderSyncer, type FolderSyncResult } from './folder-syncer';
 import type { AutocryptSink } from './header-stage';
 import { getSuggestedBackoffMs, isStartTlsUnavailableError } from './imap-errors';
+import { fetchPaceFor, fetchSizeAfterFailure, nextFetchSize, type FetchPace } from './incremental-fetch';
 import { isSarvHost } from './label-strategy';
 import { MessageProcessor, isExpectedMessage, type IngestServerActions } from './message-processor';
 import { OperationQueue, type OperationResult } from './operation-queue';
@@ -84,6 +85,13 @@ const DRAIN_MAX_PER_CALL = 300;
 const BODY_FETCH_STALL_TIMEOUT = 30_000;
 const BODY_FETCH_MAX_TIMEOUT = 5 * 60_000;
 const DRAIN_FETCH_BATCH = 100;
+// Smallest drain sub-batch once a slow server has shrunk it (see drainPaces).
+const DRAIN_MIN_FETCH_BATCH = 5;
+// How long one drain call may keep fetching before it reports what it stored
+// and hands its pooled connection back. On a slow server a full 300-message call
+// ran for eight minutes with nothing logged and one of four connections held
+// (observed 2026-11-12); the scheduler simply calls again for the rest.
+const DRAIN_CALL_BUDGET_MS = 60_000;
 // Server-search escalation: newest-first cap on how many missing matches one
 // server search downloads, so a query hitting thousands of old mails stays
 // bounded (header-only, in DRAIN_FETCH_BATCH sub-batches).
@@ -196,6 +204,13 @@ export class SyncEngine {
   // session while genuinely-missing newer holes stayed undownloaded. Session-only,
   // size-capped, safe to lose.
   private drainTriedUids = new Map<string, Set<number>>();
+  /**
+   * Per-folder size of the drain's header FETCH, following how long this
+   * server took for the last one (incremental-fetch.ts). DRAIN_FETCH_BATCH was
+   * sized for ~250ms a header; at a second a header it cannot finish, and a
+   * batch that fails is retried whole — so a slow server stranded the folder.
+   */
+  private drainPaces = new Map<string, FetchPace>();
   // Did the current syncAll* pass actually mutate the emails table (insert new
   // mail, update flags, or delete)? Only then can folder counts have changed, so
   // only then is the end-of-sync recalculateFolderCounts() worth its full-table
@@ -1399,17 +1414,41 @@ export class SyncEngine {
       const toFetch = drainable.slice(0, maxPerCall);
       let inserted = 0;
       const accounted = new Set<number>();
-      for (let i = 0; i < toFetch.length; i += DRAIN_FETCH_BATCH) {
-        const sub = toFetch.slice(i, i + DRAIN_FETCH_BATCH);
+      const pace = fetchPaceFor(this.drainPaces, folderPath, DRAIN_FETCH_BATCH);
+      const bounds = { min: DRAIN_MIN_FETCH_BATCH, max: DRAIN_FETCH_BATCH };
+      const callStarted = Date.now();
+      for (let i = 0; i < toFetch.length;) {
+        // Checked before every batch but the first, so a call always attempts
+        // something; the UIDs it did not reach stay untried and count as remaining.
+        if (i > 0 && Date.now() - callStarted >= DRAIN_CALL_BUDGET_MS) break;
+        const size = Math.max(bounds.min, Math.min(bounds.max, Math.round(pace.size)));
+        const sub = toFetch.slice(i, i + size);
+        const started = Date.now();
         // Re-asserted per batch rather than held across the whole loop: each
         // FETCH is its own critical section, so the processBatch/storage work
         // between batches doesn't keep the primary's mailbox pinned away from
         // the IDLE folder for the length of a drain.
-        const fetched = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID(sub, {
-          fetchHeaders: true,
-          fetchBody: false,          // header-only; bodies fetch lazily on open
-          fetchBodyStructure: true,
-        }));
+        let fetched: IMAPMessage[];
+        try {
+          fetched = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID(sub, {
+            fetchHeaders: true,
+            fetchBody: false,          // header-only; bodies fetch lazily on open
+            fetchBodyStructure: true,
+          }));
+        } catch (error) {
+          // Ask for less next time, whatever happens to this call. One line per
+          // failure (not per message): a drain that silently returned null on
+          // every tick is how an INBOX stayed days behind with nothing logged.
+          pace.size = fetchSizeAfterFailure(size, bounds.min);
+          logger.warn(`Drain ${folderPath}: a fetch of ${sub.length} header(s) failed (${(error as Error)?.message ?? error}); next batch ${pace.size}`);
+          // Batches already stored this call are real progress: report them
+          // (the unfetched UIDs stay untried and count as remaining) instead of
+          // throwing the whole call away.
+          if (i === 0) throw error;
+          break;
+        }
+        pace.size = nextFetchSize(size, Date.now() - started, bounds);
+        i += sub.length;
         if (fetched.length > 0) {
           const r = await this.messageProcessor.processBatch(fetched, folder, this.storage, undefined, { quiet: true });
           inserted += r.inserted;

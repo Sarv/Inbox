@@ -9,7 +9,7 @@ import { logger } from '../utils/logger';
 import { isWatermarkImpossible } from '../utils/sync-watermark';
 
 import type { AutocryptSink } from './header-stage';
-import { fetchNewestMessagesWindowed } from './incremental-fetch';
+import { fetchNewestMessagesWindowed, fetchPaceFor, NEW_MAIL_FETCH_BUDGET_MS, type FetchPace } from './incremental-fetch';
 import { MessageProcessor, type IngestServerActions } from './message-processor';
 import type { ReputationLookup } from './reputation-stage';
 import { withFolderSelected } from './with-folder';
@@ -112,6 +112,10 @@ export class FolderSyncer {
   // sync to drop the stale source membership — the folder-sync path's equivalent of
   // RealtimeManager.handleNewMessages' onSyncRequest reconcile.
   private onReconcileFolders: ((folders: string[]) => void) | null = null;
+  /** What each folder's server has shown it can serve per FETCH (see
+   *  incremental-fetch.ts). One syncer belongs to one account's engine, so a
+   *  slow account never shrinks another account's fetches. */
+  private readonly newMailPaces = new Map<string, FetchPace>();
 
   constructor() {
     this.messageProcessor = new MessageProcessor({
@@ -629,7 +633,7 @@ export class FolderSyncer {
         fetchHeaders: true,
         fetchBody: !options.headersOnly,
         fetchBodyStructure: true,
-      }, { maxMessages: INCREMENTAL_MAX_NEW_MESSAGES }));
+      }, { maxMessages: INCREMENTAL_MAX_NEW_MESSAGES, pace: fetchPaceFor(this.newMailPaces, folder.path), budgetMs: NEW_MAIL_FETCH_BUDGET_MS }));
 
     // True when the cap stopped the pass before it reached the watermark, so
     // unfetched UIDs remain BELOW the newest message we just took.

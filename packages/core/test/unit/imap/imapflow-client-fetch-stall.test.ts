@@ -12,7 +12,8 @@ import { ImapFlowClient } from '../../../src/imap/imapflow-client';
  *
  * These tests pin the two halves of the replacement: a transfer that keeps
  * delivering bytes is left alone, a socket that has gone silent still fails
- * fast, and every OTHER command keeps the flat budget it needs.
+ * fast, and every OTHER command keeps the flat budget it needs. The same rule
+ * covers a header fetch, whose duration scales with how many messages it returns.
  */
 
 interface Internals {
@@ -56,7 +57,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('ImapFlowClient — body FETCH is bounded by a stall, not by the clock', () => {
+describe('ImapFlowClient — a message FETCH is bounded by a stall, not by the clock', () => {
   // THE regression. A 90-second download that never goes quiet must complete.
   // If this fails, large mail is un-fetchable again and the retry loop that
   // burns one pool connection per attempt comes back with it.
@@ -123,20 +124,70 @@ describe('ImapFlowClient — body FETCH is bounded by a stall, not by the clock'
     await expect(result).rejects.toBeDefined();
   });
 
-  // Regression in the other direction: only the streaming fetch was meant to
-  // change. Every other command is fixed-size work whose flat budget is what
-  // detects a wedge quickly — loosening it globally would let a dead socket sit.
-  it('still holds a metadata fetch to the flat 60s budget', async () => {
+  // The 2026-11-12 incident. A header fetch is not fixed-size work either: its
+  // duration scales with how many messages it returns, and imap.sarv.com was
+  // taking about a second per header. Under the flat 60s budget a 100-message
+  // drain batch was killed on every attempt and the same batch retried forever,
+  // so an INBOX ~490 messages behind received no new mail for days. A header
+  // fetch that keeps delivering must be allowed to finish.
+  // (Behaviour change: this test used to pin the flat 60s budget for it.)
+  it('lets a header fetch that keeps receiving messages run well past 60s', async () => {
+    const counter = { bytes: 0 };
+    let finish!: (messages: unknown[]) => void;
+    const fetching = new Promise<unknown[]>((resolve) => { finish = resolve; });
+    const { client, close } = makeClient(() => fetching, counter);
+
+    const result = client.fetchMessagesByUID(Array.from({ length: 100 }, (_, k) => k + 1)); // envelopes only
+    const state = watch(result);
+
+    for (let elapsed = 0; elapsed < 100_000; elapsed += 5_000) {
+      counter.bytes += 4 * 1024; // a few more headers arrived since the last tick
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    expect(state.settled).toBe(false);
+
+    finish([]);
+    await expect(result).resolves.toEqual([]);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  // Slow is not the same as dead: a header fetch with nothing arriving is a
+  // wedge and must fail at the stall window (sooner than the old flat budget),
+  // recycling the socket so queued commands do not each wait it out.
+  it('fails a header fetch whose socket goes silent, at the 30s stall window', async () => {
     const counter = { bytes: 0 };
     const { client, close } = makeClient(() => new Promise(() => { /* never */ }), counter);
 
-    const result = client.fetchMessagesByUID([1]); // no fetchBody — envelopes only
+    const result = client.fetchMessagesByUidRange(1, 500);
     const state = watch(result);
 
-    await vi.advanceTimersByTimeAsync(59_000);
+    await vi.advanceTimersByTimeAsync(25_000);
     expect(state.settled).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(state.rejected).toBe(true);
+    expect(close).toHaveBeenCalled();
+    await expect(result).rejects.toThrow(/FETCH timed out \(no data for 3\ds\)/);
+  });
+
+  // Only the message FETCH scales with its answer. Every other command is
+  // fixed-size work whose flat budget is what detects a wedge — bytes arriving
+  // for something else on the connection must not keep a dead STORE alive.
+  it('still holds a fixed-size command to the flat 60s budget, whatever else is arriving', async () => {
+    const counter = { bytes: 0 };
+    const { client, close } = makeClient(() => new Promise(() => { /* never */ }), counter);
+    (client as unknown as { client: Record<string, unknown> }).client.messageFlagsSet = () => new Promise(() => { /* never */ });
+
+    const result = client.setFlags([1], ['\\Seen']);
+    const state = watch(result);
+
+    for (let elapsed = 0; elapsed < 55_000; elapsed += 5_000) {
+      counter.bytes += 1024;
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    expect(state.settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(6_000);
     expect(state.rejected).toBe(true);
     expect(close).toHaveBeenCalled();
     await expect(result).rejects.toBeDefined();

@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Verified Mark Certificate. Since 1.2.0 the certificate could never be
   checked, so brands showed their logo but never the tick. Brands already seen
   are re-checked within an hour of updating.
+- **New mail no longer stops arriving when the mail server is slow.** If the
+  server took more than a minute to list a batch of new messages, Sarv Inbox
+  gave up, kept nothing and asked for the same batch again, so an inbox only a
+  few hundred messages behind could show no new mail for days. It now asks for
+  smaller batches when the server is slow, keeps everything that arrived, and
+  shows the newest mail first.
 
 ### Security
 - **Extensions now run in a sandbox.** An installed extension can no longer read
