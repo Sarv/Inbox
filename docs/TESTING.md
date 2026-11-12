@@ -163,6 +163,23 @@ mail. See `packages/storage-node/test/unit/thread-resolver.test.ts` for the patt
 - **Deterministic.** No wall clock, no randomness, no network, no sleeping:
   `vi.useFakeTimers()` / `vi.setSystemTime()`, and inject dates. Filesystem use
   goes under `os.tmpdir()` and is cleaned up.
+- **A slow-pattern guard checks the shape of the cost, never a wall-clock
+  budget.** CI runs every suite at once with coverage on, and a 50 ms budget
+  failed there on a call that takes 1.3 ms locally (59 ms on the runner). A test
+  that guards against a ReDoS, a quadratic scan or an unbounded walk uses
+  `packages/core/src/test-support/complexity.ts` instead: `growthRatio` (8x the
+  input costs ~8x when linear, ~64x when quadratic; assert it is under
+  `linearGrowthLimit()`), `cappedGrowthLimit()` for work that must stop growing
+  past a size cap, `costRatio` against an ordinary input of the same size (for
+  exponential backtracking), or a count of the operations. They time this
+  thread's CPU, interleaved, fastest of seven rounds, so a loaded runner cancels
+  out. Prove a new guard: put the slow pattern back (or a quadratic stand-in)
+  and watch it fail, then watch it pass on the real code.
+- **A heavy-but-linear test gets a timeout sized for CI.** `ciTimeout(localMs)`
+  (`test-support/ci-timeout.ts`) is the test's time under a local
+  `pnpm test:coverage` times 25, the worst CI slowdown measured plus headroom.
+  Measure with coverage on: it alone made some tests 9x slower. Say beside the
+  call what was measured.
 - **No production code in a test's service.** If something can only be tested by
   changing the source, change the source deliberately in its own commit — don't
   bend the test around it.
