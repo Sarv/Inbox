@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { costRatio, growthRatio, linearGrowthLimit } from '../../../src/test-support/complexity';
 import {
   redactEmailAddresses,
   redactSecrets,
@@ -33,11 +34,11 @@ describe('redactEmailAddresses', () => {
   });
 
   // Bounded pattern: a pathological line must not stall the crash path.
-  it('stays fast on long pathological input', () => {
-    const evil = `${'a'.repeat(50_000)}@${'b-'.repeat(20_000)}`;
-    const t = performance.now();
-    redactEmailAddresses(evil);
-    expect(performance.now() - t).toBeLessThan(500);
+  // Breaks if a quantifier loses its ceiling: every start in the run then scans
+  // to the `@` and back, so 8x the line costs ~64x instead of ~8x.
+  it('stays linear on long pathological input', () => {
+    const evil = (n: number) => `${'a'.repeat(n)}@${'b-'.repeat(n * 0.4)}`;
+    expect(growthRatio(evil, redactEmailAddresses, { size: 5_000 })).toBeLessThan(linearGrowthLimit(8));
   });
 });
 
@@ -86,12 +87,16 @@ describe('redactSecrets', () => {
   // unterminated value full of backslashes backtracked exponentially (~3 s of
   // main-thread stall at 40), on every app.log line and crash report.
   it('stays fast on an unterminated value full of backslashes', () => {
-    // 40 backslashes: the old pattern took ~3 s here (and doubled every 1.5
-    // more), the bounded one microseconds — so the gap is unmistakable on any
-    // machine without hanging the suite when it regresses.
-    const t = performance.now();
-    redactSecrets(`"password":"${'\\'.repeat(40)}`);
-    expect(performance.now() - t).toBeLessThan(500);
+    // 40 backslashes against 40 letters, which every version reads one way:
+    // the bounded pattern costs about the same on both, the old one ~3 s
+    // against microseconds (and doubled every 1.5 more backslashes). Compared,
+    // not timed, so a loaded runner cannot fail it; small enough not to hang
+    // the suite when it regresses.
+    const ratio = costRatio(
+      () => redactSecrets(`"password":"${'\\'.repeat(40)}`),
+      () => redactSecrets(`"password":"${'a'.repeat(40)}`),
+    );
+    expect(ratio).toBeLessThan(10);
   });
 
   // The ReDoS fix must not change what is redacted: escaped quotes stay inside

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { cleanEmailHtmlForLLM } from '../../../src/parser/html-clean';
+import { cappedGrowthLimit, growthRatio } from '../../../src/test-support/complexity';
 
 import { OUTLOOK_REPLY_HTML } from './fixtures/outlook-reply';
 
@@ -259,12 +260,13 @@ describe('cleanEmailHtmlForLLM — options and bounds', () => {
   });
 
   // A hostile/huge marketing body must not pin the main process: the INPUT is
-  // capped before sanitize-html tokenizes it.
+  // capped before sanitize-html tokenizes it. Breaks: the work keeps growing
+  // past the cap. A body 8x the 250 KB one then costs ~8x; capped, both
+  // tokenize the same 200 KB and cost the same (limit √8). Compared, not timed
+  // against a wall-clock ceiling, so a loaded runner cannot fail it.
   it('caps the raw input it will tokenize (200 KB) so a giant body cannot stall the main process', () => {
-    const huge = `<p>${'x'.repeat(250_000)}</p><p>TAIL_MARKER</p>`;
-    const started = Date.now();
-    const out = cleanEmailHtmlForLLM(huge);
-    expect(out).not.toContain('TAIL_MARKER');    // everything past the cap is discarded
-    expect(Date.now() - started).toBeLessThan(3000);
+    const huge = (chars: number) => `<p>${'x'.repeat(chars)}</p><p>TAIL_MARKER</p>`;
+    expect(cleanEmailHtmlForLLM(huge(250_000))).not.toContain('TAIL_MARKER'); // everything past the cap is discarded
+    expect(growthRatio(huge, (html) => cleanEmailHtmlForLLM(html), { size: 250_000 })).toBeLessThan(cappedGrowthLimit(8));
   });
 });

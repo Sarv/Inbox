@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import { ciTimeout } from '../../../../packages/core/src/test-support/ci-timeout';
+
 /**
  * Guards the SHIPPED electron-builder config against the schema of the
  * electron-builder actually installed.
@@ -59,7 +61,9 @@ describe('electron-builder configuration', () => {
   };
 
   // If this fails, every platform in .github/workflows/release.yml fails.
-  it('validates against the installed electron-builder schema', () => {
+  // Heavy but linear (the whole config against electron-builder's full schema):
+  // 388 ms under local coverage, 2.6 s on CI (run 43089649771).
+  it('validates against the installed electron-builder schema', { timeout: ciTimeout(390) }, () => {
     expect(() => validateSchema(schema, buildConfig, { name: 'electron-builder' })).not.toThrow();
   });
 

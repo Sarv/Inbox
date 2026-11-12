@@ -119,12 +119,25 @@ describe('markDownloadedFromInternet — macOS', () => {
   });
 
   // A hung child must not hold the save: the wait is capped, then logged.
+  // Breaks: the save waits on a child that never answers. On fake timers it
+  // checks the cap itself (still waiting at 19 ms, given up at 20 ms) instead of
+  // racing a wall clock that a loaded CI runner stretches.
   it('gives up after the timeout instead of delaying the save', async () => {
-    const run = vi.fn(); // never calls back
-    const started = Date.now();
-    await markDownloadedFromInternet(SECRET_FILE, { platform: 'darwin', execFile: run, timeoutMs: 20 });
-    expect(Date.now() - started).toBeLessThan(1_000);
-    expect(String(h.warn.mock.calls[0][0])).toContain('timeout');
+    vi.useFakeTimers();
+    try {
+      const run = vi.fn(); // never calls back
+      let settled = false;
+      const marking = markDownloadedFromInternet(SECRET_FILE, { platform: 'darwin', execFile: run, timeoutMs: 20 })
+        .then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(19);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      await marking;
+      expect(String(h.warn.mock.calls[0][0])).toContain('timeout');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // A synchronous throw from the spawn (EAGAIN, a bad argument) is still best effort.

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../../electron/services/core-db', () => ({ getCoreDb: () => { throw new Error('Use the isolated automatic-review test database.'); } }));
 
+import { ciTimeout } from '../../../../../../packages/core/src/test-support/ci-timeout';
 import { createInboxAssistantHistoryStore } from '../../../../electron/services/inbox-assistant-history';
 import { InboxAssistantService, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
 import type { InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantExchange, InboxAssistantReviewActionRequest } from '../../../../src/types/inbox-assistant';
@@ -291,10 +292,10 @@ describe('bounded automatic unread review', () => {
   // Regression: the 10-batch cap is what keeps an automatic review from walking
   // an entire mailbox unattended; without it this run would mark or bill all
   // 2,001 conversations in one go. It needs 2,001 real rows to reach the cap,
-  // and runs three automatic reviews over them, so it gets its own timeout: about
-  // 4s under coverage locally, close to the 5s default on a slower CI runner.
-  // (Profiled; the real hot spot, html-to-text recompiling per body, is fixed.)
-  it('stops at ten batches with protected mail still remaining and no AI calls', { timeout: 20_000 }, async () => {
+  // and runs three automatic reviews over them, so it gets its own timeout:
+  // 983 ms under local coverage, 5.1 s on CI (run 43089649771). (Profiled; the
+  // real hot spot, html-to-text recompiling per body, is fixed.)
+  it('stops at ten batches with protected mail still remaining and no AI calls', { timeout: ciTimeout(990) }, async () => {
     const f = fixture(Array.from({ length: 2_001 }, (_, index) => newsletter(`kept-${index}`, true)));
     const initial = await f.prepare();
     const result = await f.auto(initial);
@@ -315,7 +316,12 @@ describe('bounded automatic unread review', () => {
     expect(f.deps.setRead).not.toHaveBeenCalled();
   });
 
-  it.each(['calls', 'input characters'] as const)('stops at the automatic classification budget for %s while retaining completed receipts', async limit => {
+  // Breaks: an automatic review keeps calling the AI past its call or
+  // input-character budget, or loses the receipts of the batches it finished.
+  // Heavy but linear (401 newsletters of 11 KB HTML each, reviewed in batches):
+  // 570 ms under local coverage, and it hit the 5 s default on CI (run
+  // 43089649771), so its timeout is sized for CI.
+  it.each(['calls', 'input characters'] as const)('stops at the automatic classification budget for %s while retaining completed receipts', { timeout: ciTimeout(570) }, async limit => {
     const records = Array.from({ length: limit === 'calls' ? 600 : 401 }, (_, index) => newsletter(`offer-${index}`));
     if (limit === 'input characters') {
       for (const row of records) {
