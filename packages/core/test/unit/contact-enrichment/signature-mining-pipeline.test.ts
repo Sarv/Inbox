@@ -117,3 +117,21 @@ describe('mining a click-to-call signature', () => {
     }
   });
 });
+
+describe('mining a signature laid out in a table', () => {
+  const ARUN = 'arun.kumar@acme.in';
+
+  // New Outlook / Outlook on the web: one row for name | mobile, the landline
+  // in the row below, sent minified.
+  const tableSignature = `
+    <p>Thanks,</p>
+    <table style="border-collapse:collapse"><tbody><tr><td style="padding:0"><span>Arun Kumar</span></td><td style="padding:0 8px"><span>|</span></td><td><span>98765 43210</span></td></tr><tr><td colspan="3"><span>022 4000 1234</span></td></tr></tbody></table>`;
+
+  // Breaks: table cells and rows converted with no separator, so the mobile
+  // read "98765 43210022 4000 1234" — one run of digits no number fits — and
+  // the contact got no phone at all.
+  it('finds a mobile whose table row is followed by another number', () => {
+    const { phones } = mine(tableSignature, ARUN);
+    expect([...phones.keys()]).toContain('+919876543210');
+  });
+});

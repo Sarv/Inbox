@@ -89,6 +89,171 @@ describe('htmlToPlainText', () => {
   });
 });
 
+/**
+ * Layout tables. `html-to-text` only lays out tables it is told are data
+ * tables, so every `<td>` rendered as bare inline text: a minified signature
+ * table came out as "Arun Kumar+91 98765 43210Sales Manager". That glued names
+ * to numbers in snippets and search text, and fused one row's number onto the
+ * next row's, which phone mining then could not read at all.
+ */
+describe('htmlToPlainText — table cells and rows', () => {
+  // A signature generator's layout (logo | divider | details), sent minified as
+  // those tools do: no whitespace between any two tags, and the details are a
+  // NESTED table holding one fact per row.
+  const NESTED_SIGNATURE = [
+    '<table cellpadding="0" cellspacing="0"><tbody><tr>',
+    '<td width="80"><img src="https://cdn.example/logo.png" alt="Acme"></td>',
+    '<td width="10" style="border-left:2px solid #ccc"></td>',
+    '<td><table cellpadding="0" cellspacing="0"><tbody>',
+    '<tr><td><b>Arun Kumar</b></td></tr>',
+    '<tr><td>Sales Manager</td><td>|</td><td>Acme Ltd</td></tr>',
+    '<tr><td>M:</td><td><a href="tel:+919876543210">+91 98765 43210</a></td></tr>',
+    '<tr><td>022 4000 1234</td></tr>',
+    '</tbody></table></td>',
+    '</tr></tbody></table>',
+  ].join('');
+
+  // New Outlook / Outlook on the web: spans straight inside the cells, minified.
+  const OUTLOOK_WEB_SIGNATURE =
+    '<table style="border-collapse:collapse"><tbody>' +
+    '<tr><td style="padding:0"><span style="font-size:11pt">Arun Kumar</span></td>' +
+    '<td style="padding:0 8px"><span>|</span></td><td><span>98765 43210</span></td></tr>' +
+    '<tr><td colspan="3"><span>022 4000 1234</span></td></tr>' +
+    '</tbody></table>';
+
+  // Classic Outlook desktop (Word HTML): every cell's text sits in a MsoNormal paragraph.
+  const OUTLOOK_DESKTOP_SIGNATURE =
+    '<table class=MsoNormalTable border=0 cellspacing=0 cellpadding=0 style="border-collapse:collapse"><tr>' +
+    '<td width=150 valign=top style="padding:0in 5.4pt 0in 5.4pt"><p class=MsoNormal><b><span style="color:#1F497D">Arun Kumar<o:p></o:p></span></b></p></td>' +
+    '<td valign=top><p class=MsoNormal><span>+91 98765 43210<o:p></o:p></span></p></td>' +
+    '</tr></table>';
+
+  const lines = (text: string) => text.split('\n').filter(line => line.trim() !== '');
+
+  // Breaks: adjacent cells glue together, so a name reads as part of a phone number.
+  it('separates the cells of a row with a space', () => {
+    expect(htmlToPlainText('<table><tr><td>Arun Kumar</td><td>+91 98765 43210</td></tr></table>'))
+      .toBe('Arun Kumar +91 98765 43210');
+  });
+
+  // Breaks: rows fuse onto one line, so the last word of a row joins the first of the next.
+  it('puts each row on its own line', () => {
+    expect(htmlToPlainText('<table><tr><td>Arun Kumar</td></tr><tr><td>Sales Manager</td></tr></table>'))
+      .toBe('Arun Kumar\nSales Manager');
+  });
+
+  // Breaks: header cells are left out of the cell selector and still glue together.
+  it('treats header cells like data cells', () => {
+    expect(htmlToPlainText('<table><tr><th>Name</th><th>Phone</th></tr><tr><td>Arun</td><td>+91 98765 43210</td></tr></table>'))
+      .toBe('Name Phone\nArun +91 98765 43210');
+  });
+
+  // Breaks: an inner table's rows and cells collapse into the outer cell's text.
+  it('separates the cells and rows of a nested table', () => {
+    const text = htmlToPlainText(NESTED_SIGNATURE);
+
+    expect(lines(text)).toEqual([
+      'Arun Kumar',
+      'Sales Manager | Acme Ltd',
+      'M: +91 98765 43210',
+      '022 4000 1234',
+    ]);
+  });
+
+  // Breaks: the mining converter (hrefs kept) is compiled without the table rules.
+  it('separates cells and rows on the href-keeping converter too', () => {
+    const text = htmlToPlainText(NESTED_SIGNATURE, { keepLinkHrefs: true });
+
+    expect(lines(text)).toContain('M: +91 98765 43210 [tel:+919876543210]');
+    expect(lines(text)).toContain('022 4000 1234');
+  });
+
+  // Breaks: a new-Outlook signature reads "Arun Kumar|98765 43210022 4000 1234" —
+  // the mobile fused with the landline under it.
+  it('separates an Outlook on the web signature table', () => {
+    expect(lines(htmlToPlainText(OUTLOOK_WEB_SIGNATURE))).toEqual(['Arun Kumar | 98765 43210', '022 4000 1234']);
+  });
+
+  // Breaks: the cell separator doubles up or strands spaces around Word's
+  // paragraphs, which already put each cell of a classic Outlook signature on its own line.
+  it('keeps a classic Outlook signature table one paragraph per cell', () => {
+    expect(htmlToPlainText(OUTLOOK_DESKTOP_SIGNATURE)).toBe('Arun Kumar\n\n+91 98765 43210');
+  });
+
+  // Breaks: empty spacer cells (in every layout table) pad the text with runs
+  // of spaces, or leave a leading/trailing space on the line.
+  it('adds nothing for empty spacer cells or at the edges of a row', () => {
+    const text = htmlToPlainText(
+      '<table><tr><td></td><td>Arun</td><td width="10"></td><td> </td><td>+91 98765 43210</td><td></td></tr></table>',
+    );
+
+    expect(text).toBe('Arun +91 98765 43210');
+  });
+
+  // Breaks: the output depends on whether the sender minified the HTML, so the
+  // same signature mines differently from two mail clients.
+  it('gives a minified table the same text as the pretty-printed one', () => {
+    const minified = '<table><tr><td>Arun Kumar</td><td>+91 98765 43210</td></tr><tr><td>Sales Manager</td></tr></table>';
+    const pretty = `<table>
+      <tr>
+        <td>Arun Kumar</td>
+        <td>+91 98765 43210</td>
+      </tr>
+      <tr>
+        <td>Sales Manager</td>
+      </tr>
+    </table>`;
+
+    expect(htmlToPlainText(minified)).toBe(htmlToPlainText(pretty));
+  });
+
+  // Breaks: text the HTML puts directly inside a row (no cell around it) glues
+  // to the cell before or after it — the separator must sit on both sides of a cell.
+  it('separates a cell from stray text on either side of it in the row', () => {
+    expect(htmlToPlainText('<table><tr>Total<td>5</td>items</tr></table>')).toBe('Total 5 items');
+  });
+
+  // Breaks: old and hand-written mail leaves cells and rows unclosed; those must
+  // separate like closed ones, never throw mid-ingest.
+  it('separates unclosed cells and rows', () => {
+    expect(htmlToPlainText('<table><tr><td>Arun Kumar<td>+91 98765 43210<tr><td>Sales Manager</table>'))
+      .toBe('Arun Kumar +91 98765 43210\nSales Manager');
+  });
+
+  // Breaks: the table's text joins the paragraph before or after the table.
+  it('keeps the text around a table on its own lines', () => {
+    const text = htmlToPlainText('Regards,<table><tr><td>Arun</td><td>Kumar</td></tr></table>Sent from my phone');
+
+    expect(lines(text)).toEqual(['Regards,', 'Arun Kumar', 'Sent from my phone']);
+  });
+
+  // Breaks: the table rules leak onto other elements and change the snippet,
+  // search text and mining input of every mail WITHOUT a table. Expected values
+  // are the converter's output from before tables were handled. Two inline spans
+  // stay joined: a browser renders them that way too.
+  it('leaves HTML without tables exactly as it was', () => {
+    const unchanged: Array<[string, string]> = [
+      [
+        '<div>Thanks,</div><div>Arun Kumar</div><div>Sales Manager</div><div>M: <a href="tel:+919876543210">+91 98765 43210</a></div>',
+        'Thanks,\nArun Kumar\nSales Manager\nM: +91 98765 43210',
+      ],
+      [
+        '<p>Hi team,</p><ul><li>one</li><li>two</li></ul><blockquote>quoted <b>bold</b></blockquote><h2>Title</h2><pre>  keep   spacing</pre>',
+        'Hi team,\n\n * one\n * two\n\n> quoted bold\n\n\nTITLE\n\n  keep   spacing',
+      ],
+      ['<span>Arun</span><span>+91 98765 43210</span>', 'Arun+91 98765 43210'],
+      [
+        'line one<br>line two&nbsp;&amp; more<hr><ol><li>first</li></ol>',
+        'line one\nline two & more\n\n----------------------------------------\n\n 1. first',
+      ],
+    ];
+
+    for (const [html, expected] of unchanged) expect(htmlToPlainText(html)).toBe(expected);
+    expect(htmlToPlainText(unchanged[0]![0], { keepLinkHrefs: true }))
+      .toBe('Thanks,\nArun Kumar\nSales Manager\nM: +91 98765 43210 [tel:+919876543210]');
+  });
+});
+
 describe('repairedCleanBody', () => {
   // Regression: the repair must be a no-op for healthy rows. Returning a string
   // here would rewrite a ~250 KB inline-body record for every email in the

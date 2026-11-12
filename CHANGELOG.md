@@ -114,6 +114,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Antivirus sign-in always shows you what happened.** On Windows, the page
   saying an antivirus sign-in was declined or incomplete could show up as a
   connection error in your browser instead.
+- **Signatures laid out as tables no longer run together.** When the app reads
+  the text of an email's HTML, the cells of a table are now kept apart and each
+  row starts a new line. Before, a name and a number in side-by-side cells read
+  as one word ("Arun Kumar+91 98765 43210"), and a mobile number could run
+  into the number in the row below, so the contact scan never found it. The
+  contact scan reads a contact's mail this way once they have sent new mail;
+  some HTML-only emails received from now on also get the fixed preview and
+  search text.
 
 ## [1.4.10] - 2026-10-30
 

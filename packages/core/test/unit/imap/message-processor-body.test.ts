@@ -652,6 +652,17 @@ describe('parseBody — cleanBody for an HTML-only mail', () => {
     expect(parsed.cleanBody).not.toContain('the html part');
   });
 
+  // Breaks: a signature table's cells and rows reach cleanBody glued
+  // ("Arun Kumar+91 98765 43210Sales Manager"), which is what the snippet, the
+  // search index and the filters then read.
+  it('keeps table cells apart and rows on their own lines in the derived text', async () => {
+    const parsed = await mp.parseBody(htmlOnly(
+      '<p>Thanks,</p><table><tbody><tr><td>Arun Kumar</td><td>+91 98765 43210</td></tr><tr><td>Sales Manager</td></tr></tbody></table>',
+    ));
+
+    expect(parsed.cleanBody.split('\n')).toEqual(expect.arrayContaining(['Arun Kumar +91 98765 43210', 'Sales Manager']));
+  });
+
   // Regression: an image-only mail has no readable text at all. It must still
   // parse to a normal record (empty cleanBody, HTML preserved), not throw.
   it('leaves cleanBody empty when the HTML has no readable text', async () => {
