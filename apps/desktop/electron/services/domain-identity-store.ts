@@ -74,10 +74,22 @@ export function ensureDomainIdentitySchema(db: Database.Database): void {
   `);
 }
 
+/**
+ * What a BIMI lookup records when the build could not load the certificate
+ * library at all (the library's wording). Builds from 2026-09-21 until the
+ * library's optional peers were declared cached it for EVERY brand with a
+ * certificate, as an ordinary week-long "logo" answer. It says nothing about
+ * the brand, so it is kept only as long as an error is: an updated app
+ * re-checks those brands within the hour instead of withholding their tick
+ * for up to a week, and a build still missing the library retries no faster.
+ */
+const VERIFIER_MISSING = 'needs the optional peer dependency';
+
 /** Does the BIMI half of this row need (re)fetching at `nowSec`? */
 export function bimiIsStale(row: DomainIdentityRow | null, nowSec: number): boolean {
   if (!row || row.bimiCheckedAt == null || !row.bimiStatus) return true;
-  const ttl = row.bimiStatus === 'error' ? BIMI_ERROR_TTL_S : BIMI_TTL_S;
+  const unverifiable = row.bimiDetail?.includes(VERIFIER_MISSING) ?? false;
+  const ttl = row.bimiStatus === 'error' || unverifiable ? BIMI_ERROR_TTL_S : BIMI_TTL_S;
   return nowSec - row.bimiCheckedAt > ttl;
 }
 

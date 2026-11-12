@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The blue verified tick now appears beside senders whose brand holds a
+  Verified Mark Certificate. Since 1.2.0 the certificate could never be
+  checked, so brands showed their logo but never the tick. Brands already seen
+  are re-checked within an hour of updating.
+
 ### Security
 - **Extensions now run in a sandbox.** An installed extension can no longer read
   your files or reach the internet by itself. It can only do what the permissions

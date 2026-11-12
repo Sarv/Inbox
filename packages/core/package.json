@@ -47,8 +47,10 @@
     "test:integration": "vitest run test/integration"
   },
   "dependencies": {
+    "@peculiar/x509": "^2.1.0",
     "@sarv-in/mailguard": "^0.4.3",
     "@zone-eu/mailsplit": "^5.4.19",
+    "asn1js": "^3.0.10",
     "chardet": "^2.2.0",
     "date-fns": "^4.4.0",
     "email-addresses": "^5.0.0",
@@ -68,6 +70,7 @@
     "nodemailer": "^10.0.14",
     "openpgp": "^6.3.2",
     "p-retry": "^8.0.1",
+    "reflect-metadata": "^0.2.2",
     "sanitize-filename": "^1.6.4",
     "sanitize-html": "^2.18.1",
     "tldts": "^7.4.15",
