@@ -21,7 +21,7 @@
 import { readFileSync, renameSync } from 'fs';
 import { join } from 'path';
 
-import { createLogger } from '@sarvinbox/core';
+import { createLogger, stringifyBounded } from '@sarvinbox/core';
 import { app } from 'electron';
 
 import { getBlob, setBlob } from './core-db';
@@ -96,9 +96,18 @@ export function loadAgentConfig(): PersistedAgentConfig {
  */
 export function saveAgentConfig(partial: PersistedAgentConfig): void {
   const merged = { ...loadAgentConfig(), ...partial };
+  // The patch is whatever the renderer sent with agent:setConfig, unchecked, and the
+  // renderer shows email HTML: a value large enough to end the app when stringified
+  // (see MAX_MESSAGE_BYTES in @sarvinbox/core) is refused whole, the saved settings
+  // kept as they were. No real setting comes near the limit.
+  const json = stringifyBounded(merged);
+  if (json === null) {
+    logger.warn('[AgentConfigStore] Refused to persist an agent config too large to be settings');
+    return;
+  }
   cache = merged;
   try {
-    setBlob(BLOB_KEY, Buffer.from(JSON.stringify(merged), 'utf8'));
+    setBlob(BLOB_KEY, Buffer.from(json, 'utf8'));
     logger.info('[AgentConfigStore] persisted agent config (enabled:', merged.enabled, ')');
   } catch (err) {
     logger.error('[AgentConfigStore] Failed to persist agent config:', err);

@@ -221,6 +221,82 @@ describe('ContentCleaner.clean — whitespace and robustness', () => {
   });
 });
 
+// Every quote and forward marker runs on each line of a stranger's body, and a
+// body line can be as long as the body. Four of them were super-linear on one
+// crafted line (CodeQL js/polynomial-redos flagged the "On …, … wrote:" and
+// "Am … schrieb …:" pair; the `\r` runs were found alongside), so one email
+// stalled categorization, drafting and contact mining for seconds. The first
+// three inputs made the old patterns take 8-15 s, so under them the tests time
+// out.
+describe('ContentCleaner — bounded work on one crafted line', () => {
+  const CR = '\r';
+  const LS = String.fromCharCode(0x2028); // LINE SEPARATOR, a line terminator to `^`/`$`
+
+  // Breaks: "On …, … wrote:" is matched by two `.+` around ", " again —
+  // 80 K repetitions of "a, " with no "wrote:" took about 8 s.
+  it('rejects a long "On a, a, a, …" line with no "wrote:" at once', () => {
+    expect(cleaner.hasQuotedContent(`On ${'a, '.repeat(80_000)}`)).toBe(false);
+  });
+
+  // Breaks: "Am … schrieb …:" is a two-`.+` regex again — 60 K repetitions of
+  // "a schrieb " with no closing colon took about 14 s.
+  it('rejects a long "Am a schrieb a schrieb …" line with no colon at once', () => {
+    expect(cleaner.hasQuotedContent(`Am ${'a schrieb '.repeat(60_000)}`)).toBe(false);
+    expect(cleaner.hasQuotedContent(`Am ${'a schrieb '.repeat(60_000)}:`)).toBe(true);
+  });
+
+  // Breaks: the `>` / `|` markers' leading whitespace eats `\r` again, and a
+  // line of 100 K `\r` (quoted-printable `=0D` or base64 decodes to a bare CR)
+  // takes about 9 s.
+  it('rejects a line of many bare CRs at once', () => {
+    expect(cleaner.hasQuotedContent(`${CR.repeat(100_000)}x`)).toBe(false);
+    expect(cleaner.hasQuotedContent(`${CR.repeat(100_000)}> quoted`)).toBe(true);
+  });
+
+  // Breaks: the forwarded marker grows its second `.+` back. CodeQL flagged the
+  // pair; V8 happened to stay linear on it (a trailing `.+$` can't fail under
+  // `m`), but nothing in the pattern promised that.
+  it('searches a long "Forwarded by a on a on …" line at once', () => {
+    const result = cleaner.clean(`Body.\nForwarded by ${'a on '.repeat(80_000)}`, { removeQuotes: false, removeSignatures: false });
+    expect(result.removedForwarded).toBe(true);
+    expect(result.cleanText).toBe('Body.');
+  });
+
+  // Breaks: a rewritten pattern stops matching a line it used to — a CRLF body
+  // (every line ends in `\r`), a terminator inside the line, or an attribution
+  // with a comma — and quoted text leaks into "what this person wrote".
+  it('still recognises the markers at a line break inside the line', () => {
+    for (const marker of [
+      `> quoted${CR}`,
+      `  >> nested`,
+      `text${CR}  > quoted after a bare CR`,
+      `text${LS}\t| piped after a line separator`,
+      `On Mon, 18 Aug 2026 at 10:00, Alice wrote:${CR}`,
+      `Am 18.08.2026 um 10:00 schrieb Alice <a@x.de>:${CR}`,
+      `noise${CR}Am 18.08.2026 schrieb Alice:`,
+      'Am Montag schrieb Alice schrieb Bob:',
+    ]) {
+      expect(cleaner.hasQuotedContent(marker), JSON.stringify(marker)).toBe(true);
+    }
+  });
+
+  // Breaks: a rewritten pattern starts matching ordinary prose and deletes it.
+  it('does not take ordinary lines for markers', () => {
+    for (const line of [
+      'Am schrieb:',
+      'Am  schrieb x:',
+      'Am x schrieb :',
+      'Am x schrieb y',
+      'I am writing: Am x schrieb',
+      'x > y',
+      `a${CR}b > c`,
+      'On my way, will write later',
+    ]) {
+      expect(cleaner.hasQuotedContent(line), JSON.stringify(line)).toBe(false);
+    }
+  });
+});
+
 describe('ContentCleaner reply-chain helpers', () => {
   it('extractNewestMessage returns only the newest message', () => {
     const newest = cleaner.extractNewestMessage(lines(

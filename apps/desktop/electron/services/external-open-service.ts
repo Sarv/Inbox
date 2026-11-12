@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, open } from 'node:fs/promises';
 import { basename, extname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { readRegularFile } from '@sarvinbox/core';
 import emailAddresses from 'email-addresses';
 
 import type { ExternalOpenIntent } from '../../src/types/default-apps';
@@ -69,30 +68,17 @@ export async function readExternalCalendarFile(path: string): Promise<{ text: st
   if (typeof path !== 'string' || !isAbsolute(path) || path.length > 4_096 || hasControl(path) || /^(?:\\\\|\/\/)/.test(path) || extname(path).toLowerCase() !== '.ics') {
     throw new Error('Choose a local .ics calendar file.');
   }
-  const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_EXTERNAL_ICS_BYTES) throw new Error('Calendar imports must be regular local .ics files smaller than 1 MB.');
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > MAX_EXTERNAL_ICS_BYTES || stat.dev !== before.dev || stat.ino !== before.ino) {
-      throw new Error('The calendar file changed while it was being opened. Please open it again.');
-    }
-    const bytes = Buffer.alloc(MAX_EXTERNAL_ICS_BYTES + 1);
-    let total = 0;
-    while (total < bytes.length) {
-      const result = await handle.read(bytes, total, bytes.length - total, null);
-      if (result.bytesRead === 0) break;
-      total += result.bytesRead;
-    }
-    if (total > MAX_EXTERNAL_ICS_BYTES) throw new Error('Calendar imports must be smaller than 1 MB.');
-    let text: string;
-    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, total)).replace(/^\uFEFF/, ''); }
-    catch { throw new Error('The calendar file must contain valid UTF-8 text.'); }
-    if (text.includes('\0') || !/^\s*BEGIN:VCALENDAR\r?\n/i.test(text) || !/\r?\nEND:VCALENDAR\s*$/i.test(text)) {
-      throw new Error('The selected file is not an iCalendar document.');
-    }
-    return { text, filename: basename(path) };
-  } finally { await handle.close(); }
+  // Opened once and read from that handle: never through a link, never a file that
+  // was swapped in after it was checked.
+  const bytes = await readRegularFile(path, MAX_EXTERNAL_ICS_BYTES);
+  if (!bytes) throw new Error('Calendar imports must be regular local .ics files smaller than 1 MB.');
+  let text: string;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, ''); }
+  catch { throw new Error('The calendar file must contain valid UTF-8 text.'); }
+  if (text.includes('\0') || !/^\s*BEGIN:VCALENDAR\r?\n/i.test(text) || !/\r?\nEND:VCALENDAR\s*$/i.test(text)) {
+    throw new Error('The selected file is not an iCalendar document.');
+  }
+  return { text, filename: basename(path) };
 }
 
 export interface ExternalOpenDeps {

@@ -58,6 +58,7 @@ import * as tar from 'tar';
 
 import { getExtensionManager } from '../shared';
 
+import { isAllowedArchiveEntry } from './extension-archive-rules.mjs';
 import { chromiumFetch } from './net-fetch';
 
 const logger = createLogger('extension-marketplace');
@@ -91,19 +92,6 @@ const RELEASES_PER_PAGE = 100;
  */
 const MAX_RELEASE_PAGES = 5;
 
-/** Only these paths are unpacked from an archive. */
-const ALLOWED_ARCHIVE_ENTRY = /^(?:\.\/)?(?:sarvinbox-extension\.json|dist\/[\w.-]+\.js|icon\.svg|README\.md|LICENSE)$/;
-
-/**
- * The directory entries a well-formed archive carries.
- *
- * The publisher builds the tarball from a staging folder (`tar -czf … -C … .`),
- * so tar records `./` and `./dist/` as entries of their own beside the files.
- * They can create nothing the file allowlist does not already permit — and
- * counting them as unexpected made every ordinary install warn about the one
- * log line that should only ever name a real surprise.
- */
-const ALLOWED_ARCHIVE_DIRECTORY = /^(?:\.|\.\/|(?:\.\/)?dist\/)$/;
 
 export interface RegistryStatus {
   url: string;
@@ -626,9 +614,10 @@ async function downloadVerified(entry: InstallableEntry): Promise<Buffer> {
  * Unpack a verified archive into a staging folder.
  *
  * The archive is flat by construction, and only the handful of paths the app
- * actually loads are extracted. `tar` already refuses `..` and strips leading
- * slashes; the allowlist is the second lock, so a publisher who changes what
- * they ship cannot write a file the installer never expected.
+ * actually loads are extracted, and only as plain files and folders. `tar`
+ * already refuses `..` and strips leading slashes; the allowlist is the second
+ * lock, so a publisher who changes what they ship cannot write a file, or a
+ * link, the installer never expected.
  */
 async function extractToStaging(root: string, extensionId: string, archive: Buffer): Promise<string> {
   const archivePath = path.join(root, 'archive.tgz');
@@ -640,11 +629,10 @@ async function extractToStaging(root: string, extensionId: string, archive: Buff
   await tar.x({
     file: archivePath,
     cwd: unpacked,
-    filter: (entryPath) => {
-      const normalized = entryPath.replace(/\\/g, '/');
-      if (ALLOWED_ARCHIVE_DIRECTORY.test(normalized)) return true;
-      if (ALLOWED_ARCHIVE_ENTRY.test(normalized)) return true;
-      skipped.push(normalized);
+    filter: (entryPath, entry) => {
+      if (isAllowedArchiveEntry(entryPath, entry)) return true;
+      const type = 'type' in entry ? entry.type : undefined;
+      skipped.push(`${entryPath.replace(/\\/g, '/')}${type && type !== 'File' ? ` (${type})` : ''}`);
       return false;
     },
   });
@@ -762,10 +750,16 @@ export async function installFromRegistry(
       await manager.uninstallExtension(entry.id);
     }
 
-    const installed = await manager.installExtension(staging);
-    if (previous) await restoreReaderChoices(manager, previous);
-    logger.info(`Installed ${installed.id} v${installed.version} from ${entry.sourceUrl}`);
-    return { id: installed.id, version: installed.version };
+    try {
+      const installed = await manager.installExtension(staging);
+      logger.info(`Installed ${installed.id} v${installed.version} from ${entry.sourceUrl}`);
+      return { id: installed.id, version: installed.version };
+    } finally {
+      // In a `finally`: a new version that fails to start is still installed, and failing
+      // to start must not also cost the reader their settings, or switch back on something
+      // they had turned off. Harmless if the install itself failed: nothing is registered.
+      if (previous) await restoreReaderChoices(manager, previous);
+    }
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }

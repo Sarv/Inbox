@@ -1,3 +1,4 @@
+import { angleBracketed } from '@sarvinbox/core/address-tokens';
 import { X } from 'lucide-react';
 import { useState, KeyboardEvent, useRef, useEffect, useCallback, useMemo } from 'react';
 
@@ -29,8 +30,8 @@ const isValidEmail = (email: string): boolean => {
 
 // Extract email from "Name <email>" format or return as-is
 const extractEmail = (input: string): string => {
-  const match = input.match(/<([^>]+)>/);
-  return match ? match[1].trim() : input.trim();
+  const inner = angleBracketed(input);
+  return inner !== null ? inner.trim() : input.trim();
 };
 
 // Extract display name from "Name <email>" format

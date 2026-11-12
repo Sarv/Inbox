@@ -130,6 +130,53 @@ jobs:
           test/unit/electron/utils/loopback-server-close.test.ts
           test/unit/electron/services/antivirus-oauth-service.test.ts
 
+  # Whether extension code can read a file or reach the network is decided by Chromium,
+  # and can change with any Electron upgrade while every unit test stays green. So this
+  # runs hostile extension code against the real sandbox, from a real app.asar, on each
+  # platform the app ships on (apps/desktop/test/sandbox-escape).
+  extension-sandbox-escape:
+    name: Extension sandbox escape test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-workspace
+
+      - name: Build the libraries the harness imports
+        shell: bash
+        run: pnpm exec turbo run build --filter='@sarvinbox/desktop^...'
+
+      # A release build refuses to run extensions without the OS sandbox, and this is a
+      # release build. Ubuntu 24.04 restricts unprivileged user namespaces, which is what
+      # the sandbox runs on outside the .deb's setuid helper. xvfb: Electron needs a
+      # display to reach app.whenReady at all.
+      - name: Let the Chromium sandbox run (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libgtk-3-0t64 libgbm1 libasound2t64
+
+      # No core dumps on Linux. The runner hands every crashed process to systemd-coredump
+      # with no size limit, and a process is not gone, so Chromium cannot report it gone,
+      # until its dump is written. The harness kills a dozen renderers on purpose, some
+      # holding hundreds of MB, and behind those dumps the crash it then checks was still
+      # alive 35 s later, so the heartbeat stopped it first (measured in #107's CI,
+      # 2026-11-10). The check is about the app noticing a death, not about the dumps.
+      - name: Try to escape
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            ulimit -c 0
+            xvfb-run -a pnpm --filter @sarvinbox/desktop test:sandbox-escape
+          else
+            pnpm --filter @sarvinbox/desktop test:sandbox-escape
+          fi
+
   # The release signs Windows binaries with an HSM key that only a pushed v*
   # tag can reach, so without this the signing code would run for the first
   # time on the very release that switches signing on. This runs the SAME

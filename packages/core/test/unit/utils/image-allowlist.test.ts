@@ -154,3 +154,49 @@ describe('imageAllowKeysFor / isImageAllowedFor', () => {
     expect(isImageAllowedFor('boss@x.com', new Set())).toBe(false);
   });
 });
+
+// The From address and the allowlist field are a stranger's text and the
+// reader's typing. The dot trims here were `/\.+$/`, which restarted at every
+// dot of a long run not at the end — quadratic (CodeQL js/polynomial-redos): a
+// 200 K-dot domain took about 14 s on the window's thread. Building every parent
+// domain of such an address was quadratic too. (Assertions compare sizes, not
+// the strings, so a failure doesn't print 200 K dots.)
+describe('image allowlist — bounded work on crafted addresses', () => {
+  const dots = '.'.repeat(200_000);
+
+  // Breaks: one crafted From address freezes the message view (the trailing-dot
+  // trim, or the parent-domain walk, going quadratic again).
+  it('derives the keys of a sender whose domain is a long run of dots at once', () => {
+    const keys = imageAllowKeysFor(`a@${dots}y`);
+    expect(keys[0].length).toBe(dots.length + 3);
+    expect(keys.length).toBeLessThanOrEqual(254);
+    expect(keys.slice(1).every((key) => key.startsWith('@') && key.length <= 254)).toBe(true);
+    expect(isImageAllowedFor(`a@${dots}y`, new Set(['@y', 'a@y']))).toBe(false);
+  });
+
+  // Breaks: the parents of a long address stop including the real domain it ends
+  // in, so an allowance the reader made stops matching.
+  it('still probes every parent short enough to have been stored', () => {
+    const keys = imageAllowKeysFor(`a@${'x.'.repeat(100_000)}mail.example.com`);
+    expect(keys.slice(-3)).toEqual(['@x.mail.example.com', '@mail.example.com', '@example.com']);
+    expect(keys.slice(1).every((key) => key.length <= 254)).toBe(true);
+  });
+
+  // Breaks: typing (or pasting) a long run of dots into the allowlist field
+  // hangs the Security page.
+  it('normalizes and refuses a typed domain of many dots at once', () => {
+    expect(normalizeAllowDomain(`x${dots}y`)).toBe('');
+    expect(normalizeAllowDomain(`@@example.com${dots}`)).toBe('example.com');
+    const entry = parseImageAllowInput(`a@${dots}y`);
+    expect(entry?.kind).toBe('sender');
+    expect(entry?.key.length).toBe(dots.length + 3);
+  });
+
+  // Breaks: bounding the parent walk changed the keys of an ordinary address.
+  it('returns the same keys as before for any domain DNS allows', () => {
+    const domain = `${'abcdefghi.'.repeat(24)}example.com`; // 251 characters
+    const labels = domain.split('.');
+    const expected = labels.map((_, i) => labels.slice(i).join('.')).filter((c) => c.includes('.')).map((c) => `@${c}`);
+    expect(imageAllowKeysFor(`a@${domain}`)).toEqual([`a@${domain}`, ...expected]);
+  });
+});

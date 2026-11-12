@@ -76,9 +76,9 @@ async function loadSlices() {
     alert: vi.fn(),
     electronAPI: { ai: { search: searchPage, searchCount }, emails: { bulkAction } },
   });
-  const store = createStore<any>((set, get, api) => ({
-    ...createSearchAISlice(set, get, api),
-    ...createEmailActionsSlice(set, get, api),
+  const store = createStore<any>((...a) => ({
+    ...createSearchAISlice(...a),
+    ...createEmailActionsSlice(...a),
     activeAccountId: 'account-a', accounts: [{ id: 'account-a' }],
     folders: [{ id: 'inbox', path: 'INBOX' }],
     selectedFolderId: 'inbox', selectedVirtualFolder: null,

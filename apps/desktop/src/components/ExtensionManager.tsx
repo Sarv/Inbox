@@ -212,8 +212,9 @@ function ExtensionCard({
           </div>
         </div>
 
-        {/* Error message */}
-        {hasError && info?.error && (
+        {/* Why it is not working. Not only in the error state: an extension can stay
+            active while part of it fails for want of a Node API it can no longer use. */}
+        {info?.error && (
           <div className="mt-3 p-2 bg-red-500/10 border border-red-500/20 rounded text-sm text-red-500">
             {info.error}
           </div>
@@ -309,6 +310,8 @@ function ExtensionCard({
 
 export function ExtensionManager() {
   const [extensions, setExtensions] = useState<InstalledExtension[]>([]);
+  const [heldBack, setHeldBack] = useState<string[]>([]);
+  const [startingHeldBack, setStartingHeldBack] = useState(false);
   const [extensionInfo, setExtensionInfo] = useState<Map<string, ExtensionInfo>>(new Map());
   const [loading, setLoading] = useState(true);
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
@@ -375,6 +378,7 @@ export function ExtensionManager() {
         }
         setExtensionInfo(infoMap);
       }
+      setHeldBack((await window.electronAPI.extensions.getHeldBack?.()) ?? []);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -385,6 +389,19 @@ export function ExtensionManager() {
   useEffect(() => {
     loadExtensions();
   }, []);
+
+  /** Start what was held back at launch. If it brings the app down again, it is held again. */
+  const handleStartHeldBack = async () => {
+    setStartingHeldBack(true);
+    try {
+      await window.electronAPI?.extensions?.startHeldBack();
+      await loadExtensions();
+    } catch (err) {
+      log.error('Failed to start held-back extensions:', err);
+    } finally {
+      setStartingHeldBack(false);
+    }
+  };
 
   const handleEnable = async (extensionId: string) => {
     setLoadingIds((prev) => new Set(prev).add(extensionId));
@@ -630,6 +647,32 @@ export function ExtensionManager() {
           </div>
         )}
 
+        {/* Held back at launch. The app kept dying while starting extensions, so their code
+            did not start this time. Nothing is lost, and this is the way back. */}
+        {heldBack.length > 0 && (
+          <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/20 rounded-lg flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3 min-w-0">
+              <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="font-medium text-amber-500">Extensions did not start</div>
+                <div className="text-sm text-muted-foreground">
+                  Sarv Inbox closed unexpectedly while starting them. Their settings, data and
+                  permissions are untouched. To find one that is causing this, turn it off below
+                  first, then turn the rest back on.
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => void handleStartHeldBack()}
+              disabled={startingHeldBack}
+              className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-sm bg-amber-500 text-white hover:bg-amber-600 rounded-lg transition-colors disabled:opacity-50"
+            >
+              {startingHeldBack && <Loader2 className="h-4 w-4 animate-spin" />}
+              Turn extensions back on
+            </button>
+          </div>
+        )}
+
         {/* Updates. The Installed tab is where someone goes to see what is
             running, so it is also where they have to be told that what is
             running is out of date - the catalogue is not a place people
@@ -766,7 +809,8 @@ export function ExtensionManager() {
             Published extensions live in their own repository and are installed from the Browse
             tab. Each download is checked against the SHA-256 its registry publishes before
             anything runs, and you are shown the permissions it asks for first. An extension runs
-            as full code on your computer, so only install ones you trust.
+            in a sandbox and can only do what those permissions allow, so only install ones you
+            trust with them.
           </p>
           <p className="text-sm text-muted-foreground mt-2">
             To try one you are writing yourself, install it from a local folder containing a{' '}

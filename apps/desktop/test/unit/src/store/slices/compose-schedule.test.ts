@@ -11,6 +11,8 @@ vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
 
 import { createComposeSlice } from '../../../../../src/store/slices/compose-slice';
 
+import { sliceOver } from './slice-over';
+
 // What breaks if this suite goes red: "send later". A scheduled mail that takes
 // the immediate path goes out NOW (the thing the user deliberately delayed); a
 // failed schedule that still deletes the draft loses the message outright. Both
@@ -37,7 +39,7 @@ const makeSlice = () => {
     connectSmtp: vi.fn(async () => {}),
     syncEmails: vi.fn(async () => {}),
   }));
-  const slice = createComposeSlice(set as any, get as any, {} as any);
+  const slice = sliceOver(createComposeSlice, set, get);
   return { slice, set, getState: () => state };
 };
 

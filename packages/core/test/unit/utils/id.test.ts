@@ -363,6 +363,16 @@ describe('normAccountIdPart', () => {
     expect(normAccountIdPart('   ')).toBe('');
     expect(normAccountIdPart('!!!')).toBe('');
   });
+
+  // Breaks: the collapse step stops running before the edge-dash trim. CodeQL
+  // flags `/^-+|-+$/g` (js/polynomial-redos: quadratic on a long dash run not at
+  // the end), and it is only safe because the collapse leaves no two dashes in a
+  // row — without it, 200 K dashes take about 14 s here and this times out.
+  it('stays linear on long runs of punctuation (the collapse guards the trim)', () => {
+    expect(normAccountIdPart(`a${'-'.repeat(200_000)}b`)).toBe('a-b');
+    expect(normAccountIdPart(`a${' -_.'.repeat(50_000)}b`)).toBe('a-b');
+    expect(normAccountIdPart('x-'.repeat(100_000))).toBe('x-'.repeat(100_000).slice(0, -1));
+  });
 });
 
 describe('accountIdFor', () => {

@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The blue verified tick now appears beside senders whose brand holds a
+  Verified Mark Certificate. Since 1.2.0 the certificate could never be
+  checked, so brands showed their logo but never the tick. Brands already seen
+  are re-checked within an hour of updating.
+
 ### Security
+- **Extensions now run in a sandbox.** An installed extension can no longer read
+  your files or reach the internet by itself. It can only do what the permissions
+  you approved allow, and each extension is kept apart from the others, so one
+  that hangs or crashes is stopped without affecting the rest. **Extensions that
+  rely on Node stop working** until they are updated: a card and Settings,
+  Extensions name what such an extension needs, and its stored data and your
+  approvals are kept for when an update arrives. **That includes Sarv's own Email
+  Summarization 1.1.0**: use Update on its row in Settings, Extensions once 1.1.1
+  is offered. Until then the extension reports the problem and Summarize uses the
+  app's built-in summary.
+- **A crash at startup can no longer lock you out.** If Sarv Inbox closes
+  unexpectedly while starting extensions on two launches in a row, the next launch
+  starts without them, tells you which were held back, and Settings, Extensions has
+  the button to turn them back on. Nothing they stored and nothing you approved is
+  touched. Quitting, updating and shutting down never count.
+- **Antivirus scanning no longer depends on the extension's code running.** On a
+  computer that cannot start extension code, attachments are still scanned, and
+  setup stays reachable. If the scanner itself is unavailable, attachments stay
+  blocked, and the message now says why.
+- **AppImage on Linux.** Extensions now work in an AppImage wherever Linux allows the
+  sandbox. On Ubuntu 24.04 and later it does not by default, so extensions stay off
+  there, with a card recommending the `.deb` or `.rpm`. The rest of the app is
+  unaffected.
+- **Extensions have limits.** An extension may keep 25 MB, and 5 MB in one value. Data
+  already over that stays readable and is never deleted; only new writes are refused.
+  What an extension stores is now readable only by your own account on the computer,
+  and is saved in one step, so a crash while saving can no longer leave it damaged.
 - **Windows downloads are signed by Sarv.** The installer, the app and its
   components are now digitally signed by SARV WEBS PRIVATE LIMITED, so Windows
   names the company as the publisher instead of "Unknown publisher". From this
@@ -82,8 +115,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Google sign-in secret stays out of the app window.** Only the part of
   the app that signs you in is given it, and a release fails to build if the
   secret ever appears in the window's code.
+- **A crafted email can no longer freeze the app.** An email built with a huge
+  run of `<`, spaces, `+` or similar characters in its body, subject or address
+  fields could stall Sarv Inbox for seconds or minutes while it was sorted,
+  threaded, scored, opened or used for a reply suggestion. Each of those steps
+  now takes time in proportion to the email's size.
+- **AI features read an email as you see it.** Categorization, reply drafts and
+  contact details no longer pick up the code inside an email's scripts and
+  styles or its Outlook-only blocks, and text a sender wrote out literally, such
+  as `&lt;script&gt;`, is no longer turned back into markup.
+- **A huge email can no longer close the app.** An email with an enormous body
+  could make Sarv Inbox quit without warning while it was logged, reviewed by
+  the Inbox Agent or used to draft a reply. The Inbox Agent now leaves such an
+  email as it is for you to deal with, without stalling over it, and a reply
+  draft is refused with a message saying the email is too large. The same limit
+  now protects the app from oversized extension manifests and AI requests.
 
 ### Fixed
+- **Sending setup no longer guesses the wrong provider.** For a mail server whose
+  name merely contains a big provider's domain, such as `imap.acme.com` (which
+  contains "me.com"), the sending server is no longer filled in as that
+  provider's.
+- **Contact cards keep links that Outlook Safe Links wrapped,** even when the
+  link itself mentions the Safe Links domain.
+- **Closing an empty reply no longer offers to save a draft** when the reply holds
+  nothing but blank lines or spaces.
+- **A very long meeting request typed into the assistant no longer stalls the
+  app.**
 - **A folder with "star" in its name opens as itself.** Folders such as
   Startups, Restart or Mustard opened showing your starred mail instead of the
   mail filed in them. Only your mail provider's Starred or Flagged mailbox shows
@@ -91,6 +149,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Antivirus sign-in always shows you what happened.** On Windows, the page
   saying an antivirus sign-in was declined or incomplete could show up as a
   connection error in your browser instead.
+
+### Fixed
+- After you change your Google or Microsoft password, Sarv Inbox stops
+  reconnecting with the old sign-in at once and asks you to sign in again.
+  Before, it could keep retrying the revoked sign-in in the background for up
+  to 45 minutes. A brief network drop still reconnects on its own.
+- With more than one account, a sign-in rejected on an account in the background
+  no longer marks the account you are looking at as disconnected, and no longer
+  makes the next launch forget that account's connection. The rejected account
+  asks you to sign in again when you open it.
+
+### Fixed
+- **Extension panels now open.** The window's navigation guard refused every
+  extension panel, so a panel such as the ClamAV scanner's stayed blank. A
+  panel now loads where the app places it and can follow links between its own
+  pages. It still cannot replace the app window, move to another extension's
+  pages, or be opened by a link in an email.
 
 ## [1.4.10] - 2026-10-30
 

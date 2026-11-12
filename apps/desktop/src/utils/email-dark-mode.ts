@@ -518,6 +518,10 @@ export const splitCommentWrapper = (
 ): { open: string; body: string; close: string } => {
   const opener = /^\s*<!--/.exec(css);
   const rest = opener ? css.slice(opener[0].length) : css;
+  // CSS's CDC token is exactly `-->`. The `--!>` an HTML comment may also end
+  // with means nothing here: this is a <style>'s text, where the HTML parser
+  // recognises no comments at all, and CSS reads `--!>` as an ident and two
+  // delimiters. A sheet ending in it fails postcss and is handed back as-is.
   const closer = /-->\s*$/.exec(rest);
   return {
     open: opener?.[0] ?? '',

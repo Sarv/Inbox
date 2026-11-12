@@ -11,6 +11,7 @@ import * as path from 'path';
 import { EventBus, createEventBus } from '../pipeline/event-bus';
 import type { WorkflowResult } from '../pipeline/types';
 import type { EmailRecord } from '../types/models';
+import { writePrivateFileAtomicSync } from '../utils/atomic-file';
 import { logger } from '../utils/logger';
 
 import type {
@@ -19,6 +20,7 @@ import type {
   ExtensionSettingsBackend,
   ExtensionUIBackend,
   ExtensionMailBackend,
+  ExtensionNetworkBackend,
   ExtensionSecurityBackend,
 } from './extension-api';
 import {
@@ -34,6 +36,7 @@ import {
 } from './extension-registry';
 import { panelAssetUrl } from './panel-assets';
 import type { PanelRequest, PanelResponse } from './panel-bridge';
+import { MAX_MESSAGE_BYTES, messageBytes } from './runtime/flood-budget';
 import type {
   InstalledExtension,
   ExtensionInfo,
@@ -60,6 +63,38 @@ export interface AvailablePanel {
 }
 
 
+/** The largest single value in an extension's `context.storage`. */
+export const STORAGE_MAX_VALUE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * The most one extension may keep in `context.storage`. Every read parses the whole
+ * store on the main thread: measured at 150 ms a read at 300 MB, with mail waiting.
+ * Data already past this from before there was a limit stays readable; only growing
+ * it further is refused.
+ */
+export const STORAGE_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
+
+/** The longest key in an extension's `context.storage`. */
+export const STORAGE_MAX_KEY_LENGTH = 1_024;
+
+const inMegabytes = (bytes: number): string => `${Math.ceil(bytes / (1024 * 1024))} MB`;
+
+/** A write refused for its size, which the extension has to hear about. */
+class StorageLimitError extends Error {}
+
+/**
+ * An extension's storage file, or null when it has none yet. Read straight away rather
+ * than after an `existsSync`, so nothing can change between the check and the read.
+ */
+function readStoreText(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 /**
  * Extension manager options
  */
@@ -82,15 +117,18 @@ export interface ExtensionManagerOptions {
   mailBackend?: ExtensionMailBackend;
   securityBackend?: ExtensionSecurityBackend;
 
+  /** Optional: what `context.network` reaches (omit for no network at all) */
+  networkBackend?: ExtensionNetworkBackend;
+
   /** Optional: event bus (shared with pipeline) */
   eventBus?: EventBus;
 
   /**
-   * Optional: opens the channel to the sandbox process extensions run in.
+   * Optional: opens the channel to the sandbox one extension runs in.
    *
-   * The desktop app supplies one backed by an Electron `utilityProcess`. Left
+   * The desktop app supplies one backed by a confined Electron renderer. Left
    * out, the sandbox runs in this process instead — the same engine, the same
-   * permission checks, just no process boundary.
+   * permission checks, but nothing confining the code.
    */
   createChannel?: ExtensionHostOptions['createChannel'];
 }
@@ -143,6 +181,7 @@ export class ExtensionManager {
       uiBackend: options.uiBackend,
       mailBackend: options.mailBackend,
       securityBackend: options.securityBackend,
+      networkBackend: options.networkBackend,
       extensionStoragePath: this.storageDir,
       createChannel: options.createChannel,
     });
@@ -150,8 +189,11 @@ export class ExtensionManager {
 
   /**
    * Initialize the extension system
+   *
+   * @param options.decideHold told which enabled extensions have code to run, just before
+   *   any of it starts; true starts none of it, leaving everything else as it was
    */
-  async initialize(): Promise<void> {
+  async initialize(options: { decideHold?: (idsWithCode: string[]) => boolean } = {}): Promise<void> {
     if (this.initialized) {
       logger.warn('Extension manager already initialized');
       return;
@@ -166,7 +208,11 @@ export class ExtensionManager {
     await this.registry.initialize();
 
     // Activate all enabled extensions
-    await this.host.activateAll();
+    const idsWithCode = this.registry
+      .filter({ enabled: true })
+      .filter((installed) => this.registry.getLoaded(installed.id)?.entryPoint)
+      .map((installed) => installed.id);
+    await this.host.activateAll({ holdCode: options.decideHold?.(idsWithCode) ?? false });
 
     this.initialized = true;
 
@@ -203,10 +249,8 @@ export class ExtensionManager {
       async get<T>(extensionId: string, key: string): Promise<T | undefined> {
         const filePath = path.join(storageDir, extensionId, 'storage.json');
         try {
-          if (fs.existsSync(filePath)) {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-            return data[key];
-          }
+          const text = readStoreText(filePath);
+          if (text !== null) return JSON.parse(text)[key];
         } catch (error) {
           logger.error(`Extension storage get error [${extensionId}]:`, error);
         }
@@ -216,17 +260,43 @@ export class ExtensionManager {
       async set<T>(extensionId: string, key: string, value: T): Promise<void> {
         const extDir = path.join(storageDir, extensionId);
         const filePath = path.join(extDir, 'storage.json');
+        if (typeof key !== 'string' || key.length > STORAGE_MAX_KEY_LENGTH) {
+          throw new Error(`storage.set: a key may be at most ${STORAGE_MAX_KEY_LENGTH} characters`);
+        }
+        // Measured before stringifying, because stringifying is the danger: see MAX_MESSAGE_BYTES.
+        const measured = messageBytes(value);
+        const valueBytes =
+          measured > MAX_MESSAGE_BYTES ? measured : Buffer.byteLength(JSON.stringify(value) ?? '');
+        if (valueBytes > STORAGE_MAX_VALUE_BYTES) {
+          throw new Error(
+            `storage.set: a value may be at most ${inMegabytes(STORAGE_MAX_VALUE_BYTES)}, and this one is ` +
+              `${inMegabytes(valueBytes)}. Nothing was written.`
+          );
+        }
         try {
-          if (!fs.existsSync(extDir)) {
-            fs.mkdirSync(extDir, { recursive: true });
-          }
+          fs.mkdirSync(extDir, { recursive: true });
           let data: Record<string, unknown> = {};
-          if (fs.existsSync(filePath)) {
-            data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          let currentBytes = 0;
+          const current = readStoreText(filePath);
+          if (current !== null) {
+            currentBytes = Buffer.byteLength(current);
+            data = JSON.parse(current);
           }
-          data[key] = value;
-          fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+          // `Object.create(null)`-free own write: a key like `__proto__` stays data.
+          Object.defineProperty(data, key, { value, enumerable: true, writable: true, configurable: true });
+          const next = JSON.stringify(data, null, 2);
+          const nextBytes = Buffer.byteLength(next);
+          // Shrinking is always allowed, or a store already over the limit from before
+          // there was one could never be brought back under it.
+          if (nextBytes > STORAGE_MAX_TOTAL_BYTES && nextBytes >= currentBytes) {
+            throw new StorageLimitError(
+              `storage.set: this extension may keep at most ${inMegabytes(STORAGE_MAX_TOTAL_BYTES)}, ` +
+                `and this would make ${inMegabytes(nextBytes)}. Nothing was written.`
+            );
+          }
+          writePrivateFileAtomicSync(filePath, next);
         } catch (error) {
+          if (error instanceof StorageLimitError) throw error;
           logger.error(`Extension storage set error [${extensionId}]:`, error);
         }
       },
@@ -234,10 +304,11 @@ export class ExtensionManager {
       async delete(extensionId: string, key: string): Promise<void> {
         const filePath = path.join(storageDir, extensionId, 'storage.json');
         try {
-          if (fs.existsSync(filePath)) {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          const text = readStoreText(filePath);
+          if (text !== null) {
+            const data = JSON.parse(text);
             delete data[key];
-            fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+            writePrivateFileAtomicSync(filePath, JSON.stringify(data, null, 2));
           }
         } catch (error) {
           logger.error(`Extension storage delete error [${extensionId}]:`, error);
@@ -247,10 +318,8 @@ export class ExtensionManager {
       async keys(extensionId: string): Promise<string[]> {
         const filePath = path.join(storageDir, extensionId, 'storage.json');
         try {
-          if (fs.existsSync(filePath)) {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-            return Object.keys(data);
-          }
+          const text = readStoreText(filePath);
+          if (text !== null) return Object.keys(JSON.parse(text));
         } catch (error) {
           logger.error(`Extension storage keys error [${extensionId}]:`, error);
         }
@@ -260,9 +329,7 @@ export class ExtensionManager {
       async clear(extensionId: string): Promise<void> {
         const filePath = path.join(storageDir, extensionId, 'storage.json');
         try {
-          if (fs.existsSync(filePath)) {
-            fs.writeFileSync(filePath, '{}', 'utf-8');
-          }
+          if (readStoreText(filePath) !== null) writePrivateFileAtomicSync(filePath, '{}');
         } catch (error) {
           logger.error(`Extension storage clear error [${extensionId}]:`, error);
         }
@@ -581,6 +648,16 @@ export class ExtensionManager {
     }
 
     return fn(...args) as T;
+  }
+
+  /** The extensions whose code was held back at launch and has not been started since. */
+  getHeldBack(): string[] {
+    return this.host.getHeldBack();
+  }
+
+  /** Start what was held back at launch. See `ExtensionHost.startHeldBack`. */
+  async startHeldBack(): Promise<void> {
+    await this.host.startHeldBack();
   }
 
   /**

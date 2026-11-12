@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { htmlMiningWindow, htmlToPlainText, repairedCleanBody } from '../../../src/utils/html-text';
+import { htmlMiningWindow, htmlToPlainText, repairedCleanBody, stripHtmlTags } from '../../../src/utils/html-text';
 import { MAX_HTML_PARSE_BYTES } from '../../../src/utils/mail-parse';
 
 
@@ -86,6 +86,124 @@ describe('htmlToPlainText', () => {
   // the local repair below feeds it raw_body, which is sometimes not HTML.
   it('passes plain text through', () => {
     expect(htmlToPlainText('just a sentence.')).toBe('just a sentence.');
+  });
+});
+
+/**
+ * The tag-stripper for callers that read lines (sender memory) or only ask "is
+ * there text?" (draft autosave). It replaced `text.replace(/<[^>]+>/g, '')`, so
+ * each case below is either a way that regex was wrong or a property the
+ * callers relied on that must survive the swap.
+ */
+describe('stripHtmlTags', () => {
+  // Breaks: sender memory reads the greeting from the first LINE and the
+  // closing from the last three; a converter that reflows text fuses them.
+  it('keeps the text exactly as written — newlines, indentation and spaces', () => {
+    expect(stripHtmlTags('<p>Dear Bob,</p>\n  Could you <b>sign</b>?\n\nSincerely,\nMe'))
+      .toBe('Dear Bob,\n  Could you sign?\n\nSincerely,\nMe');
+  });
+
+  // Breaks: code inside <script>/<style> comes back as words. The regex removed
+  // only the tags, leaving the code; a pattern for the element missed end tags
+  // spelled `</script >` or `</SCRIPT>`, which browsers accept.
+  it('drops script and style content however the end tag is spelled', () => {
+    expect(stripHtmlTags('a<script>steal()</script >b<SCRIPT>x()</SCRIPT>c<script>y()</script\n>d')).toBe('abcd');
+    expect(stripHtmlTags('<style >p{color:red}</style >Hi<style>.x{}</STYLE>')).toBe('Hi');
+  });
+
+  // Breaks: the double-unescape. `&amp;lt;` is the literal text "&lt;" on the
+  // reader's screen; decoding twice would turn it into a `<` the sender never
+  // wrote. Entities must also be decoded at all (the regex left `&amp;` raw).
+  it('decodes entities exactly once', () => {
+    expect(stripHtmlTags('<p>&amp;lt;b&amp;gt; &lt;i&gt; Tom &amp; Jerry &quot;q&quot;</p>'))
+      .toBe('&lt;b&gt; <i> Tom & Jerry "q"');
+  });
+
+  // Breaks: Outlook's conditional blocks leak their hidden content into the
+  // text. The regex stripped the `<!--[if mso]>` marker but kept what it hid.
+  it('drops comments, Outlook conditionals included, keeping downlevel-revealed content', () => {
+    expect(stripHtmlTags(
+      '<!--[if mso]><p>outlook only</p><![endif]--><p>shown</p>' +
+      '<!--[if !mso]><!--><p> and revealed</p><!--<![endif]--><!-- note -->',
+    )).toBe('shown and revealed');
+  });
+
+  // Breaks: prose with a bare `<` loses words — the regex deleted everything
+  // from the `<` to the next `>`.
+  it('keeps a "<" that opens no tag', () => {
+    expect(stripHtmlTags('budget < 5k and timeline > 2 weeks')).toBe('budget < 5k and timeline > 2 weeks');
+  });
+
+  // Breaks: removing a filtered substring can assemble a new one from the
+  // leftovers (`<scr<script>ipt>`). A tokenizer has no leftovers to assemble.
+  it('does not assemble markup out of nested fragments', () => {
+    expect(stripHtmlTags('<scr<script>ipt>alert(1)</scr</script>ipt>')).not.toMatch(/<script/i);
+  });
+
+  // Breaks: a body that is a long run of `<` stalls the main thread. The regex
+  // backtracked quadratically: about 4 s for 100,000 characters.
+  it('is linear on a run of "<"', () => {
+    const started = performance.now();
+    stripHtmlTags('<'.repeat(100_000));
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  // Breaks: a header-only row or a missing body throws in the middle of a
+  // sender-memory rebuild.
+  it('returns empty for nothing to strip', () => {
+    expect(stripHtmlTags('')).toBe('');
+    expect(stripHtmlTags(undefined as unknown as string)).toBe('');
+    expect(stripHtmlTags(null as unknown as string)).toBe('');
+    expect(stripHtmlTags('<div><br></div>')).toBe('');
+  });
+
+  // Breaks: an attacker-sized body pins the main thread; the cap is the same
+  // one htmlToPlainText and mailparser use.
+  it('caps the HTML it will read', () => {
+    const text = stripHtmlTags(`<p>head</p>${'x'.repeat(MAX_HTML_PARSE_BYTES)}<p>tail</p>`);
+    expect(text.startsWith('head')).toBe(true);
+    expect(text).not.toContain('tail');
+  });
+
+  // KNOWN GAP, not a goal: htmlparser2 (like html-to-text, which uses it) ends
+  // a comment only at `-->`, not at the `--!>` browsers also accept, so the
+  // text after such a comment is dropped. Pinned so a parser upgrade that
+  // closes the gap shows up here; the failure mode is lost text, never markup.
+  it('KNOWN GAP: drops the text after a comment closed with --!>', () => {
+    expect(stripHtmlTags('<!-- note --!><p>after</p>')).toBe('');
+  });
+});
+
+describe('stripHtmlTags — lines', () => {
+  // Breaks: a prompt transcript loses its paragraphs (blocks fuse into one line)
+  // or its words (an inline tag between two words joins them).
+  it('turns <br> and block edges into newlines and other tags into a space', () => {
+    expect(stripHtmlTags('<p>Hi <b>Ann</b>,</p><p>See<br>you</p>', { lines: true })).toBe('\nHi  Ann ,\n\nSee\nyou\n');
+    expect(stripHtmlTags('<ul><li>a</li><li>b</li></ul>', { lines: true })).toBe(' \na\n\nb\n\n');
+  });
+
+  // Breaks: the page title, head or style of a mail is read to the model as
+  // part of the message.
+  it('drops head, title, script and style, leaving a space where they stood', () => {
+    const out = stripHtmlTags('<head><title>Invoice</title><style>p{}</style></head>a<script>x()</script>b', { lines: true });
+    expect(out).toBe(' a b');
+  });
+
+  // Breaks: a comment between two words joins them.
+  it('reads a comment as a space', () => {
+    expect(stripHtmlTags('a<!-- note -->b', { lines: true })).toBe('a b');
+  });
+
+  // Breaks: a block the author never closed, or a void element, adds blank lines
+  // the source never had.
+  it('breaks only at closing tags written in the source', () => {
+    expect(stripHtmlTags('<p>a<p>b', { lines: true })).toBe('\na\nb');
+    expect(stripHtmlTags('a<img src="x">b<br/>c', { lines: true })).toBe('a b\nc');
+  });
+
+  // Breaks: plain text with no tags changes shape.
+  it('leaves text with no tags as it is', () => {
+    expect(stripHtmlTags('line one\n\nline two', { lines: true })).toBe('line one\n\nline two');
   });
 });
 

@@ -23,7 +23,7 @@ export function computeTemporalSignal(
   const isOutsideBusinessHours = emailHour < 9 || emailHour >= 18;
   const isBurst = burstCount >= 3;
 
-  let value = 0.5; // neutral default
+  let value: number;
   const reasons: string[] = [];
 
   // Age-based urgency: older unread = more urgent

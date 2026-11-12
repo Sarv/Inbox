@@ -119,6 +119,9 @@ async function loadFromDb(emailId) {
     toAddress: row.to_address || '',
     date: new Date((row.date || 0) * 1000).toISOString(),
     body: row.raw_body || row.clean_body || '',
+    // clean_body is already plain text: compressing it as HTML would join its
+    // lines and drop every "<name@host>" in it.
+    bodyIsHtml: Boolean(row.raw_body),
     expectedSenders: [],
     expectedMinMessages: 1,
     expectedMaxMessages: 99,
@@ -212,11 +215,13 @@ async function main() {
     // Apply compression.
     let body = fixture.body;
     let compressionInfo = '';
+    // Fixtures are HTML unless they say otherwise.
+    const bodyFormat = { html: fixture.bodyIsHtml !== false };
     if (compressMode === 'plaintext') {
-      body = compressToPlainText(fixture.body);
+      body = compressToPlainText(fixture.body, bodyFormat);
       compressionInfo = `plaintext (${rawBodyChars}→${body.length} chars, ${Math.round((1 - body.length / rawBodyChars) * 100)}% smaller)`;
     } else if (compressMode === 'fit') {
-      const fit = compressToFit(fixture.body, bodyCharBudget);
+      const fit = compressToFit(fixture.body, bodyCharBudget, bodyFormat);
       body = fit.body;
       compressionInfo = `fit (depth=${fit.finalDepth}, ${rawBodyChars}→${fit.compressedChars} chars, budget=${bodyCharBudget})`;
     } else {
@@ -257,7 +262,7 @@ async function main() {
         const msgs = Array.isArray(parsed) ? parsed : parsed.messages;
         console.log('Returned messages (preview):');
         msgs.forEach((m, i) => {
-          const bodyPreview = String(m.body || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+          const bodyPreview = compressToPlainText(String(m.body || '')).replace(/\s+/g, ' ').trim().slice(0, 80);
           console.log(`  ${i + 1}. ${m.from_address || '(no addr)'} | ${m.date || '(no date)'} | ${bodyPreview}${bodyPreview.length === 80 ? '…' : ''}`);
         });
       } catch { /* ignore preview errors */ }

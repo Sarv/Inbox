@@ -8,6 +8,8 @@
  * User's name mentioned in body = needs attention
  */
 
+import { stripHtmlTags } from '../../utils/html-text';
+
 import type { ThreadSignal, ThreadRole, ThreadStats } from './types';
 
 export function computeThreadDynamics(
@@ -60,7 +62,7 @@ export function computeThreadDynamics(
     role = 'active_group';
     value = 0.65;
     reasoning = `Active group thread (${participantCount} people, user contributed ${userMessageCount}x)`;
-  } else if (userMessageCount === 0 && !userStarted) {
+  } else if (userMessageCount === 0) {
     role = mentioned ? 'mentioned' : 'late_addition';
     value = mentioned ? 0.6 : 0.25;
     reasoning = mentioned
@@ -95,7 +97,8 @@ export function computeThreadDynamics(
 
 function isNameMentioned(body: string, userName: string): boolean {
   if (!userName || userName.length < 2) return false;
-  const lower = body.toLowerCase().replace(/<[^>]+>/g, '');
+  // Linear tag strip — a regex here went quadratic on a body of unclosed `<`.
+  const lower = stripHtmlTags(body.toLowerCase());
   const nameParts = userName.toLowerCase().split(/\s+/);
   // Check if first name or full name appears
   return nameParts.some(part => part.length >= 2 && lower.includes(part));

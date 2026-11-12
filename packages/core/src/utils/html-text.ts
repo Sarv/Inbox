@@ -11,8 +11,12 @@
  * regex mangles real-world marketing HTML, and Markdown keeps `![](…)` image and
  * link URLs — a tracking pixel then becomes the first 2 KB of the snippet.
  * `html-to-text` drops images and renders block structure as newlines.
+ *
+ * {@link stripHtmlTags} is the other half: the text exactly as written, tags
+ * removed, for callers that read lines or only ask "is there any text?".
  */
 import { compile } from 'html-to-text';
+import { Parser } from 'htmlparser2';
 
 import { MAX_HTML_PARSE_BYTES } from './mail-parse';
 
@@ -63,6 +67,97 @@ export function htmlToPlainText(html: string, options: HtmlToPlainTextOptions = 
   } catch {
     return '';
   }
+}
+
+/** Elements whose content is code, never text a reader sees. */
+const NON_TEXT_ELEMENTS: ReadonlySet<string> = new Set(['script', 'style']);
+
+/** With `lines`, the head and its title go too: nothing in them is the message. */
+const NON_TEXT_ELEMENTS_FOR_LINES: ReadonlySet<string> = new Set(['script', 'style', 'head', 'title']);
+
+/** With `lines`, where a line starts: the opening tag of a paragraph-like block. */
+const LINE_OPENING_ELEMENTS: ReadonlySet<string> = new Set([
+  'p', 'div', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre',
+]);
+
+/** With `lines`, where a line ends: the closing tag of a block or a list or table. */
+const LINE_CLOSING_ELEMENTS: ReadonlySet<string> = new Set([
+  'p', 'div', 'li', 'ul', 'ol', 'tr', 'table', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'blockquote', 'pre', 'section', 'header', 'footer',
+]);
+
+export interface StripHtmlTagsOptions {
+  /**
+   * Keep the line structure, for text read line by line such as a prompt
+   * transcript: `<br>` and the edges of paragraph-like blocks become a newline,
+   * every other tag (and a comment) a space so the words either side don't fuse,
+   * and `<head>`/`<title>` content goes with script and style. The caller
+   * collapses the whitespace.
+   */
+  lines?: boolean;
+}
+
+/**
+ * The text of an HTML fragment with every tag removed and the text itself left
+ * exactly as written — newlines, indentation and runs of spaces included.
+ *
+ * For callers that read the result line by line, or only test it for
+ * emptiness, where {@link htmlToPlainText} is the wrong tool: it renders HTML,
+ * so source newlines become spaces and a "plain text with a few tags" body
+ * fuses into one line.
+ *
+ * It replaces `text.replace(/<[^>]+>/g, '')`, done with htmlparser2's tokenizer
+ * (the one html-to-text and sanitize-html already run on every body) instead:
+ *   - entities are decoded ONCE: `&amp;lt;` becomes `&lt;`, never `<`;
+ *   - `<script>`/`<style>` content is dropped however the end tag is spelled
+ *     (`</script >`, `</SCRIPT>`), and comments (Outlook conditionals too);
+ *   - a `<` that opens no tag stays text (`a < b`), where the regex deleted
+ *     everything up to the next `>`;
+ *   - linear time, where the regex was quadratic on a run of `<`.
+ *
+ * NOT a sanitizer: the output is text and can hold a `<` (from `&lt;`). Escape
+ * it before it goes anywhere HTML is rendered.
+ *
+ * Known gap, shared with {@link htmlToPlainText}: htmlparser2 ends a comment
+ * only at `-->`, not also at the `--!>` browsers accept, so text after a
+ * `--!>`-closed comment is dropped — lost, never leaked as markup.
+ *
+ * `''` for empty or non-string input. Capped at {@link MAX_HTML_PARSE_BYTES}
+ * like {@link htmlToPlainText}.
+ */
+export function stripHtmlTags(html: string, options: StripHtmlTagsOptions = {}): string {
+  if (typeof html !== 'string' || html === '') return '';
+  const capped = html.length > MAX_HTML_PARSE_BYTES ? html.slice(0, MAX_HTML_PARSE_BYTES) : html;
+  const lines = options.lines === true;
+  const skipped = lines ? NON_TEXT_ELEMENTS_FOR_LINES : NON_TEXT_ELEMENTS;
+  const text: string[] = [];
+  let skipDepth = 0;
+  const parser = new Parser({
+    onopentagname(name) {
+      if (skipped.has(name)) skipDepth += 1;
+      if (!lines || skipDepth > 0) return;
+      text.push(name === 'br' || LINE_OPENING_ELEMENTS.has(name) ? '\n' : ' ');
+    },
+    onclosetag(name, isImplied) {
+      if (skipped.has(name) && skipDepth > 0) {
+        skipDepth -= 1;
+        if (lines && skipDepth === 0) text.push(' ');
+        return;
+      }
+      // Only a closing tag written in the source: an implied one (a void
+      // element's, or a block the parser closed for the author) breaks nothing.
+      if (!lines || isImplied || skipDepth > 0) return;
+      text.push(LINE_CLOSING_ELEMENTS.has(name) ? '\n' : ' ');
+    },
+    oncomment() {
+      if (lines && skipDepth === 0) text.push(' ');
+    },
+    ontext(chunk) {
+      if (skipDepth === 0) text.push(chunk);
+    },
+  });
+  parser.end(capped);
+  return text.join('');
 }
 
 /**

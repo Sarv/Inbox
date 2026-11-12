@@ -1,3 +1,4 @@
+import { stripHtmlTags } from '@sarvinbox/core/html-text';
 import { useEffect, useRef, useCallback } from 'react';
 
 import type { AttachmentFile } from '../components/useCompose';
@@ -133,7 +134,9 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
   const hasContent = useCallback(() => {
     const { to, subject, body, htmlBody, inReplyTo, subjectPrefilled, attachments, attachmentsPrefilled } = latestRef.current;
     // A file the user attached is work, even with nothing typed around it.
-    const bodyHasContent = !!(body.trim() || htmlBody.replace(/<[^>]*>/g, '').trim())
+    // Whitespace is not work in either body: `trim()` drops the U+00A0 an
+    // editor's `&nbsp;` decodes to, as it does the spaces of the plain body.
+    const bodyHasContent = !!(body.trim() || stripHtmlTags(htmlBody).trim())
       || (!attachmentsPrefilled && (attachments?.length ?? 0) > 0);
     // For a REPLY/reply-all the recipient + subject are auto-filled, so they must
     // NOT count as "content" — only a user-typed body makes the draft worth

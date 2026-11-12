@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { AgentReplyDrafter, type ReplyDrafterDeps, type ThreadMessage } from '../../../src/agent/reply-drafter';
 import type { EmailRecord } from '../../../src/types/models';
+import { MAX_MESSAGE_BYTES } from '../../../src/utils/json-size';
 
 const email = {
   id: 'incoming', threadId: 'thread-1', messageId: '<incoming@example.test>',
@@ -102,7 +103,9 @@ describe('reply drafter compact context', () => {
     { name: 'body truncation', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.slice(0, 2000); } },
     { name: 'signature removed', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.split('Regards,')[0]!; } },
     { name: 'changed financial revision', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.replace('275,000', '270,000'); } },
-    { name: 'changed whitespace', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.replace('\n', '\t'); } },
+    // One whitespace character differs (the newline before the quotation
+    // becomes a tab): even that must not count as the same body.
+    { name: 'changed whitespace', change: (_target, thread) => { thread[0]!.body = thread[0]!.body.replace('\nQuotation Q-204', '\tQuotation Q-204'); } },
     { name: 'body known unavailable', change: target => { target.hasBody = false; } },
   ])('keeps the full incoming fallback for $name', async ({ change }) => {
     const target = fullTarget();
@@ -216,5 +219,41 @@ describe('reply drafter compact context', () => {
     const compactPayload = JSON.stringify(thread) + JSON.stringify(references);
     expect(compactPayload.length).toBeLessThan(oldPayload.length * 0.75);
     for (const item of thread) expect(draft).toContain(item.body);
+  });
+});
+
+// The incoming email's body goes into the prompt whole, and its size is the
+// sender's choice. Breaks if: a body large enough to end the app when
+// stringified (uncatchably, in Electron 44) is stringified into the prompt, or
+// an AI provider's oversized search query is passed on whole to the full-text
+// search and the web-search request body.
+describe('reply drafter on stranger-sized input', () => {
+  it('refuses an email too large to draft from, before stringifying it or calling the AI', async () => {
+    const huge = 'h'.repeat(MAX_MESSAGE_BYTES + 1);
+    const { drafter, callAI } = setup([message(1)]);
+    const stringify = vi.spyOn(JSON, 'stringify');
+
+    const refused = await drafter.draftReply({ ...email, cleanBody: huge }).catch((error: unknown) => error);
+
+    const sawBody = stringify.mock.calls.some(([value]) => typeof value === 'object' && value !== null
+      && (value as { body?: unknown }).body === huge);
+    stringify.mockRestore();
+    expect(sawBody).toBe(false);
+    expect(refused).toBeInstanceOf(Error);
+    expect((refused as Error).message).toBe('This email is too large to draft a reply to.');
+    expect(callAI).not.toHaveBeenCalled();
+  });
+
+  it('cuts an oversized search query from the plan before searching with it', async () => {
+    const long = 'q'.repeat(5_000);
+    const plan = JSON.stringify({ needs_search: true, email_searches: [{ query: long }], web_searches: [long] });
+    const { drafter, deps } = setup([message(1)], plan);
+    const searchWeb = vi.fn(async () => []);
+    deps.searchWeb = searchWeb;
+
+    await drafter.draftReply(email);
+
+    expect(deps.searchEmails).toHaveBeenCalledExactlyOnceWith('q'.repeat(1_000), { from: undefined, limit: 5 });
+    expect(searchWeb).toHaveBeenCalledExactlyOnceWith('q'.repeat(1_000));
   });
 });

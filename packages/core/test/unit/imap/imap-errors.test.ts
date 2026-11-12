@@ -222,6 +222,41 @@ describe('isAuthError', () => {
     expect(isAuthError(err('Command failed (400) BAD invalid arguments'))).toBe(false);
     expect(isAuthError(err('invalid_grant', { code: 'ETHROTTLE' }))).toBe(false);
   });
+
+  // The IMAP client re-throws a failed bearer resolve under its OWN code
+  // (OAUTH_REFRESH_FAILED), with the token layer's error on `cause`. The cause
+  // is what carries the verdict. Breaks: after a password change the provider
+  // revokes the grant, the envelope hides that, and the reconnect ladder keeps
+  // POSTing the dead refresh token (found by code reading, 2026-11-03).
+  const refreshFailed = (cause: unknown) => err(
+    `OAuth token refresh failed: ${(cause as Error | undefined)?.message}`,
+    { code: 'OAUTH_REFRESH_FAILED', cause },
+  );
+
+  it('classifies a revoked OAuth session wrapped by the IMAP client by its cause', () => {
+    expect(isAuthError(refreshFailed(err('Token refresh failed (400): {"error":"invalid_grant"}', { code: 'TOKEN_REFRESH_FAILED' })))).toBe(true);
+    expect(isAuthError(refreshFailed(err('needs sign-in', { code: 'REAUTH_REQUIRED' })))).toBe(true);
+    expect(isAuthError(refreshFailed(err('refused for host', { code: 'TOKEN_DESTINATION_REFUSED' })))).toBe(true);
+  });
+
+  // Breaks: a wrapped blip latches the account into "sign in again".
+  it.each([
+    ['REFRESH_DEFERRED_SUSPENDED', 'refresh did not complete'],
+    ['TOKEN_REFRESH_ABORTED', 'refresh did not complete'],
+    ['TOKEN_REFRESH_TIMEOUT', 'refresh did not complete'],
+    ['TOKEN_REFRESH_NETWORK_ERROR', 'Cannot reach OAuth server [ENOTFOUND]'],
+    // Same code as a revoked grant, but the provider was only busy.
+    ['TOKEN_REFRESH_FAILED', 'Token refresh failed (503): Service Unavailable'],
+  ])('does NOT latch on a wrapped transient token failure (%s: %s)', (code, message) => {
+    expect(isAuthError(refreshFailed(err(message, { code })))).toBe(false);
+  });
+
+  // Only a cause FROM the token layer is read through the OAuth classifier.
+  // Breaks: a wrapped non-OAuth failure carrying "(400)" stops the ladder.
+  it("does not read a wrapper's non-OAuth cause through the OAuth classifier", () => {
+    expect(isAuthError(refreshFailed(err('Command failed (400) BAD invalid arguments')))).toBe(false);
+    expect(isAuthError(refreshFailed(undefined))).toBe(false);
+  });
 });
 
 describe('isQuotaError', () => {

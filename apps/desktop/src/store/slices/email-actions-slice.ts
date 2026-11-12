@@ -834,7 +834,7 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     const threadIndex = threadEmails.findIndex((e) => e.id === emailId);
     const searchIndex = searchResults.findIndex((e) => e.id === emailId);
 
-    let originalTags = '||';
+    let originalTags: string;
     if (emailIndex !== -1) {
       originalTags = emails[emailIndex].tags || '||';
     } else if (threadIndex !== -1) {

@@ -47,8 +47,10 @@ Alex Roe
 Engineer
 https://www.linkedin.com/in/alexroe
 https://github.com/alexroe`, 'alex@acme.com');
-    expect(p.linkedinUrl).toMatch(/linkedin\.com\/in\/alexroe/);
-    expect(p.githubUrl).toMatch(/github\.com\/alexroe/);
+    // Exact, not a substring: a URL that merely CONTAINS the profile path
+    // (another host, a redirector carrying it in a query) must not pass.
+    expect(p.linkedinUrl).toBe('https://www.linkedin.com/in/alexroe');
+    expect(p.githubUrl).toBe('https://github.com/alexroe');
   });
 
   it('never mistakes contact-detail lines for a name', () => {

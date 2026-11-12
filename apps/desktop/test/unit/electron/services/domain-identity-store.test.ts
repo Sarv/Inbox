@@ -110,4 +110,35 @@ describe('staleness', () => {
     expect(bimiIsStale(row({ bimiStatus: 'error', bimiCheckedAt: T0 }), T0 + BIMI_ERROR_TTL_S + 1)).toBe(true);
     expect(faviconIsStale(row({ faviconStatus: 'error', faviconCheckedAt: T0 }), T0 + FAVICON_ERROR_TTL_S + 1)).toBe(true);
   });
+
+  /**
+   * REGRESSION: builds from 2026-09-21 could not load the certificate library
+   * and cached every brand with a certificate as an ordinary week-long "logo".
+   * After the fix those rows must be re-checked within the hour, or the tick
+   * stays off for up to a week. Both shapes the old builds wrote: the packaged
+   * app (vite's stand-in module) and a dev run (Node's resolver).
+   */
+  it('keeps an answer recorded without the certificate library only as long as an error', () => {
+    const missing = [
+      "Certificate not verified: Verifying a BIMI certificate needs the optional peer dependency '@peculiar/x509', which is not installed. Add it (npm install @peculiar/x509) to enable Verified Mark Certificate checks; the logo lookup, the SVG check and the favicon lookup all work without it. (Could not resolve \"reflect-metadata\" imported by \"@sarv-in/mailguard\". Is it installed?)",
+      "Certificate not verified: Verifying a BIMI certificate needs the optional peer dependency '@peculiar/x509', which is not installed. Add it (npm install @peculiar/x509) to enable Verified Mark Certificate checks; the logo lookup, the SVG check and the favicon lookup all work without it. (Cannot find package 'reflect-metadata' imported from /app/node_modules/@sarv-in/mailguard/dist/chunk-K5CZSXLG.js)",
+    ];
+    for (const bimiDetail of missing) {
+      const unverifiable = row({ bimiStatus: 'logo', bimiDetail, bimiCheckedAt: T0 });
+      expect(bimiIsStale(unverifiable, T0 + BIMI_ERROR_TTL_S - 1)).toBe(false);
+      expect(bimiIsStale(unverifiable, T0 + BIMI_ERROR_TTL_S + 1)).toBe(true);
+    }
+  });
+
+  // A certificate that was checked and failed is a real answer about the
+  // brand: re-checking it hourly would hammer its server for nothing.
+  it('keeps a certificate that was checked and refused for the full TTL', () => {
+    const refused = row({
+      bimiStatus: 'logo',
+      bimiDetail: 'Certificate not verified: The logo the domain serves is not the one the certificate was issued for',
+      bimiCheckedAt: T0,
+    });
+    expect(bimiIsStale(refused, T0 + BIMI_ERROR_TTL_S + 1)).toBe(false);
+    expect(bimiIsStale(refused, T0 + BIMI_TTL_S + 1)).toBe(true);
+  });
 });

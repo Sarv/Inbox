@@ -1,6 +1,8 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { readRegularFileSync } from '@sarvinbox/core';
 
 import type { LocalDataProfileId } from '../../src/types/local-data';
 
@@ -25,22 +27,12 @@ export function consumeLocalDataResetTicket(directory: string, token: string, cu
   if (!TOKEN.test(token)) throw new Error('The local reset request is invalid. No data was erased.');
   const [nonce, encodedKey] = token.split(':');
   const file = join(directory, `local-data-reset-${nonce}.json`);
-  let fd: number | undefined;
   try {
-    const before = lstatSync(file);
-    if (!before.isFile() || before.isSymbolicLink()) throw new Error('Invalid ticket file');
-    fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.size < 1 || stat.size > MAX_TICKET_BYTES) throw new Error('Invalid ticket file');
-    const bytes = Buffer.alloc(stat.size + 1);
-    let length = 0;
-    while (length < bytes.length) {
-      const count = readSync(fd, bytes, length, bytes.length - length, null);
-      if (!count) break;
-      length += count;
-    }
-    if (length !== stat.size) throw new Error('Ticket changed');
-    const envelope: unknown = JSON.parse(bytes.subarray(0, length).toString('utf8'));
+    // One handle, never a check-then-open on the path: no symlink, no FIFO
+    // (which would hang startup on the open), and the path still names the
+    // file that was read.
+    const bytes = readRegularFileSync(file, { minBytes: 1, maxBytes: MAX_TICKET_BYTES });
+    const envelope: unknown = JSON.parse(bytes.toString('utf8'));
     if (!envelope || typeof envelope !== 'object') throw new Error('Invalid ticket');
     const { payload, mac } = envelope as { payload?: unknown; mac?: unknown };
     if (typeof payload !== 'string' || typeof mac !== 'string' || !/^[a-f0-9]{64}$/.test(mac)) throw new Error('Invalid ticket');
@@ -52,7 +44,6 @@ export function consumeLocalDataResetTicket(directory: string, token: string, cu
   } catch {
     throw new Error('The local reset request could not be verified or has expired. No data was erased. Open Settings and confirm a new reset.');
   } finally {
-    if (fd !== undefined) closeSync(fd);
     // Remove only the fixed, nonce-derived request; never follow a renderer path.
     try { rmSync(file, { force: true }); } catch { /* An unusable request must never authorize a later wipe. */ }
   }

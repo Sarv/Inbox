@@ -1,9 +1,11 @@
 /**
  * The sandbox side of the extension boundary.
  *
- * This is the only place extension code is ever executed. It runs in a separate
- * process (one shared by every extension — see `extension-runtime.ts` for why
- * not one each) and reaches the app solely by posting messages back to main.
+ * This is the only place extension code is ever executed. In the desktop app it
+ * runs in a Web Worker of a confined renderer, one per extension (see
+ * `extension-runtime.ts` for what confines it), and reaches the app solely by
+ * posting messages back to main. So this file bundles for a Worker: nothing here
+ * may import a Node module, and the loader is passed in.
  *
  * The context handed to `activate()` looks exactly like the in-process one an
  * extension was written against: same methods, same shapes, same
@@ -18,8 +20,6 @@
  * that points at their code rather than at an IPC frame.
  */
 
-import { createRequire } from 'module';
-
 import type { PipelineEvent, EventHandler, Unsubscribe, WorkflowResult } from '../../pipeline/types';
 import type { EmailRecord } from '../../types/models';
 import type {
@@ -31,6 +31,9 @@ import type {
   ExtensionLogger,
   ExtensionMail,
   ExtensionMailFolder,
+  ExtensionNetwork,
+  ExtensionNetworkRequest,
+  ExtensionNetworkResult,
   ExtensionSecurity,
   AntivirusScanTarget,
   AntivirusScanJob,
@@ -50,6 +53,7 @@ import type {
 
 import {
   deserializeError,
+  networkResponseFrom,
   serializeError,
   type ExtensionChannel,
   type HostCallMethod,
@@ -61,6 +65,7 @@ import {
   type SerializedWorkflowResult,
   type WorkflowDescriptor,
 } from './protocol';
+import { nodeApiBehindError, UnsupportedNodeApiError } from './unsupported-node-api';
 
 /** What an extension module must export. */
 export interface SandboxExtensionModule {
@@ -68,22 +73,14 @@ export interface SandboxExtensionModule {
   deactivate?(): void | Promise<void>;
 }
 
-/** Loads an extension's entry point. Swappable so tests need no files on disk. */
-export type SandboxModuleLoader = (entryPoint: string) => SandboxExtensionModule;
-
 /**
- * Load an extension with a `require` rooted at the extension's own entry point.
+ * Loads an extension's entry point, relative to its folder.
  *
- * Rooting it there rather than at this file is what lets a no-build extension
- * `require('./helpers')` and get the file next to it. The cache line above it
- * makes a reload actually re-read the source instead of handing back the copy
- * from the last activation.
+ * Passed in rather than chosen here: the app loads through `commonjs-loader.ts`
+ * inside a Worker, the CLI through Node's own `require`, and the tests need no
+ * files on disk at all.
  */
-const defaultModuleLoader: SandboxModuleLoader = (entryPoint) => {
-  const requireFromExtension = createRequire(entryPoint);
-  delete requireFromExtension.cache[requireFromExtension.resolve(entryPoint)];
-  return requireFromExtension(entryPoint) as SandboxExtensionModule;
-};
+export type SandboxModuleLoader = (entryPoint: string) => SandboxExtensionModule;
 
 /** Everything the sandbox holds for one activated extension. */
 interface SandboxExtension {
@@ -110,6 +107,12 @@ export interface ExtensionSandbox {
   dispose(): Promise<void>;
   /** Ids currently activated here. Exposed for assertions and diagnostics. */
   activeIds(): string[];
+  /**
+   * An error nothing in the extension caught: thrown from a timer, or a promise
+   * nobody awaited. There is no call to fail, so without this it would reach
+   * only a console nobody reads.
+   */
+  reportUncaught(kind: string, error: unknown): void;
 }
 
 function permissionDenied(permission: ExtensionPermission, operation: string): Error {
@@ -136,14 +139,14 @@ function flattenWorkflowResult(result: ExtensionWorkflowResult): SerializedWorkf
 /**
  * Start the sandbox on a channel.
  *
- * The channel is whatever the caller has: a `utilityProcess` message port in
- * the app, an in-memory pair in the tests. The engine is identical either way,
- * which is the point — a test exercises the same code the app runs, not a
- * simplified stand-in.
+ * The channel is whatever the caller has: a Web Worker's message port in the
+ * app, an in-memory pair in the tests. The engine is identical either way, which
+ * is the point — a test exercises the same code the app runs, not a simplified
+ * stand-in.
  */
 export function startExtensionSandbox(
   channel: ExtensionChannel,
-  loadModule: SandboxModuleLoader = defaultModuleLoader
+  loadModule: SandboxModuleLoader
 ): ExtensionSandbox {
   const extensions = new Map<string, SandboxExtension>();
   const pendingHostCalls = new Map<
@@ -158,6 +161,18 @@ export function startExtensionSandbox(
   const send = (message: SandboxToHostMessage): void => channel.post(message);
 
   const newId = (prefix: string): string => `${prefix}-${++nextId}`;
+
+  /**
+   * Tell main when a failure comes down to a Node API this sandbox does not
+   * have, so the user hears about it, and put the sentence that explains it on
+   * the error the extension's caller sees.
+   */
+  const noticeNodeApi = (extensionId: string, error: unknown): unknown => {
+    const api = nodeApiBehindError(error);
+    if (api === null) return error;
+    send({ type: 'unsupported-api', extensionId, api });
+    return error instanceof UnsupportedNodeApiError ? error : new UnsupportedNodeApiError(api);
+  };
 
   /** Ask main to do something on the extension's behalf, and await the answer. */
   const hostCall = (
@@ -315,6 +330,14 @@ export function startExtensionSandbox(
       },
     };
 
+    const network: ExtensionNetwork = {
+      fetch: async (url: string, options?: ExtensionNetworkRequest) => {
+        require_('network:fetch', 'network.fetch');
+        const result = await hostCall(extensionId, 'network.fetch', [url, options]);
+        return networkResponseFrom(result as ExtensionNetworkResult);
+      },
+    };
+
     const ui: ExtensionUI = {
       notify: (notification: ExtensionUINotification) => {
         require_('ui:notify', 'ui.notify');
@@ -390,6 +413,7 @@ export function startExtensionSandbox(
 
     const events: ExtensionEventBus = {
       on: <T extends PipelineEvent>(eventType: T['type'], handler: EventHandler<T>): Unsubscribe => {
+        require_('email:read', `events.on(${eventType})`);
         const subscriptionId = newId('sub');
         eventHandlers.set(subscriptionId, handler as EventHandler<PipelineEvent>);
         void hostCall(extensionId, 'events.subscribe', [eventType, subscriptionId, false]).catch(
@@ -401,14 +425,12 @@ export function startExtensionSandbox(
         };
       },
       once: <T extends PipelineEvent>(eventType: T['type'], handler: EventHandler<T>): void => {
+        require_('email:read', `events.once(${eventType})`);
         const subscriptionId = newId('sub');
         eventHandlers.set(subscriptionId, handler as EventHandler<PipelineEvent>);
         void hostCall(extensionId, 'events.subscribe', [eventType, subscriptionId, true]).catch(
           (error: Error) => log.error(`Could not subscribe to ${eventType}: ${error.message}`)
         );
-      },
-      emit: (event: PipelineEvent): void => {
-        void hostCall(extensionId, 'events.emit', [event]).catch(() => undefined);
       },
     };
 
@@ -422,6 +444,7 @@ export function startExtensionSandbox(
       ai: has('ai:use') ? ai : undefined,
       settings,
       mail,
+      network,
       security,
       ui,
       log,
@@ -528,7 +551,7 @@ export function startExtensionSandbox(
       // A half-activated extension must not be left behind: the host will mark
       // it errored, and a retry has to start from nothing.
       extensions.delete(extensionId);
-      send({ type: 'failed', requestId, error: serializeError(error) });
+      send({ type: 'failed', requestId, error: serializeError(noticeNodeApi(extensionId, error)) });
     }
   }
 
@@ -579,7 +602,12 @@ export function startExtensionSandbox(
       const value = await runTarget(entry, target, args, controller.signal);
       send({ type: 'invoke-reply', requestId, ok: true, value });
     } catch (error) {
-      send({ type: 'invoke-reply', requestId, ok: false, error: serializeError(error) });
+      send({
+        type: 'invoke-reply',
+        requestId,
+        ok: false,
+        error: serializeError(noticeNodeApi(extensionId, error)),
+      });
     } finally {
       inFlight.delete(requestId);
     }
@@ -639,8 +667,9 @@ export function startExtensionSandbox(
           try {
             await handler(action);
           } catch (error) {
+            const explained = noticeNodeApi(entry.manifest.id, error);
             entry.context.log.error(
-              `ui.onAction handler failed for '${action.action}': ${(error as Error).message}`
+              `ui.onAction handler failed for '${action.action}': ${(explained as Error).message}`
             );
           }
         }
@@ -686,6 +715,9 @@ export function startExtensionSandbox(
       case 'sync-state':
         applySyncState(message.extensionId, message.state);
         break;
+      case 'ping':
+        send({ type: 'pong', nonce: message.nonce });
+        break;
       case 'shutdown':
         void dispose();
         break;
@@ -718,5 +750,12 @@ export function startExtensionSandbox(
   return {
     dispose,
     activeIds: () => Array.from(extensions.keys()),
+    reportUncaught: (kind, error) => {
+      const extensionId = extensions.keys().next().value ?? 'sandbox';
+      const explained = noticeNodeApi(extensionId, error);
+      const text =
+        explained instanceof Error ? (explained.stack ?? explained.message) : String(explained);
+      send({ type: 'log', extensionId, level: 'error', message: `${kind}: ${text}` });
+    },
   };
 }

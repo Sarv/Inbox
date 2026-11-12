@@ -27,6 +27,11 @@
       "types": "./dist/pgp.d.ts",
       "import": "./dist/pgp.mjs",
       "require": "./dist/pgp.js"
+    },
+    "./extension-sandbox-guest": {
+      "types": "./dist/extension-sandbox-guest.d.ts",
+      "import": "./dist/extension-sandbox-guest.mjs",
+      "require": "./dist/extension-sandbox-guest.js"
     }
   },
   "scripts": {
@@ -42,14 +47,18 @@
     "test:integration": "vitest run test/integration"
   },
   "dependencies": {
+    "@peculiar/x509": "^2.1.0",
     "@sarv-in/mailguard": "^0.4.3",
     "@zone-eu/mailsplit": "^5.4.19",
+    "asn1js": "^3.0.10",
     "chardet": "^2.2.0",
     "date-fns": "^4.4.0",
     "email-addresses": "^5.0.0",
     "email-reply-parser": "^2.3.9",
+    "entities": "^7.0.1",
     "free-email-domains": "^1.12.17",
     "html-to-text": "^10.0.1",
+    "htmlparser2": "^10.1.0",
     "iconv-lite": "^0.7.3",
     "imapflow": "^2.2.1",
     "ipaddr.js": "^2.2.0",
@@ -61,10 +70,12 @@
     "nodemailer": "^10.0.14",
     "openpgp": "^6.3.2",
     "p-retry": "^8.0.1",
+    "reflect-metadata": "^0.2.2",
     "sanitize-filename": "^1.6.4",
     "sanitize-html": "^2.18.1",
     "tldts": "^7.4.15",
     "turndown": "^7.2.4",
+    "write-file-atomic": "^8.0.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -75,6 +86,7 @@
     "@types/nodemailer": "^8.0.2",
     "@types/sanitize-html": "^2.16.2",
     "@types/turndown": "^5.0.4",
+    "@types/write-file-atomic": "^4.0.3",
     "tsup": "^8.0.1",
     "typescript": "^6.0.0",
     "vitest": "^5.0.2"

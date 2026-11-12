@@ -443,3 +443,36 @@ describe('known provider/filter Spam bypasses core intelligence', () => {
     expect(saved.decisions).toEqual([]); expect(saved.actions).toEqual([]);
   });
 });
+
+// The prompt tells the AI whether the user is a direct (To) or Cc recipient —
+// "CC: just looped in" changes what it files as needs-response. To and Cc are a
+// stranger's headers; the addresses were pulled out with
+// `/[\w.+-]+@[\w.-]+/g`, quadratic on a long run with no `@` (CodeQL
+// js/polynomial-redos): 150 K `+` took about 9 s per header, per email.
+describe('UnifiedPipeline — recipient role in the prompt', () => {
+  const promptFor = async (over: Partial<EmailRecord>) => {
+    const { pipeline, callAI } = makePipeline();
+    callAI.mockResolvedValue(aiResponse([{ emailId: 'e1', categories: ['invoice'], confidence: 0.9 }]));
+    await pipeline.processEmail(mkEmail(over));
+    return String(callAI.mock.calls[0]?.[1] ?? '');
+  };
+
+  // Breaks: a Cc'd user is presented to the AI as the primary recipient, or the
+  // reverse, so "needs response" is judged for the wrong role.
+  it('marks the user CC only when they are in Cc and not in To', async () => {
+    expect(await promptFor({ toAddress: 'a@partner.com', ccAddress: 'Me <ME@sarv.com>; b@x.com' })).toContain('CC (just looped in');
+    expect(await promptFor({ toAddress: 'a@partner.com, me@sarv.com', ccAddress: 'me@sarv.com' })).toContain('TO (direct recipient)');
+  });
+
+  // Breaks: "some.me@sarv.com" in Cc counts as the user "me@sarv.com".
+  it('compares whole addresses, never a substring', async () => {
+    expect(await promptFor({ toAddress: 'a@partner.com', ccAddress: 'some.me@sarv.com' })).toContain('TO (direct recipient)');
+  });
+
+  // Breaks: one email with a crafted To/Cc stalls the pipeline for seconds —
+  // the regex is back. Under it this test times out.
+  it('handles a To and Cc of 150 K "+" with no "@" at once', async () => {
+    const header = '+'.repeat(150_000);
+    expect(await promptFor({ toAddress: header, ccAddress: header })).toContain('TO (direct recipient)');
+  });
+});

@@ -151,9 +151,18 @@ describe('the table matches what each bundle reads', () => {
     { target: 'renderer', files: () => sourceFiles('src') },
     {
       target: 'main',
-      files: () => sourceFiles('electron', (rel) => rel.startsWith('workers') || rel === 'preload.ts'),
+      files: () =>
+        sourceFiles(
+          'electron',
+          (rel) => rel.startsWith('workers') || rel.startsWith('extension-sandbox') || rel === 'preload.ts',
+        ),
     },
-    { target: 'worker', files: () => sourceFiles('electron/workers') },
+    // The extension sandbox's guest and preload are policed as workers: the
+    // guest gets the (empty) worker map and its preload none at all.
+    {
+      target: 'worker',
+      files: () => [...sourceFiles('electron/workers'), ...sourceFiles('electron/extension-sandbox')],
+    },
   ];
 
   for (const { target, files } of bundles) {
@@ -201,7 +210,8 @@ describe('vite.config.ts hands each Electron entry its own map', () => {
       { entry: 'electron/main.ts', define: 'main', otherDefine: false },
       { entry: 'electron/workers/db-compact.worker.ts', define: 'worker', otherDefine: false },
       { entry: 'electron/services/assistant-attachment-extract.worker.ts', define: null, otherDefine: false },
-      { entry: 'electron/workers/extension-sandbox.worker.ts', define: 'worker', otherDefine: false },
+      { entry: 'electron/extension-sandbox/extension-sandbox-guest.ts', define: 'worker', otherDefine: false },
+      { entry: 'electron/extension-sandbox/extension-sandbox-preload.ts', define: null, otherDefine: false },
       { entry: 'electron/preload.ts', define: null, otherDefine: false },
     ]);
   });

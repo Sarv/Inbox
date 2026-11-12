@@ -85,7 +85,11 @@ export function normalizeSubject(subject: string): string {
   //   es: rv · it: rif · pt: enc
   // Deliberately NOT "ref"/"res"/"vs" — those are reference/ordinary subject
   // words as often as reply markers, and stripping them would MERGE unrelated mail.
-  const prefixRe = /^\s*(re|fwd?|aw|wg|sv|rv|tr|rif|enc|antw|antwort|doorst|rép)\s*(\[\d+\]|\(\d+\))?\s*:\s*/i;
+  // The whitespace after the count belongs to the count's own optional group:
+  // written as `\s*(count)?\s*:`, two adjacent `\s*` split a long whitespace run
+  // every possible way before giving up, quadratic on "Re" + spaces with no colon
+  // (CodeQL js/polynomial-redos; 150 K characters took about 9 s). Same language.
+  const prefixRe = /^\s*(re|fwd?|aw|wg|sv|rv|tr|rif|enc|antw|antwort|doorst|rép)\s*(?:(\[\d+\]|\(\d+\))\s*)?:\s*/i;
   // Cap at 8 iterations as a safety net against pathological input.
   for (let i = 0; i < 8 && prefixRe.test(s); i++) {
     s = s.replace(prefixRe, '');

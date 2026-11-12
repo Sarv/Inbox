@@ -151,14 +151,14 @@ export default defineConfig(({ mode }) => ({
         },
       },
       {
-        // Extension sandbox. Its own entry for the same reason as the VACUUM
-        // worker: `utilityProcess.fork` loads it by path at runtime, so it has
-        // to exist as its own file beside the main bundle. Same externals — it
-        // must resolve `@sarvinbox/core` exactly as main does, or the two ends
-        // of the extension protocol could drift apart.
-        entry: 'electron/workers/extension-sandbox.worker.ts',
+        // What runs in an extension's Web Worker, served by the main process from
+        // this file (extension-runtime.ts), so it stays inside app.asar: not a
+        // `.worker.js`, which asarUnpack would move out from under the asar's
+        // integrity check. Bundles everything, because a Worker has no modules to
+        // resolve. A test proves nothing in it reaches a Node module.
+        entry: 'electron/extension-sandbox/extension-sandbox-guest.ts',
         onstart() {
-          // Deliberately no startup()/reload() — this entry rebuilding must not
+          // Deliberately no startup()/reload(): this entry rebuilding must not
           // restart the main process or reload the window.
         },
         vite: {
@@ -166,8 +166,22 @@ export default defineConfig(({ mode }) => ({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              external: mainExternals,
+              external: [],
+              output: { codeSplitting: false },
             },
+          },
+        },
+      },
+      {
+        // The preload of the page that Worker starts in. Its own entry: it must
+        // hold nothing of the app's preload, whose bridge reaches every IPC channel.
+        entry: 'electron/extension-sandbox/extension-sandbox-preload.ts',
+        onstart() {
+          // Same: a new sandbox picks this up on its next start.
+        },
+        vite: {
+          build: {
+            outDir: 'dist-electron',
           },
         },
       },

@@ -49,6 +49,7 @@ vi.mock('@sarvinbox/core', async (importOriginal) => {
 import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
 import {
   clearImapAccount,
+  forgetImapAccountFor,
   legacyImapFilesExist,
   loadImapAccount,
   saveImapAccount,
@@ -216,5 +217,44 @@ describe('legacyImapFilesExist', () => {
     rmSync(join(h.userData, LEGACY));
     writeFileSync(join(h.userData, `${LEGACY}.premigrated`), 'x');
     expect(legacyImapFilesExist()).toBe(true);
+  });
+});
+
+describe('forgetImapAccountFor', () => {
+  // Breaks: a rejected sign-in leaves its own config behind, and startup recovery
+  // dials the dead credentials again on the next launch.
+  it('forgets the saved account when it is this one, however the names are cased', async () => {
+    await saveImapAccount(config);
+
+    expect(await forgetImapAccountFor({ host: ' IMAP.Example.com ', username: 'Me@Example.com' })).toBe(true);
+    expect(dbState.blobs.has(BLOB_KEY)).toBe(false);
+  });
+
+  // Breaks: a background account whose grant was revoked deletes the active
+  // account's saved config, and the next launch starts at sign-in.
+  it.each([
+    ['another user on the same server', { host: 'imap.example.com', username: 'other@example.com' }],
+    ['the same user on another server', { host: 'imap.other.example', username: 'me@example.com' }],
+    ['an account with no server or user', {}],
+  ])('keeps the saved account for %s', async (_name, other) => {
+    await saveImapAccount(config);
+    const before = dbState.blobs.get(BLOB_KEY);
+
+    expect(await forgetImapAccountFor(other)).toBe(false);
+    expect(dbState.blobs.get(BLOB_KEY)).toEqual(before);
+  });
+
+  // Breaks: a slot that could not be read is taken for one that can be cleared.
+  // This deletes, so only a read that succeeded may lead to it.
+  it('leaves a saved account it cannot read alone', async () => {
+    dbState.blobs.set(BLOB_KEY, Buffer.from('GARBAGE:{}', 'utf8'));
+
+    expect(await forgetImapAccountFor(config)).toBe(false);
+    expect(dbState.blobs.get(BLOB_KEY)?.toString('utf8')).toBe('GARBAGE:{}');
+  });
+
+  // Breaks: forgetting with nothing saved throws, and the auth-error path dies.
+  it('does nothing when nothing is saved', async () => {
+    expect(await forgetImapAccountFor(config)).toBe(false);
   });
 });

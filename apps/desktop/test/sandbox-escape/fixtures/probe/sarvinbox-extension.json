@@ -1,0 +1,1 @@
+{"id":"probe","name":"Probe","version":"1.0.0","description":"escape probes","author":"t","main":"index.js","engines":{"sarvinbox":">=0.1.0"},"permissions":["email:read","storage:local","settings:read","ui:notify"]}

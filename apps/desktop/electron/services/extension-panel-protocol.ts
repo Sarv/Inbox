@@ -1,10 +1,9 @@
-import * as fs from 'fs';
-
 import {
   createLogger,
   PANEL_SCHEME,
   panelAssetContentType,
   parsePanelUrl,
+  readRegularFile,
   resolveWithinDir,
   SDK_HOST,
 } from '@sarvinbox/core';
@@ -192,16 +191,16 @@ export async function handlePanelRequest(request: Request): Promise<Response> {
     return errorResponse(request, 403, 'This file type cannot be loaded in a panel');
   }
 
-  let body: Buffer;
+  let body: Buffer | null;
   try {
-    const stat = await fs.promises.stat(filePath);
-    // A directory answers `readFile` with EISDIR on some platforms and an empty
-    // read on others; refuse it the same way everywhere.
-    if (!stat.isFile()) return errorResponse(request, 404, 'Panel file not found');
-    body = await fs.promises.readFile(filePath);
+    // Never through a link: a link is not a file of this extension's, wherever it
+    // points, and a panel can fetch its own origin, so following one would let it
+    // read any file the user can. A directory is refused the same way everywhere.
+    body = await readRegularFile(filePath);
   } catch {
-    return errorResponse(request, 404, 'Panel file not found');
+    body = null;
   }
+  if (!body) return errorResponse(request, 404, 'Panel file not found');
 
   const headers = assetHeaders(request, contentType);
   headers.set('Content-Length', String(body.byteLength));

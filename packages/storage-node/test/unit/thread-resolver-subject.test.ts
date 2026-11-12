@@ -336,3 +336,32 @@ describe('resolveThreadId — a recurring notification stream groups per burst, 
     expect(r.via).toBe('subject+participants');
   });
 });
+
+// Participants are compared by bare address: a "Name <addr>" entry contributes
+// the text inside its brackets. That used `/<([^>]+)>/`, which from every `<`
+// scanned to the end of the entry — quadratic on a To of many `<` with no `>`
+// (CodeQL js/polynomial-redos): 200 K took about 14 s, on the sync path, for
+// one email.
+describe('resolveThreadId — participants from "Name <addr>" entries', () => {
+  let db: Database.Database;
+  beforeEach(() => { db = newDb(); idSeq = 0; });
+
+  // Breaks: a recipient written with a display name stops counting as the same
+  // participant as its bare address, and a group conversation splits.
+  it('treats "Name <addr>" and the bare address as one participant', () => {
+    addEmail(db, { thread: 't-A', subject: `Re: ${SUBJ}`, from: 'dhruv@sarv.com', to: `${OWNER}, mitali@sarv.com, advik@sarv.com`, date: 100 * DAY });
+    const r = resolveNew(db, {
+      subject: `Re: ${SUBJ}`, from: 'hrishi@sarv.com',
+      to: `Advik D <${OWNER.toUpperCase()}>, Mitali <mitali@sarv.com>, <> Advik <advik@sarv.com>`, date: 105 * DAY,
+    });
+    expect(r).toEqual({ threadId: 't-A', via: 'subject+participants' });
+  });
+
+  // Breaks: a crafted To header stalls thread resolution for seconds — the regex
+  // is back. Under it this test times out. Nothing merges on it either.
+  it('resolves a mail whose To is 200 K "<" with no ">" at once', () => {
+    addEmail(db, { thread: 't-A', subject: `Re: ${SUBJ}`, from: 'dhruv@sarv.com', to: `${OWNER}, mitali@sarv.com`, date: 100 * DAY });
+    const r = resolveNew(db, { subject: `Re: ${SUBJ}`, from: 'mallory@evil.example', to: '<'.repeat(200_000), date: 101 * DAY });
+    expect(r.via).toBe('unchanged');
+  });
+});

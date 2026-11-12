@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 
 import { effectiveAIBaseUrl, parseAttachmentNames } from '@sarvinbox/core';
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
@@ -21,6 +21,13 @@ import { getMainWindow } from '../shared';
 
 import { logUserAction } from './agent-handlers';
 
+/**
+ * Keys the review-cache identity below. Per process and never stored: the
+ * recommendation cache it guards is memory-only, so the identity only has to
+ * stay stable for this run.
+ */
+const REVIEW_IDENTITY_KEY = randomBytes(32);
+
 const service = new InboxAssistantService({
   accounts: () => readRegistryAccounts().map(({ id, email, name }) => ({ id, email, name })),
   history: inboxAssistantHistory,
@@ -33,7 +40,11 @@ const service = new InboxAssistantService({
     const identity = config as (typeof config & { providerId?: string; authMethod?: string; oauthProvider?: string; oauthEmail?: string });
     // The host retains only this opaque digest. Changing provider credentials,
     // model or endpoint invalidates recommendations without exposing a key.
-    return createHash('sha256').update(JSON.stringify(config ? {
+    // A change detector, not password storage: it is compared, never verified
+    // against a guess, so a slow KDF would only slow every review. Keyed, so
+    // the digest cannot confirm a guessed API key (a short custom-endpoint key
+    // could otherwise be brute-forced from it) should it ever leave memory.
+    return createHmac('sha256', REVIEW_IDENTITY_KEY).update(JSON.stringify(config ? {
       type: config.type, model: config.model, baseUrl: effectiveAIBaseUrl(config), apiKey: config.apiKey,
       providerId: identity?.providerId, authMethod: identity?.authMethod,
       oauthProvider: identity?.oauthProvider, oauthEmail: identity?.oauthEmail,

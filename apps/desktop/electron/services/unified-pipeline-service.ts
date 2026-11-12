@@ -34,6 +34,7 @@ import {
   setEmailReadFlag,
   createLogger,
   escapeHtml,
+  addressTokens,
   type AIProviderConfig,
   type ContactType,
   type FolderLabelMode,
@@ -158,8 +159,7 @@ function isUserInToField(
   const me = userEmail.toLowerCase().trim();
   const to = (email.toAddress || '').toLowerCase();
   if (!to) return false;
-  const matches = to.match(/[\w.+-]+@[\w.-]+/g) || [];
-  return matches.some((a) => a === me);
+  return addressTokens(to).some((a) => a === me);
 }
 
 /**
@@ -1165,8 +1165,9 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
       if (modelDetectedSpam) repos?.agent?.markAgentDone(emailId, { priorityScore, priorityTier, priorityReasoning, recommendedAction });
       return;
     }
-    existingClassification = latest && existingCategoryClassification(latest);
-    classificationPending = !!latest && automaticCategorizationDeferred(latest);
+    // `latest` is non-null here: a vanished email returned above.
+    existingClassification = existingCategoryClassification(latest);
+    classificationPending = automaticCategorizationDeferred(latest);
     if (existingClassification) {
       categories = existingClassification.categories;
       categorizationFailed = false;
@@ -2069,7 +2070,7 @@ async function tryAutoSendReply(params: {
     const aliasSet = new Set(
       [...userAliases, serviceConfig.userEmail || ''].map(a => a.toLowerCase()).filter(Boolean),
     );
-    const extractAddrs = (s: string | null | undefined) => (s || '').match(/[\w.+-]+@[\w.-]+/g) || [];
+    const extractAddrs = (s: string | null | undefined) => addressTokens(s || '');
     const others = [...new Set(
       [...extractAddrs(email.toAddress), ...extractAddrs(email.ccAddress)].map(a => a.toLowerCase()),
     )].filter(a => !aliasSet.has(a) && a !== sender);

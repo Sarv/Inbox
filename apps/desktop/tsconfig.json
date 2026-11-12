@@ -26,6 +26,12 @@
       "@sarvinbox/core/ai-provider-auth": ["../../packages/core/src/utils/ai-provider-auth.ts"],
       "@sarvinbox/core/html-escape": ["../../packages/core/src/utils/html-escape.ts"],
       "@sarvinbox/core/connection-security": ["../../packages/core/src/utils/connection-security.ts"],
+      // Same: the one dot-anchored "host is or is under domain" rule, shared
+      // with core's provider detection.
+      "@sarvinbox/core/host-match": ["../../packages/core/src/utils/host-match.ts"],
+      // Mirror the Vite aliases: linear trailing-slash trim and address scans.
+      "@sarvinbox/core/trailing-slash": ["../../packages/core/src/utils/trailing-slash.ts"],
+      "@sarvinbox/core/address-tokens": ["../../packages/core/src/utils/address-tokens.ts"],
       // Mirrors the Vite alias — subpath import of the pure contact-enrichment
       // module, so renderer and main share one implementation.
       "@sarvinbox/core/contact-enrichment": ["../../packages/core/src/contact-enrichment/index.ts"],

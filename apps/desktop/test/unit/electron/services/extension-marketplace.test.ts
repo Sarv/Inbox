@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, existsSync, linkSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -9,8 +9,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 /**
  * Installing an extension published on GitHub.
  *
- * What this protects: an extension runs as full code in the extension process
- * with real access to the user's mail, and the app's only defences are a pinned
+ * What this protects: an extension gets real access to the user's mail through the
+ * permissions it is granted, and the app's only defences here are a pinned
  * SHA-256, a size cap, an archive allowlist and a permission prompt the user
  * actually saw. Each
  * of those is one `if` away from being decoration, and a regression in any of
@@ -893,6 +893,34 @@ describe('installFromRegistry', () => {
     expect(h.stagedFiles[0].sort()).toEqual(['dist/index.js', 'sarvinbox-extension.json']);
   });
 
+  // Breaks: a link under a name the app loads is unpacked as that link, so the
+  // installed extension carries a pointer to a file anywhere on this computer
+  // (a symbolic link), or a second name for one of its own files (a hard link).
+  it.skipIf(process.platform === 'win32')('never unpacks a link, even under a name the app loads', async () => {
+    const staging = mkdtempSync(join(tmpdir(), 'sarvinbox-links-'));
+    const outside = mkdtempSync(join(tmpdir(), 'sarvinbox-outside-'));
+    writeFileSync(join(outside, 'secret.txt'), 'SECRET', 'utf-8');
+    mkdirSync(join(staging, 'dist'));
+    writeFileSync(join(staging, 'sarvinbox-extension.json'), JSON.stringify(MANIFEST), 'utf-8');
+    writeFileSync(join(staging, 'dist', 'index.js'), 'exports.activate = () => {};', 'utf-8');
+    symlinkSync(join(outside, 'secret.txt'), join(staging, 'README.md'));
+    linkSync(join(staging, 'dist', 'index.js'), join(staging, 'LICENSE'));
+    const out = join(outside, 'out.tgz');
+    createTar({ gzip: true, cwd: staging, file: out, sync: true }, ['sarvinbox-extension.json', 'dist/index.js', 'README.md', 'LICENSE']);
+    const archive = readFileSync(out);
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    try {
+      await installFromRegistry('otp-code', ['email:read', 'ui:notify']);
+      expect(h.stagedFiles[0].sort()).toEqual(['dist/index.js', 'sarvinbox-extension.json']);
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   // Every real release is packed from a staging folder, so the tarball carries
   // `./` and `./dist/` as entries. If those count as unexpected, the warning
   // that exists to name a publisher shipping something new fires on every
@@ -972,6 +1000,23 @@ describe('installFromRegistry', () => {
     expect(h.disabled).toEqual(['otp-code']);
     // Nothing to carry, so nothing should have been written.
     expect(h.settingsWrites).toEqual([]);
+  });
+
+  // Regression: a new version that failed to start threw past the restore, so an update
+  // cost the reader their settings and switched back on what they had turned off, on top
+  // of whatever made it fail. The install happened either way; the choices must follow it.
+  it('still restores the reader choices when the new version fails to start', async () => {
+    h.installed = [{ id: 'otp-code', version: '0.9.0', enabled: false, settings: { a: 1 } }];
+    h.installThrows = 'This extension uses Node\'s "fs"';
+    const archive = archiveFor();
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    await expect(installFromRegistry('otp-code', ['email:read', 'ui:notify'])).rejects.toThrow('"fs"');
+
+    expect(h.settingsWrites).toEqual([{ id: 'otp-code', settings: { a: 1 } }]);
+    expect(h.disabled).toEqual(['otp-code']);
   });
 
   // Regression: a first install has no previous choices to restore, and writing

@@ -345,3 +345,22 @@ describe('headerValuesFromText', () => {
     expect(headerValueFromText(headers, 'received')).toBe(headerValuesFromText(headers, 'received')[0]);
   });
 });
+
+// The Message-ID is a stranger's header. Its domain was trimmed with
+// `/[>\s]+$/`, which restarted at every character of a long whitespace run that
+// isn't at the end — quadratic (CodeQL js/polynomial-redos): 160 K tabs before
+// the closing `>` took about 12 s, on the main thread, for one message.
+describe('assessBulkMail — ESP Message-ID domain trim', () => {
+  // Breaks: one crafted Message-ID stalls the bulk check (and the chat view
+  // that renders with it) for seconds — the regex is back.
+  it('reads a Message-ID with a long whitespace run before its end at once', () => {
+    const messageId = `<a@mail.gmail.com${'\t'.repeat(160_000)}x>`;
+    expect(isBulkMail({ rawBody: '<p>hi</p>', messageId })).toBe(false);
+  });
+
+  // Breaks: whitespace or `>` left on the domain hides an ESP Message-ID.
+  it('still sees an ESP domain behind trailing whitespace and ">"', () => {
+    expect(isBulkMail({ rawBody: '<p>hi</p>', messageId: '<abc@sendgrid.net \t>' })).toBe(true);
+    expect(isBulkMail({ rawBody: '<p>hi</p>', messageId: '<abc@sendgrid.net>>  ' })).toBe(true);
+  });
+});

@@ -65,6 +65,22 @@ describe('keywordForCategory', () => {
     expect(keywordForCategory({ slug: '', name: '' })).toBe('label');
     expect(keywordForCategory({ slug: '✈', name: '✈' })).toBe('label'); // nothing survives sanitising
   });
+
+  // Breaks: an underscore inside the keyword is trimmed, or one at an edge kept.
+  it('trims edge underscores only, keeping inner runs', () => {
+    expect(keywordForCategory({ slug: '__needs__response__', name: '' })).toBe('needs__response');
+    expect(keywordForCategory({ slug: '_', name: 'x' })).toBe('label');
+  });
+
+  // Breaks: a category name (typed, or suggested by the AI) with a long run of
+  // underscores stalls labelling. `_` survives the collapse step, and the trim
+  // was `/^_+|_+$/g`, which restarted at every underscore of a run not at the end
+  // — quadratic (CodeQL js/polynomial-redos): 200 K took about 14 s, so this
+  // test timed out under it.
+  it('is linear on a long run of underscores inside the name', () => {
+    const slug = `a${'_'.repeat(200_000)}b`;
+    expect(keywordForCategory({ slug, name: '' })).toBe(slug);
+  });
 });
 
 describe('folderPathForCategory', () => {

@@ -36,9 +36,7 @@ export function Tooltip({ children, content, shortcut, className, hidden, delayM
   const tooltipRef = useRef<HTMLDivElement>(null);
   const delayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const shortcuts = shortcut
-    ? Array.isArray(shortcut) ? shortcut.filter(Boolean) : shortcut ? [shortcut] : []
-    : [];
+  const shortcuts = !shortcut ? [] : Array.isArray(shortcut) ? shortcut.filter(Boolean) : [shortcut];
 
   // When hidden becomes true (e.g. dropdown opened), reset visibility
   useEffect(() => {

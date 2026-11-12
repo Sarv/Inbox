@@ -7,6 +7,7 @@ import { readFileSync } from 'fs';
 import { createRequire } from 'module';
 import { dirname, join } from 'path';
 
+import postcss, { type Declaration, type Rule } from 'postcss';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -28,9 +29,18 @@ import { AS_SENT_MARKER } from '../../../../src/components/email-detail/chat-mes
  */
 const THEME = readFileSync(join(__dirname, '../../../../src/styles/chat-view-theme.css'), 'utf8');
 
-/** The as-sent rule, from its selector to its closing brace. */
-const RULE_START = THEME.indexOf('.sec-bubble[data-sec-applied');
-const AS_SENT_RULE = THEME.slice(RULE_START, THEME.indexOf('}', RULE_START) + 1);
+/** The as-sent rule, parsed. Found by its exact selector, not by text
+ *  position: the `:not([data-sec-applied~='as-sent'])` rules further down
+ *  mention the same marker and are not this rule. */
+const AS_SENT_SELECTOR = `.sec-bubble[data-sec-applied~='${AS_SENT_MARKER}']`;
+const AS_SENT = ((): Rule | undefined => {
+  let found: Rule | undefined;
+  postcss.parse(THEME).walkRules((rule) => {
+    if (!found && rule.selectors.includes(AS_SENT_SELECTOR)) found = rule;
+  });
+  return found;
+})();
+const AS_SENT_RULE = AS_SENT?.toString() ?? '';
 
 describe('chat-view-theme.css', () => {
   // Regression: the selector matches on the value the adapter puts in
@@ -41,16 +51,20 @@ describe('chat-view-theme.css', () => {
 
   // Regression: drop `!important` and the rule still parses, still looks right
   // in review, and does nothing at all — the library's inline style wins.
+  // Read from the parsed rule, so a comment that happens to say `!important`
+  // cannot stand in for a declaration that lost it.
   it('marks every as-sent declaration important', () => {
-    const declarations = AS_SENT_RULE.split('{')[1]!
-      .replace('}', '')
-      .split(';')
-      .map((each) => each.trim())
-      .filter(Boolean);
+    expect(AS_SENT).toBeDefined();
+    const declarations = (AS_SENT?.nodes ?? []).filter(
+      (node): node is Declaration => node.type === 'decl'
+    );
 
     expect(declarations.length).toBeGreaterThan(0);
     for (const declaration of declarations) {
-      expect(declaration).toContain('!important');
+      expect({ prop: declaration.prop, important: declaration.important }).toEqual({
+        prop: declaration.prop,
+        important: true,
+      });
     }
   });
 

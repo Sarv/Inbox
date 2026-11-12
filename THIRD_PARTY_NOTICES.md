@@ -67,7 +67,7 @@ under `node_modules/` after `pnpm install`.
 
 - **@op-engineering/op-sqlite** 7.4.3 — Next generation SQLite for React Native  
   https://github.com/OP-Engineering/op-sqlite
-- **@peculiar/x509** 2.1.0 — @peculiar/x509 is an easy to use TypeScript/Javascript library based on @peculiar/asn1-schema that makes generating, parsing, and validating X509 certificates.  
+- **@peculiar/x509** 2.2.0 — @peculiar/x509 is an easy to use TypeScript/Javascript library based on @peculiar/asn1-schema that makes generating, parsing, and validating X509 certificates.  
   https://github.com/PeculiarVentures/x509
 - **@sentry/electron** 7.15.0 — Official Sentry SDK for Electron  
   https://github.com/getsentry/sentry-electron

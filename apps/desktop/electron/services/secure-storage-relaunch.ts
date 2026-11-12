@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { constants, openSync, readSync, closeSync, writeFileSync, rmSync, fstatSync } from 'node:fs';
+import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { readRegularFileSync } from '@sarvinbox/core';
 import { app } from 'electron';
 
 import { getExternalOpenService, MAX_EXTERNAL_OPEN_QUEUE } from './external-open-service';
@@ -35,20 +36,10 @@ export function consumeKeychainLaunchHandoff(directory: string, token: string | 
   if (!token || !/^[a-f0-9]{32}:[A-Za-z0-9_-]{43}$/.test(token)) return [];
   const [nonce, encodedKey] = token.split(':');
   const path = join(directory, `keychain-launch-${nonce}.bin`);
-  let fd: number | undefined;
   try {
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size < 29 || stat.size > MAX_HANDOFF_BYTES) return [];
-    const buffer = Buffer.alloc(stat.size + 1);
-    let length = 0;
-    while (length < buffer.length) {
-      const count = readSync(fd, buffer, length, buffer.length - length, null);
-      if (!count) break;
-      length += count;
-    }
-    if (length !== stat.size) return [];
-    const bytes = buffer.subarray(0, length);
+    // IV (12) + tag (16) + at least one byte, read from one handle: no
+    // symlink, no FIFO to hang the restart on, nothing swapped in meanwhile.
+    const bytes = readRegularFileSync(path, { minBytes: 29, maxBytes: MAX_HANDOFF_BYTES });
     const decipher = createDecipheriv('aes-256-gcm', Buffer.from(encodedKey!, 'base64url'), bytes.subarray(0, 12));
     decipher.setAAD(AAD);
     decipher.setAuthTag(bytes.subarray(12, 28));
@@ -60,7 +51,6 @@ export function consumeKeychainLaunchHandoff(directory: string, token: string | 
     return candidate.inputs as string[];
   } catch { return []; }
   finally {
-    if (fd !== undefined) closeSync(fd);
     try { rmSync(path, { force: true }); } catch { /* An unreadable encrypted handoff contains no persistent key. */ }
   }
 }

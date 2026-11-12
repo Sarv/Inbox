@@ -5,6 +5,8 @@
  * understanding their capabilities for multi-provider support.
  */
 
+import { hostIsOrUnder } from './host-match';
+
 export type EmailProvider = 'gmail' | 'outlook' | 'yahoo' | 'icloud' | 'generic';
 
 /**
@@ -80,8 +82,7 @@ function hostLabels(host: string): string[] {
 /** Whether `labels` (a split host) belongs to `pattern` — see PROVIDER_HOST_PATTERNS. */
 function hostMatchesPattern(labels: string[], pattern: string): boolean {
   if (!pattern.includes('.')) return labels.includes(pattern);
-  const host = labels.join('.');
-  return host === pattern || host.endsWith(`.${pattern}`);
+  return hostIsOrUnder(labels.join('.'), pattern);
 }
 
 /**

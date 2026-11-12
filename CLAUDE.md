@@ -224,6 +224,13 @@ Established shared helpers (extend this list as you add more):
   IMAP/SMTP connection is secured: 'ssl' | 'starttls' (upgrade REQUIRED) | 'none'
   (explicit opt-out); legacy configs resolve from `secure`, OAuth never to 'none'.
   Use it in clients and account forms instead of reading `secure`.
+- `createLogBudget()` — `packages/core/src/extensions/runtime/log-budget.ts`. How
+  many lines a stranger's code may have the main process write. Use it for any
+  new path from extension code into the logger, which is a synchronous write.
+- `readOsSandboxState(probe)` — `apps/desktop/electron/services/os-sandbox-state.ts`.
+  Whether a renderer really is in the OS sandbox: `sandbox: true` keeps reading true
+  under `--no-sandbox`. Use it before trusting that layer, and treat anything but
+  `active` as not there.
 - `conversationStarTargetIds(rows, starring, folders)` —
   `packages/core/src/utils/conversation-membership.ts`. Which messages a
   conversation-level star writes to: the LATEST message when starring, every
@@ -249,6 +256,16 @@ Established shared helpers (extend this list as you add more):
   Whether the OS key store really protects saved secrets on this device (false on
   Linux `basic_text`). Use it for any renderer wording that says a secret is
   "saved securely" or "in the keychain", instead of asking `secureCreds` again.
+- `messageBytes(value)` / `MAX_MESSAGE_BYTES` / `createFloodBudget()` —
+  `packages/core/src/extensions/runtime/flood-budget.ts`. How large a value from
+  extension code is, measured without stringifying it, and how much an extension may
+  send. **Measure before `JSON.stringify` on anything a stranger sized**: in Electron 44
+  stringifying one flat string of about 256 MB is a fatal V8 error ("Zone Allocation
+  failed") that ends the app, and no try/catch sees it.
+- `isScannerExtensionAvailable(manager, id)` —
+  `apps/desktop/electron/services/attachment-download-protection.ts`. Whether a scanner
+  extension can be used for scanning: on, loaded, granted. Scanning is the host's work,
+  so do not ask whether its code is running.
 - `isPublicAddress(ip)` / `checkPublicHttpsUrl(url, { site })` —
   `packages/core/src/utils/public-destination.ts`. The rules for a fetch whose URL
   a stranger chose (mail content, a sender's DNS): public addresses only (NAT64
@@ -292,6 +309,44 @@ Established shared helpers (extend this list as you add more):
   null when there is none; THROWS when the store cannot be read, where `getBlob`
   answers null. Use it for any store whose readers decide what is gone or what to
   overwrite (the OAuth token store does).
+- `trimChars` / `trimCharsStart` / `trimCharsEnd(value, set)` —
+  `packages/core/src/utils/trim-chars.ts` (and `trimTrailingSlashes(value)` in
+  `trailing-slash.ts`, built on it). Trim a set of characters (a string, or a
+  predicate such as `isWhitespaceChar`) off the ends in linear time. Use them
+  instead of `replace(/^[…]+|[…]+$/g, '')`, which is quadratic on a long run of a
+  trimmed character followed by something else.
+- `addressTokens(text)` / `angleBracketed(text)` —
+  `packages/core/src/utils/address-tokens.ts`. Every address-shaped token, and the
+  `<…>` part of `Name <addr>`, exactly what `/[\w.+-]+@[\w.-]+/g` and `/<([^>]+)>/`
+  return, in linear time. Use them on headers and bodies instead of those regexes.
+- `readRegularFile(path, maxBytes?)` / `readRegularFileSync(path, { minBytes, maxBytes })` —
+  `packages/core/src/utils/regular-file.ts`. Read a file from one open handle,
+  refusing a link, a folder, a pipe or a swapped-in file. The async one answers
+  null for "not a plain file" (an extension's files, a calendar the user opened);
+  the sync one throws (fixed-path files the app wrote itself). Use them instead of
+  `lstat` followed by `readFile`, which is a race.
+- `stringifyBounded(value, limit?)` / `messageBytes(value, stopAt?)` / `MAX_MESSAGE_BYTES` —
+  `packages/core/src/utils/json-size.ts`. In Electron 44, `JSON.stringify` of one
+  ~256 MB string ends the whole main process, uncatchably. Any main-process code
+  that stringifies a value a stranger sized (an email record or body, an
+  extension's data, a server's or the renderer's answer) measures it first:
+  `stringifyBounded` returns the JSON, or `null` without stringifying when it is
+  over the limit (64 M characters, measured safe; a lower limit for a log line).
+  Never `JSON.stringify(x).slice(…)` to bound a log line — that is the crash.
+- `writePrivateFileAtomicSync(file, data)` — `packages/core/src/utils/atomic-file.ts`.
+  Replace a small on-disk store whole (write-file-atomic), readable by this user
+  only. Use it instead of checking a path and writing it in place.
+- `stripHtmlTags(html)` — `packages/core/src/utils/html-text.ts` (renderer:
+  `@sarvinbox/core/html-text`). Tags out, text kept as written, entities decoded
+  once, script and style dropped. Use it instead of `.replace(/<[^>]+>/g, '')`;
+  use `htmlToPlainText` when the text should read as rendered.
+- `hostIsOrUnder(host, domain)` — `packages/core/src/utils/host-match.ts` (renderer:
+  `@sarvinbox/core/host-match`). Whether a host is a domain or a subdomain of it,
+  never a substring match.
+- `isAllowedArchiveEntry(path, entry)` —
+  `apps/desktop/electron/services/extension-archive-rules.mjs`. What may come out of
+  an extension archive (allowlisted paths, plain files and the expected folders,
+  never links). The installer and the build-time seed both unpack with it.
 
 ## Prefer a mature library over hand-rolled / regex logic
 

@@ -19,6 +19,8 @@ const h = vi.hoisted(() => ({
   errors: [] as string[],
   parsePanelRequest: vi.fn(),
   setMessageContext: vi.fn(),
+  crashGuard: null as { release: () => void } | null,
+  heldProblems: [] as unknown[],
 }));
 
 vi.mock('electron', () => ({
@@ -46,6 +48,14 @@ vi.mock('../../../../electron/services/extension-marketplace', () => ({
   getExtensionsConfig: vi.fn(),
   getRegistryEntry: vi.fn(),
   installFromRegistry: vi.fn(),
+}));
+
+vi.mock('../../../../electron/services/extension-crash-guard', () => ({
+  getExtensionCrashGuard: () => h.crashGuard,
+}));
+
+vi.mock('../../../../electron/services/extension-ui-backend', () => ({
+  takeHeldProblems: () => h.heldProblems,
 }));
 
 vi.mock('../../../../electron/services/antivirus-scan-service', () => ({
@@ -191,6 +201,56 @@ describe('extensions:invoke', () => {
 
     expect(invokeCapability).toHaveBeenNthCalledWith(1, 'thread.summarize', []);
     expect(invokeCapability).toHaveBeenNthCalledWith(2, 'thread.summarize', []);
+  });
+});
+
+describe('the way back from a crash loop', () => {
+  // The card sends the reader to Settings, and Settings asks here. Empty rather than an
+  // error before the manager is up, because the banner just has nothing to say then.
+  it('says what was held back, and nothing when there is no manager', async () => {
+    h.manager = { getHeldBack: () => ['vip-scoring'] };
+    await expect(call('extensions:getHeldBack')).resolves.toEqual(['vip-scoring']);
+
+    h.manager = null;
+    await expect(call('extensions:getHeldBack')).resolves.toEqual([]);
+  });
+
+  // In this order: the mark goes back to "starting" BEFORE any code runs. The other way
+  // round, code that brings the app down straight away would not count, and the reader
+  // would be back in the loop with nothing to catch them.
+  it('starts watching again before it starts the code', async () => {
+    const order: string[] = [];
+    h.crashGuard = { release: () => order.push('release') };
+    h.manager = { startHeldBack: async () => void order.push('start') };
+
+    await expect(call('extensions:startHeldBack')).resolves.toEqual({ success: true });
+
+    expect(order).toEqual(['release', 'start']);
+    h.crashGuard = null;
+  });
+
+  // A dev run has no guard at all, and turning extensions on there must still work.
+  it('works with no crash guard', async () => {
+    const startHeldBack = vi.fn(async () => undefined);
+    h.manager = { startHeldBack };
+
+    await expect(call('extensions:startHeldBack')).resolves.toEqual({ success: true });
+
+    expect(startHeldBack).toHaveBeenCalledTimes(1);
+  });
+
+  // Reported, or the button would look like it did something.
+  it('says so when starting them fails', async () => {
+    h.manager = { startHeldBack: async () => { throw new Error('no sandbox'); } };
+
+    await expect(call('extensions:startHeldBack')).resolves.toEqual({ success: false, error: 'no sandbox' });
+  });
+
+  // Each card is handed over once, by what can now show it.
+  it('hands over cards raised before the window was listening', async () => {
+    h.heldProblems = [{ id: 'extensions-held-back' }];
+    await expect(call('extensions:takeHeldProblems')).resolves.toEqual([{ id: 'extensions-held-back' }]);
+    h.heldProblems = [];
   });
 });
 

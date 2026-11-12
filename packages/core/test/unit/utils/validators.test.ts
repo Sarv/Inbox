@@ -59,6 +59,26 @@ describe('normalizeSubject', () => {
   it('does not strip a colon that is part of the real subject', () => {
     expect(normalizeSubject('Meeting: agenda for Monday')).toBe('meeting: agenda for monday');
   });
+
+  // Breaks: whitespace around a reply count stops being stripped, so "Re [2] :
+  // Budget" and "Budget" no longer thread together.
+  it('strips a prefix with whitespace around its count and colon', () => {
+    expect(normalizeSubject('Re [2] : Budget')).toBe('budget');
+    expect(normalizeSubject('AW\t(3)\t:\tBudget')).toBe('budget');
+    expect(normalizeSubject('Re  :  Re[4]:Budget')).toBe('budget');
+    expect(normalizeSubject('Re [2] Budget')).toBe('re [2] budget');
+  });
+
+  // Breaks: the subject is a stranger's header and threading normalizes it on
+  // every sync. Written `\s*(count)?\s*:`, the prefix regex split a long
+  // whitespace run between two adjacent `\s*` every possible way before failing
+  // — quadratic (CodeQL js/polynomial-redos): "Re" + 150 K tabs took about 9 s.
+  // Under that regex this test times out; now it is instant.
+  it('is linear on a prefix followed by a long whitespace run and no colon', () => {
+    const subject = `Re${'\t'.repeat(150_000)}x`;
+    expect(normalizeSubject(subject)).toBe(subject.toLowerCase());
+    expect(hasReplyPrefix(`Re${' '.repeat(150_000)}[2]x`)).toBe(false);
+  });
 });
 
 // Regression: threading uses this as the "this is a conversation, not a recurring
