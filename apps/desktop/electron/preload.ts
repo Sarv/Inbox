@@ -447,7 +447,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('emails:markStarred', emailId, starred, accountId),
     markImportant: (emailId: string, important: boolean, accountId?: string) =>
       ipcRenderer.invoke('emails:markImportant', emailId, important, accountId),
-    syncStarred: () => ipcRenderer.invoke('emails:syncStarred'),
     moveToFolder: (emailId: string, folderId: string, accountId?: string) =>
       ipcRenderer.invoke('emails:moveToFolder', emailId, folderId, accountId),
     restoreFromTrash: (emailIds: string[], accountId?: string) =>
@@ -1504,7 +1503,6 @@ export interface ElectronAPI {
     ) => () => void;
     markStarred: (emailId: string, starred: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     markImportant: (emailId: string, important: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
-    syncStarred: () => Promise<{ success: boolean; data?: { synced: number; total: number }; error?: string }>;
     moveToFolder: (emailId: string, folderId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     restoreFromTrash: (emailIds: string[], accountId?: string) => Promise<{ success: boolean; data?: { restoredIds: string[]; failedIds: string[] }; error?: string }>;
     copyToFolder: (emailId: string, folderId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
