@@ -184,13 +184,12 @@ const base64 = () => h.handlers.get('emails:getAttachmentBase64')!;
 const preview = () => h.handlers.get('emails:previewAttachment')!;
 const downloadEvent = () => ({ sender: h.webContents, senderFrame: h.frame });
 
-function enableScanner(options: { active?: boolean; granted?: boolean; manifest?: boolean } = {}) {
+function enableScanner(options: { granted?: boolean; manifest?: boolean } = {}) {
   h.manager = {
     getRegistry: () => ({
       getAll: () => [{ id: 'clamav-scan', enabled: true, grantedPermissions: options.granted === false ? [] : ['security:scan-attachments'] }],
       getLoaded: () => options.manifest === false ? undefined : { manifest: { permissions: ['security:scan-attachments'] } },
     }),
-    getHost: () => ({ isActive: () => options.active !== false }),
   };
 }
 
@@ -865,7 +864,7 @@ describe('per-action missing antivirus setup warnings', () => {
   it('does not interpret unreadable configuration or an inactive scanner as missing setup', async () => {
     enableScanner(); h.scannerSetup.mockRejectedValue(new Error('Secure scanner storage unavailable'));
     expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toMatchObject({ success: false }); expect(h.warning).not.toHaveBeenCalled();
-    enableScanner({ active: false }); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] });
+    enableScanner({ manifest: false }); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] });
     expect(await prepare()(downloadEvent(), EMAIL_ID, FILENAME)).toMatchObject({ success: false }); expect(h.warning).not.toHaveBeenCalled();
     expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
   });

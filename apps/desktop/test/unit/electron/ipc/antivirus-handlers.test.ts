@@ -13,7 +13,7 @@ const h = vi.hoisted(() => ({
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, handler: (...args: any[]) => Promise<any>) => h.handlers.set(channel, handler) } }));
 vi.mock('../../../../electron/shared', () => ({
   getMainWindow: () => ({ webContents: h.sender }),
-  getExtensionManager: () => ({ getRegistry: () => ({ get: (id: string) => id === 'clamav-scan' ? { grantedPermissions: h.permissions } : undefined }), getHost: () => ({ isActive: () => h.active }) }),
+  getExtensionManager: () => ({ getRegistry: () => ({ get: (id: string) => id === 'clamav-scan' ? { grantedPermissions: h.permissions, enabled: h.active } : undefined, getLoaded: () => ({ manifest: {} }) }) }),
 }));
 vi.mock('../../../../electron/services/antivirus-scan-service', () => ({ getAntivirusScanService: () => h.service }));
 vi.mock('../../../../electron/services/attachment-unscanned-warning', () => ({ getPendingUnscannedAttachmentWarning: h.warning.snapshot, respondUnscannedAttachmentWarning: h.warning.respond }));
@@ -131,7 +131,7 @@ describe('trusted antivirus setup IPC', () => {
 
   it.each(['disabled', 'permission-revoked'] as const)('rejects %s extensions before touching credentials', async state => {
     if (state === 'disabled') h.active = false; else h.permissions = [];
-    expect(await call('antivirus:probe', trusted(), 'https://scanner.test', 'synthetic-test-key')).toMatchObject({ success: false, error: expect.stringMatching(/inactive or lacks/) });
+    expect(await call('antivirus:probe', trusted(), 'https://scanner.test', 'synthetic-test-key')).toMatchObject({ success: false, error: expect.stringMatching(/turned off or lacks/) });
     expect(h.service.probe).not.toHaveBeenCalled();
   });
 

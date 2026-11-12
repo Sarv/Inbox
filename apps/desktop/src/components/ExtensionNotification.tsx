@@ -104,7 +104,7 @@ export function ExtensionNotification() {
 
   useEffect(() => {
     const api = window.electronAPI?.extensions;
-    const offNotify = api?.onNotify?.((card: NotificationCard) => {
+    const show = (card: NotificationCard) => {
       setCards((current) => {
         // Same id replaces in place rather than stacking a second copy — that
         // is what makes a card updatable (a countdown restarting, a value
@@ -134,9 +134,19 @@ export function ExtensionNotification() {
           }, Math.max(0, lifetimeMs))
         );
       }
-    });
+    };
+    const offNotify = api?.onNotify?.(show);
 
     const offDismiss = api?.onDismiss?.(({ id }: { id: string }) => remove(id));
+
+    // Only now that a card can be shown: an extension that stopped working while
+    // the app was starting told a window that was not listening yet.
+    void api?.takeHeldProblems?.().then(
+      (held) => held.forEach((card) => show(card as NotificationCard)),
+      () => {
+        /* Settings still says what is wrong with it. */
+      }
+    );
 
     return () => {
       try { offNotify?.(); } catch { /* listener already gone */ }
@@ -190,7 +200,7 @@ export function ExtensionNotification() {
               </div>
 
               {card.body && (
-                <div className="text-xs text-muted-foreground truncate">{card.body}</div>
+                <div className="text-xs text-muted-foreground line-clamp-4">{card.body}</div>
               )}
 
               {card.fields && card.fields.length > 0 && (

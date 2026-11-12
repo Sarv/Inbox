@@ -1,0 +1,1 @@
+{"id":"flood","name":"Flood","version":"1.0.0","description":"availability probes","author":"t","main":"index.js","engines":{"sarvinbox":">=0.1.0"},"permissions":["email:read","storage:local","settings:read","settings:write","ui:panel"],"contributes":{"panel":{"title":"Flood","entry":"index.js"}}}

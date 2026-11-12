@@ -42,12 +42,13 @@ describe('ExtensionPermissionPrompt trust notice', () => {
   // Regression (L-9): the warning lived behind `sensitive &&`, so an extension
   // asking for nothing got no warning at all — exactly the one a user would
   // assume is harmless.
-  it('says it runs as full code with the app’s access even when it asks for no permissions', () => {
+  it('says what confines it and what does not, even when it asks for no permissions', () => {
     const view = mount([]);
 
-    expect(notice(view)).toContain('runs as full code on your computer');
-    expect(notice(view)).toContain('same access to your files and mail data as Sarv Inbox itself');
-    expect(notice(view)).toContain('whatever permissions it asks for');
+    expect(notice(view)).toContain('runs in a sandbox');
+    expect(notice(view)).toContain('cannot read your files or reach the internet by itself');
+    // The honest half: the sandbox limits access, and says nothing about intentions.
+    expect(notice(view)).toContain('sending your mail elsewhere');
     expect(notice(view)).toContain('Only install extensions you trust');
   });
 
@@ -69,7 +70,7 @@ describe('ExtensionPermissionPrompt trust notice', () => {
   it('shows the notice for a low-risk list too, without the sensitive line', () => {
     const view = mount(['ui:notify']);
 
-    expect(notice(view)).toContain('runs as full code on your computer');
+    expect(notice(view)).toContain('runs in a sandbox');
     expect(notice(view)).not.toContain('sensitive permissions');
   });
 
@@ -78,7 +79,7 @@ describe('ExtensionPermissionPrompt trust notice', () => {
   it('adds the sensitive-permission line when one is asked for', () => {
     const view = mount(['email:read', 'ui:notify']);
 
-    expect(notice(view)).toContain('runs as full code on your computer');
+    expect(notice(view)).toContain('runs in a sandbox');
     expect(notice(view)).toContain('It also asks for sensitive permissions, marked above.');
   });
 
@@ -94,10 +95,12 @@ describe('ExtensionPermissionPrompt trust notice', () => {
     expect(text).not.toContain('Verified');
   });
 
-  // L-9: network:fetch is not enforced. Breaks: the prompt implies that
-  // without it an extension cannot reach the network.
-  it('describes network access as a declaration, not a grant', () => {
+  // network:fetch is enforced since extensions run confined: without it there is no way
+  // to the network. Breaks: the prompt goes back to calling a real grant a declaration,
+  // and a reader waves through the one permission that lets their mail leave.
+  it('describes network access as what it now is, a grant', () => {
     const view = mount(['network:fetch']);
-    expect(view.container.textContent).toContain('Says it will send and receive data over the internet');
+    expect(view.container.textContent).toContain('Send and receive data over the internet');
+    expect(view.container.textContent).not.toContain('Says it will');
   });
 });

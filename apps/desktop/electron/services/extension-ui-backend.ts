@@ -3,8 +3,8 @@
  * extension and a card on screen.
  *
  * Everything an extension passes is untrusted input: an extension is third-party
- * code that a user installed, running as full Node code in the extension
- * process. So nothing here forwards a raw object to the renderer. Every card goes through
+ * code that a user installed, and nothing about being confined makes what it says
+ * any more honest. So nothing here forwards a raw object to the renderer. Every card goes through
  * `sanitizeExtensionNotification`, which caps each string, drops malformed
  * fields, namespaces the id by extension, and returns null for a card that
  * cannot be rendered meaningfully — one bad extension can then waste its own
@@ -21,11 +21,38 @@ import {
   namespaceNotificationId,
   sanitizeExtensionNotification,
   type ExtensionUIBackend,
+  type SanitizedExtensionNotification,
 } from '@sarvinbox/core';
 
 import { sendToWindow } from '../shared';
 
 const logger = createLogger('extension-ui-backend');
+
+/** Problem cards waiting for a window, by card id, so the same one is not told twice. */
+const heldProblems = new Map<string, SanitizedExtensionNotification>();
+
+/** Whether a card stack has asked yet, which is what says a push will reach one. */
+let windowListening = false;
+
+/**
+ * Problem cards the window has not asked for yet.
+ *
+ * Extensions start before the window exists, and the card stack mounts later still,
+ * so a push at that moment reaches nobody. An extension that stopped working at
+ * launch is exactly what must not be lost that way. The window asks for these once
+ * it is listening, which also empties them: a card shown once is not shown again.
+ */
+export function takeHeldProblems(): SanitizedExtensionNotification[] {
+  windowListening = true;
+  const held = Array.from(heldProblems.values());
+  heldProblems.clear();
+  return held;
+}
+
+/** The window went away, so until the next one asks, a push reaches nobody. */
+export function noteWindowGone(): void {
+  windowListening = false;
+}
 
 /** Renderer channel carrying a card to show (or replace, by id). */
 export const EXTENSION_NOTIFY_CHANNEL = 'extensions:notify';
@@ -89,6 +116,15 @@ export function createExtensionUIBackend(
       if (!emailId) return;
       logger.info(`Extension '${extensionId}' opened message ${emailId}`);
       send(EXTENSION_OPEN_MESSAGE_CHANNEL, { extensionId, emailId, accountId });
+    },
+
+    reportProblem(extensionId: string, notification: unknown): void {
+      const card = sanitizeExtensionNotification(extensionId, notification);
+      if (!card) return;
+      // Held only if it has nowhere to go: one a live window has shown would otherwise
+      // come back on its next reload, after the reader had dismissed it.
+      const delivered = send(EXTENSION_NOTIFY_CHANNEL, card);
+      if (!delivered || !windowListening) heldProblems.set(card.id, card);
     },
   };
 }

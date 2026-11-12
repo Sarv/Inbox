@@ -253,9 +253,14 @@ export class ExtensionRegistry {
       await this.copyDirectory(extensionPath, targetPath);
     }
 
-    // Register
+    // Register. The entry point moves with the folder: left on the source path,
+    // the running copy would be whatever is in the folder the user picked (or a
+    // temporary unpack), and the sandbox serves only files from the installed copy.
+    const entryPoint = loaded.entryPoint
+      ? path.join(targetPath, path.relative(extensionPath, loaded.entryPoint))
+      : undefined;
     await this.registerDiscoveredExtension(
-      { ...loaded, path: targetPath },
+      { ...loaded, path: targetPath, entryPoint },
       ExtensionSource.LOCAL,
       approvedPermissions
     );
@@ -525,9 +530,16 @@ export class ExtensionRegistry {
       const srcPath = path.join(src, entry.name);
       const destPath = path.join(dest, entry.name);
 
+      // Skipped, never followed. A copy would pull in whatever the link points
+      // at, so a folder holding `notes.js -> ~/.aws/credentials` would hand that
+      // file to the extension and past everything that confines it.
+      if (entry.isSymbolicLink()) {
+        logger.warn(`Extension install: skipped the symbolic link ${entry.name}`);
+        continue;
+      }
       if (entry.isDirectory()) {
         await this.copyDirectory(srcPath, destPath);
-      } else {
+      } else if (entry.isFile()) {
         fs.copyFileSync(srcPath, destPath);
       }
     }

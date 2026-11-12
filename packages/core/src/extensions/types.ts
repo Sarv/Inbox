@@ -283,7 +283,7 @@ export type ExtensionPermission =
   | 'email:delete'    // Delete emails (requires user confirmation)
   | 'ai:use'          // Access AI services for analysis
   | 'storage:local'   // Store extension-specific data
-  | 'network:fetch'   // Make HTTP requests (restricted domains)
+  | 'network:fetch'   // Reach the public internet, through context.network
   | 'settings:read'   // Read user settings
   | 'settings:write'  // Modify user settings
   | 'ui:notify'       // Surface a notification card in the app window
@@ -358,7 +358,7 @@ export const PERMISSION_INFO: Record<ExtensionPermission, PermissionInfo> = {
   'network:fetch': {
     id: 'network:fetch',
     name: 'Network Access',
-    description: 'Make HTTP requests to external services',
+    description: 'Send and receive data over the internet',
     dangerous: true,
     requiresConfirmation: true,
   },
@@ -453,6 +453,12 @@ export interface ExtensionInfo {
   /** Error message if in error state */
   error?: string;
 
+  /**
+   * Its code was not started because the app kept dying while starting extensions. Not a
+   * fault of this extension as far as anyone knows: turning extensions back on starts it.
+   */
+  heldBack?: boolean;
+
   /** Activation timestamp */
   activatedAt?: number;
 
@@ -467,6 +473,48 @@ export interface ExtensionInfo {
 // Extension Context Types
 // ============================================================
 
+/** What an extension can ask of `context.network.fetch`. */
+export interface ExtensionNetworkRequest {
+  /** Defaults to `GET`. */
+  method?: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  headers?: Record<string, string>;
+  body?: string | Uint8Array;
+  /** How long to wait for the answer and for its body, each. Capped by the host. */
+  timeoutMs?: number;
+}
+
+/** A completed request as main returns it: plain data, because it crosses a boundary. */
+export interface ExtensionNetworkResult {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  /** The URL that answered, after any redirects. */
+  url: string;
+  /** Lower-cased names; a repeated header is joined with `, `. */
+  headers: Record<string, string>;
+  body: Uint8Array;
+}
+
+/** The same result as an extension reads it, using the names `fetch` uses. */
+export interface ExtensionNetworkResponse extends Omit<ExtensionNetworkResult, 'body'> {
+  /** The whole body has already arrived, so unlike `fetch` these are not promises. */
+  text(): string;
+  json<T = unknown>(): T;
+  bytes(): Uint8Array;
+}
+
+/**
+ * The network, as an extension reaches it: `https` to public addresses only, no
+ * cookies, sized and timed by the host.
+ */
+export interface ExtensionNetwork {
+  /**
+   * Rejects without `network:fetch`, for a destination the host refuses, and on
+   * a real network failure. An answer of any status resolves.
+   */
+  fetch(url: string, options?: ExtensionNetworkRequest): Promise<ExtensionNetworkResponse>;
+}
+
 /**
  * Context passed to extension's activate function
  * This is the API surface available to extensions
@@ -475,7 +523,12 @@ export interface ExtensionContext {
   /** Extension manifest */
   readonly manifest: ExtensionManifest;
 
-  /** Extension's storage directory path */
+  /**
+   * Not a usable directory. Extension code has no filesystem: this only says
+   * which extension the storage belongs to, and stays so older code that builds
+   * a path from it reaches the clear refusal on `require('fs')` rather than a
+   * crash on `undefined`. Keep data in `context.storage`.
+   */
   readonly storagePath: string;
 
   /** Register a workflow */
@@ -495,6 +548,13 @@ export interface ExtensionContext {
 
   /** Settings access */
   readonly settings: ExtensionSettings;
+
+  /**
+   * The only way an extension reaches the network. Refuses without `network:fetch`.
+   * `fetch`, `XMLHttpRequest`, `WebSocket` and the rest exist in the sandbox and
+   * are blocked there, so nothing an extension sends goes unseen by the app.
+   */
+  readonly network: ExtensionNetwork;
 
   /**
    * Reading and changing mail, each method gated on its own permission.
@@ -702,9 +762,6 @@ export interface ExtensionEventBus {
 
   /** Subscribe to an event once */
   once<T extends PipelineEvent>(eventType: T['type'], handler: EventHandler<T>): void;
-
-  /** Emit an event */
-  emit(event: PipelineEvent): void;
 }
 
 /**

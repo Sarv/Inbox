@@ -63,14 +63,15 @@ describe('main.ts privileged scheme registration order', () => {
   // Breaks: only one call may name our schemes. A second one elsewhere would
   // replace the first (same Electron semantics as above) and silently drop
   // whichever privileges the other call omitted. Updated when the extension
-  // panel scheme was added: it joined this ONE call rather than getting its own,
-  // which is exactly the shape this test exists to hold.
+  // panel scheme was added, and again for the extension sandbox's: each joined
+  // this ONE call rather than getting its own, which is exactly the shape this
+  // test exists to hold.
   it('registers every privileged scheme in ONE call, from the shared privileges objects', () => {
     const calls = code.match(/registerSchemesAsPrivileged\(/g) ?? [];
 
     expect(calls).toHaveLength(1);
     expect(code).toContain(
-      'registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES, PANEL_SCHEME_PRIVILEGES])'
+      'registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES, PANEL_SCHEME_PRIVILEGES, SANDBOX_SCHEME_PRIVILEGES])'
     );
   });
 

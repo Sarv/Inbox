@@ -35,9 +35,9 @@ export const PERMISSION_DISPLAY: Record<string, PermissionDisplay> = {
   },
   'network:fetch': {
     name: 'Network Access',
-    // Declares intent only: nothing stops an extension's code from using the
-    // network without it (docs/EXTENSIONS.md, Trust model).
-    description: 'Says it will send and receive data over the internet',
+    // Enforced: extension code has no network of its own, and this is the only
+    // way out (docs/EXTENSIONS.md, Trust model).
+    description: 'Send and receive data over the internet',
     icon: '🌐',
     risk: 'high',
   },
@@ -111,16 +111,16 @@ export const PERMISSION_DISPLAY: Record<string, PermissionDisplay> = {
 
 /**
  * What installing an extension actually means, said wherever one is installed
- * (the registry consent prompt and Install from folder) and whatever it asks
- * for. An extension's code runs with full Node in the extension process, so it
- * can read and write anything the user's account can, the app's own data
- * included. Its permissions gate only the app APIs it can call; they are not a
- * sandbox, and no wording here may suggest one.
+ * (the registry consent prompt and Install from folder) and whatever it asks for.
+ * Its code runs in a sandbox with no access to the user's files and no network of
+ * its own, so what it can reach is what it is granted. That is a limit on access,
+ * not a judgement of honesty: an extension granted mail and the network can send
+ * that mail anywhere, and no wording here may suggest otherwise.
  */
 export const EXTENSION_TRUST_NOTICE =
-  'An extension runs as full code on your computer, with the same access to your files and ' +
-  'mail data as Sarv Inbox itself, whatever permissions it asks for. Its permissions only ' +
-  'limit what it can ask the app to do for it. Only install extensions you trust.';
+  'An extension runs in a sandbox: it cannot read your files or reach the internet by itself. ' +
+  'It can do what the permissions it asks for allow, and with mail and network access together ' +
+  'that includes sending your mail elsewhere. Only install extensions you trust.';
 
 const RISK_ORDER: Record<PermissionRisk, number> = { high: 0, medium: 1, low: 2 };
 

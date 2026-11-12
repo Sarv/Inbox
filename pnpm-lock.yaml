@@ -430,6 +430,9 @@ importers:
       turndown:
         specifier: ^7.2.4
         version: 7.2.4
+      write-file-atomic:
+        specifier: ^8.0.0
+        version: 8.0.0
       zod:
         specifier: ^4.6.6
         version: 4.6.7
@@ -455,6 +458,9 @@ importers:
       '@types/turndown':
         specifier: ^5.0.4
         version: 5.0.6
+      '@types/write-file-atomic':
+        specifier: ^4.0.3
+        version: 4.0.3
       tsup:
         specifier: ^8.0.1
         version: 8.5.1(typescript@6.0.3)(yaml@2.9.1)
@@ -3471,6 +3477,12 @@ packages:
 
   /@types/whatwg-mimetype@3.0.2:
     resolution: {integrity: sha512-c2AKvDT8ToxLIOUlN51gTiHXflsfIFisS4pO7pDPoKouJCESkhZnEy623gwP9laCy5lnLDAw1vAzu2vM2YLOrA==}
+    dev: true
+
+  /@types/write-file-atomic@4.0.3:
+    resolution: {integrity: sha512-qdo+vZRchyJIHNeuI1nrpsLw+hnkgqP/8mlaN6Wle/NKhydHmUN9l4p3ZE8yP90AJNJW4uB8HQhedb4f1vNayQ==}
+    dependencies:
+      '@types/node': 22.20.5
     dev: true
 
   /@types/ws@8.18.1:
@@ -9562,6 +9574,11 @@ packages:
   /signal-exit@3.0.7:
     resolution: {integrity: sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ==}
 
+  /signal-exit@4.1.0:
+    resolution: {integrity: sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw==}
+    engines: {node: '>=14'}
+    dev: false
+
   /simple-concat@1.0.1:
     resolution: {integrity: sha512-cSFtAPtRhljv69IK0hTVZQ+OfE9nePi/rtJmw5UjHeVyVroEqJXP1sFztKUy1qU+xvz3u/sfYJLa947b7nAN2Q==}
     dev: false
@@ -10650,6 +10667,13 @@ packages:
     dependencies:
       imurmurhash: 0.1.4
       signal-exit: 3.0.7
+    dev: false
+
+  /write-file-atomic@8.0.0:
+    resolution: {integrity: sha512-dYwyZredl67GyLLIHJnRM3h2PcOmN5SkcgC7eM5DPDEOEl6dLFqVrMg3F1Ea32usj4VSVZtd2H4MtKTNOf6nPg==}
+    engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
+    dependencies:
+      signal-exit: 4.1.0
     dev: false
 
   /ws@7.5.13:

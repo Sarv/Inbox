@@ -3,6 +3,7 @@ import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
+  enabledOverride: undefined as boolean | undefined,
   readFile: vi.fn(), installed: null as null | { grantedPermissions: string[] }, active: false, managerAvailable: true,
   install: vi.fn(), grant: vi.fn(), enable: vi.fn(), disable: vi.fn(), getSetup: vi.fn(), isPackaged: false,
   prepare: vi.fn(), secure: vi.fn(), resourcesPath: '/synthetic/resources',
@@ -12,8 +13,8 @@ const h = vi.hoisted(() => ({
 vi.mock('node:fs/promises', () => ({ readFile: h.readFile }));
 vi.mock('electron', () => ({ app: { get isPackaged() { return h.isPackaged; }, getAppPath: () => '/synthetic/Inbox/apps/desktop' }, shell: { openExternal: h.openExternal } }));
 vi.mock('../../../../electron/shared', () => ({ getExtensionManager: () => h.managerAvailable ? {
-  getRegistry: () => ({ get: () => h.installed, install: h.install, grantPermissions: h.grant, disable: h.disable }),
-  getHost: () => ({ isActive: () => h.active }), enableExtension: h.enable,
+  getRegistry: () => ({ get: () => h.installed && { ...h.installed, enabled: h.enabledOverride ?? h.active }, getLoaded: () => ({ manifest: {} }), install: h.install, grantPermissions: h.grant, disable: h.disable }),
+  enableExtension: h.enable,
 } : null }));
 vi.mock('../../../../electron/services/accounts-registry', () => ({ readRegistryAccounts: () => [{ id: 'account-a' }] }));
 vi.mock('../../../../electron/services/antivirus-desktop-backend', () => ({ prepareScannerCredentialStorage: h.secure }));
@@ -60,6 +61,30 @@ describe('optional trusted bundled scanner installation', () => {
     } finally { if (original) Object.defineProperty(process, 'resourcesPath', original); else delete (process as unknown as Record<string, unknown>).resourcesPath; vi.unstubAllEnvs(); }
   });
 
+  // The extension's code only opens a panel, and scanning is the host's. On a Linux with no
+  // OS sandbox that code cannot start, and refusing setup for it left antivirus users with
+  // every attachment blocked and no way to set up the thing that would unblock them.
+  it('finishes setup when the code fails to start but the extension is on', async () => {
+    h.installed = { grantedPermissions: manifest.permissions }; h.active = false; h.enabledOverride = false;
+    h.enable.mockImplementationOnce(async () => {
+      h.enabledOverride = true;
+      throw new Error('Extensions are off because the operating system sandbox is not available');
+    });
+
+    await expect(prepareBundledAntivirusExtension()).resolves.toBeUndefined();
+
+    expect(h.enable).toHaveBeenCalledWith('clamav-scan');
+    h.enabledOverride = undefined;
+  });
+
+  // One that could not even be switched on is a real failure, and still says so.
+  it('still fails when the extension could not be switched on', async () => {
+    h.installed = { grantedPermissions: manifest.permissions }; h.active = false;
+    h.enable.mockRejectedValueOnce(new Error('Could not write state'));
+
+    await expect(prepareBundledAntivirusExtension()).rejects.toThrow(/Could not write state/);
+  });
+
   // Regression: retry could reinstall a user's scanner or silently restore a permission the user revoked.
   it('preserves existing grants, activates a disabled approved extension and refuses revoked permissions', async () => {
     h.installed = { grantedPermissions: manifest.permissions }; h.active = true;
@@ -89,7 +114,7 @@ describe('optional trusted bundled scanner installation', () => {
   // Regression: wrapper entry points must retain native-only authorization, secure storage, browser and cancellation behavior.
   it('binds native dependencies to the current mailbox/extension and exposes only the OAuth coordinator methods', async () => {
     const deps = h.dependencies!;
-    expect(() => deps.assertAuthorized('account-a')).toThrow(/inactive/);
+    expect(() => deps.assertAuthorized('account-a')).toThrow(/turned off/);
     h.installed = { grantedPermissions: ['security:scan-attachments'] }; h.active = true;
     expect(() => deps.assertAuthorized('removed-account')).toThrow(/mailbox.*unavailable/);
     expect(() => deps.assertAuthorized('account-a')).not.toThrow();

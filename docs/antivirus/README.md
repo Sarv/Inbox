@@ -128,9 +128,10 @@ locally tested platform is Linux arm64 in Docker; native amd64 was not executed.
   consent again. Scans are triggered by an attachment view, an explicit open,
   a download action or a manual scan;
   mailbox contents are not changed. Installing an extension alone does not
-  consent to uploads. An enabled, active scanner with attachment permission
-  offers the trusted in-app warning only when setup or the account's sharing
-  approval is missing. Choosing to continue unscanned sends no mail to the scanner.
+  consent to uploads. An enabled scanner with attachment permission offers the
+  trusted in-app warning only when setup or the account's sharing approval is
+  missing. Scanning is the app's work, so it and its setup do not depend on the
+  extension's code running: a machine that cannot start extension code still scans. Choosing to continue unscanned sends no mail to the scanner.
   Remembering the warning choice applies only to that account's missing-setup
   actions and creates no attachment-sharing consent. **Show warnings again** in
   scanner setup clears the account's choice. Saving scanner configuration or

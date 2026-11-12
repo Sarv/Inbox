@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -263,5 +263,19 @@ describe('extension panel protocol', () => {
 
       expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull();
     });
+  });
+
+  // A panel can fetch its own origin, so a link served through would let it read any
+  // file the user can: `notes.json -> ~/.aws/credentials`.
+  it('does not serve through a symbolic link', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'sarv-outside-'));
+    writeFileSync(join(outside, 'secret.json'), '{"secret":true}');
+    symlinkSync(join(outside, 'secret.json'), join(panelDir, 'demo', 'panels', 'notes.json'));
+    const { handlePanelRequest } = await load();
+
+    const response = await handlePanelRequest(get('sarv-extension://demo/panels/notes.json'));
+
+    expect(response.status).toBe(404);
+    rmSync(outside, { recursive: true, force: true });
   });
 });

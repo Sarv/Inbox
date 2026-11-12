@@ -83,4 +83,34 @@ describe('main.ts main-window wiring', () => {
     expect(code).not.toContain("'will-navigate'");
     expect(code).not.toContain("'will-frame-navigate'");
   });
+
+  // Breaks: extension code runs in-process with full Node in main, the fallback the
+  // CLI and tests use, because nothing told the host about the sandbox; or `network:fetch`
+  // has no way out and an extension holding it is told the network is unavailable.
+  it('runs extensions in the confined sandbox, with the gated network', () => {
+    expect(code).toContain('createChannel: createSandboxChannel,');
+    expect(code).toContain('networkBackend: createExtensionNetworkBackend(),');
+    expect(code).not.toContain('utilityProcess');
+  });
+
+  // Breaks: a crash loop has no way out, because extensions start before the window. Or it
+  // fires in a dev run, which restarts by signal all day, and turns extensions off.
+  it('guards extension startup against a crash loop, in release builds only', () => {
+    expect(code).toContain('const crashGuard = isReleaseBundle()');
+    expect(code).toContain('watchForCleanExit(crashGuard, { app, powerMonitor, process });');
+    expect(code).toContain('decideHold: (idsWithCode) => crashGuard?.decide(idsWithCode) ?? false,');
+    // Cleared before anything can start: the watcher has to be in place first.
+    expect(code.indexOf('watchForCleanExit(crashGuard')).toBeLessThan(code.indexOf('extensionManager.initialize('));
+    expect(code).toContain('heldBackNotice(names)');
+  });
+
+  // Breaks: Electron REPLACES the scheme lists on each call, so a second call would strip
+  // the attachment and panel schemes; and an unregistered sandbox scheme has no origin,
+  // so its Worker cannot start.
+  it('registers the sandbox scheme in the one call, before the app is ready', () => {
+    expect(code.match(/protocol\.registerSchemesAsPrivileged\(/g)).toHaveLength(1);
+    const call = code.slice(code.indexOf('protocol.registerSchemesAsPrivileged('));
+    expect(call.slice(0, call.indexOf(');'))).toContain('SANDBOX_SCHEME_PRIVILEGES');
+    expect(code.indexOf('protocol.registerSchemesAsPrivileged(')).toBeLessThan(code.indexOf('app.whenReady()'));
+  });
 });

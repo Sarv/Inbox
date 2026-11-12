@@ -16,6 +16,8 @@ import type { PipelineEvent, EventHandler, Unsubscribe, WorkflowResult } from '.
 import type { EmailRecord } from '../types/models';
 import { logger } from '../utils/logger';
 
+import { MAX_MESSAGE_BYTES, messageBytes } from './runtime/flood-budget';
+import { networkResponseFrom } from './runtime/protocol';
 import type {
   ExtensionContext,
   ExtensionManifest,
@@ -40,6 +42,9 @@ import type {
   WorkflowExecutionContext,
   ExtensionWorkflowResult,
   AICategorizationResult,
+  ExtensionNetwork,
+  ExtensionNetworkRequest,
+  ExtensionNetworkResult,
 } from './types';
 
 
@@ -50,6 +55,50 @@ function permissionError(permission: ExtensionPermission, operation: string): Er
   return new Error(
     `Permission denied: Extension requires '${permission}' permission for operation '${operation}'`
   );
+}
+
+/** How much of a setting main will hold for one extension. */
+const SETTING_MAX_KEY_LENGTH = 256;
+const SETTING_MAX_VALUE_LENGTH = 64 * 1024;
+const SETTING_MAX_KEYS = 256;
+
+const NETWORK_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']);
+
+/** Accept only the shape the type promises: this arrives from extension code unchecked. */
+function networkRequestFrom(options: unknown): ExtensionNetworkRequest {
+  if (options === undefined || options === null) return {};
+  if (typeof options !== 'object') throw new Error('network.fetch: options must be an object');
+  const { method, headers, body, timeoutMs } = options as Record<string, unknown>;
+  const request: ExtensionNetworkRequest = {};
+  if (method !== undefined) {
+    if (typeof method !== 'string' || !NETWORK_METHODS.has(method)) {
+      throw new Error(`network.fetch: unsupported method ${String(method)}`);
+    }
+    request.method = method as ExtensionNetworkRequest['method'];
+  }
+  if (headers !== undefined) {
+    if (!headers || typeof headers !== 'object' || Array.isArray(headers)) {
+      throw new Error('network.fetch: headers must be an object of strings');
+    }
+    const entries = Object.entries(headers as Record<string, unknown>);
+    if (entries.some(([, value]) => typeof value !== 'string')) {
+      throw new Error('network.fetch: headers must be an object of strings');
+    }
+    request.headers = Object.fromEntries(entries) as Record<string, string>;
+  }
+  if (body !== undefined) {
+    if (typeof body !== 'string' && !(body instanceof Uint8Array)) {
+      throw new Error('network.fetch: body must be a string or a Uint8Array');
+    }
+    request.body = body;
+  }
+  if (timeoutMs !== undefined) {
+    if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error('network.fetch: timeoutMs must be a positive number');
+    }
+    request.timeoutMs = timeoutMs;
+  }
+  return request;
 }
 
 /**
@@ -66,6 +115,21 @@ export interface ExtensionContextOptions {
   uiBackend?: ExtensionUIBackend;
   mailBackend?: ExtensionMailBackend;
   securityBackend?: ExtensionSecurityBackend;
+  networkBackend?: ExtensionNetworkBackend;
+}
+
+/**
+ * Network backend interface (implemented by host)
+ *
+ * Reached only through `context.network`, which has already checked
+ * `network:fetch`. The host decides which destinations are reachable at all.
+ */
+export interface ExtensionNetworkBackend {
+  fetch(
+    extensionId: string,
+    url: string,
+    options: ExtensionNetworkRequest
+  ): Promise<ExtensionNetworkResult>;
 }
 
 /**
@@ -103,6 +167,13 @@ export interface ExtensionUIBackend {
 
   /** Bring a message on screen in the reader's window. */
   openMessage?(extensionId: string, emailId: string, accountId?: string): void;
+
+  /**
+   * The app's own card about an extension that is not working. Not subject to
+   * `ui:notify`, because the extension is not the one speaking, and held for a
+   * window that is not open yet: a card sent during startup would otherwise be lost.
+   */
+  reportProblem?(extensionId: string, notification: ExtensionUINotification): void;
 }
 
 /**
@@ -196,6 +267,7 @@ export class ExtensionContextImpl implements ExtensionContext {
   readonly ai?: ExtensionAI;
   readonly settings: ExtensionSettings;
   readonly mail: ExtensionMail;
+  readonly network: ExtensionNetwork;
   readonly security: ExtensionSecurity;
   readonly ui: ExtensionUI;
   readonly log: ExtensionLogger;
@@ -231,6 +303,9 @@ export class ExtensionContextImpl implements ExtensionContext {
 
     // Create permission-checked mail access
     this.mail = this.createMail();
+
+    // Create permission-checked network access
+    this.network = this.createNetwork();
 
     this.security = this.createSecurity();
 
@@ -333,8 +408,8 @@ export class ExtensionContextImpl implements ExtensionContext {
    */
   dispose(): void {
     this.revokeSecurityAccess();
-    // Unsubscribe from all events
-    for (const unsubscribe of this.subscriptions) {
+    // Unsubscribe from all events. A copy, because each one takes itself off this list.
+    for (const unsubscribe of [...this.subscriptions]) {
       try {
         unsubscribe();
       } catch {
@@ -357,6 +432,21 @@ export class ExtensionContextImpl implements ExtensionContext {
   }
 
   /**
+   * Hold a subscription for dispose(), until it is ended some other way. What this
+   * returns detaches it as well as forgetting it, so the list only ever holds what is
+   * really live: it is what the limit on an extension's subscriptions counts.
+   */
+  private trackSubscription(off: Unsubscribe): Unsubscribe {
+    const tracked: Unsubscribe = () => {
+      const index = this.subscriptions.indexOf(tracked);
+      if (index !== -1) this.subscriptions.splice(index, 1);
+      off();
+    };
+    this.subscriptions.push(tracked);
+    return tracked;
+  }
+
+  /**
    * Create permission-checked event bus wrapper
    */
   private createEventBus(): ExtensionEventBus {
@@ -365,22 +455,25 @@ export class ExtensionContextImpl implements ExtensionContext {
 
     return {
       on<T extends PipelineEvent>(eventType: T['type'], handler: EventHandler<T>): Unsubscribe {
-        const unsubscribe = eventBus.on(eventType, handler);
-        context.subscriptions.push(unsubscribe);
-        return unsubscribe;
+        // The bus says what is happening in the mailbox, and `email:synced` carries
+        // the whole message. Without this, `email:read` means nothing.
+        context.requirePermission('email:read', `events.on(${String(eventType)})`);
+        const off = eventBus.on(eventType, handler);
+        return context.trackSubscription(off);
       },
 
       once<T extends PipelineEvent>(eventType: T['type'], handler: EventHandler<T>): void {
+        context.requirePermission('email:read', `events.once(${String(eventType)})`);
         // Track the unsubscribe so dispose() detaches a `once` handler that
         // never fired — otherwise it lingers on the shared bus past the
-        // extension's lifetime (mirrors on() above).
-        const unsubscribe = eventBus.once(eventType, handler);
-        context.subscriptions.push(unsubscribe);
-      },
-
-      emit(event: PipelineEvent): void {
-        // Extensions can emit workflow events
-        eventBus.emit(event);
+        // extension's lifetime (mirrors on() above). Forgotten once it has fired, or
+        // an extension re-arming one for days would grow this list without end.
+        let tracked: Unsubscribe = () => undefined;
+        const off = eventBus.once(eventType, ((event: T) => {
+          tracked();
+          return handler(event);
+        }) as EventHandler<T>);
+        tracked = context.trackSubscription(off);
       },
     };
   }
@@ -480,6 +573,21 @@ export class ExtensionContextImpl implements ExtensionContext {
 
       async update(key: string, value: unknown): Promise<void> {
         context.requirePermission('settings:write', 'settings.update');
+        // Settings are held in main and rewritten whole on every change, so they stay
+        // small. Bulk data belongs in `context.storage`.
+        if (typeof key !== 'string' || key.length > SETTING_MAX_KEY_LENGTH) {
+          throw new Error(`settings.update: a key may be at most ${SETTING_MAX_KEY_LENGTH} characters`);
+        }
+        // Measured before stringifying, because stringifying is the danger: see MAX_MESSAGE_BYTES.
+        if (
+          messageBytes(value) > MAX_MESSAGE_BYTES ||
+          (JSON.stringify(value) ?? '').length > SETTING_MAX_VALUE_LENGTH
+        ) {
+          throw new Error(`settings.update: a value may be at most ${SETTING_MAX_VALUE_LENGTH} characters`);
+        }
+        if (!backend.has(extensionId, key) && (backend.keys?.(extensionId).length ?? 0) >= SETTING_MAX_KEYS) {
+          throw new Error(`settings.update: an extension may have at most ${SETTING_MAX_KEYS} settings`);
+        }
         return backend.update(extensionId, key, value);
       },
 
@@ -491,6 +599,25 @@ export class ExtensionContextImpl implements ExtensionContext {
   }
 
   /** Create the scanner wrapper with permissions and per-submission consent. */
+  /** Permission-checked network access. The reading methods go on last. */
+  private createNetwork(): ExtensionNetwork {
+    return {
+      fetch: async (url, options) => networkResponseFrom(await this.fetchForExtension(url, options)),
+    };
+  }
+
+  /**
+   * The checks behind `context.network.fetch`, returning plain data for the
+   * bridge to send on. Permission first, then the shape of the request, which
+   * comes straight from extension code.
+   */
+  async fetchForExtension(url: unknown, options: unknown): Promise<ExtensionNetworkResult> {
+    this.requirePermission('network:fetch', 'network.fetch');
+    if (!this.options.networkBackend) throw new Error('Network access is not available here');
+    if (typeof url !== 'string' || !url) throw new Error('network.fetch: a URL is required');
+    return this.options.networkBackend.fetch(this.manifest.id, url, networkRequestFrom(options));
+  }
+
   private createSecurity(): ExtensionSecurity {
     const backend = (operation: string): ExtensionSecurityBackend => {
       this.requirePermission('security:scan-attachments', operation);

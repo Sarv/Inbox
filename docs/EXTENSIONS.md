@@ -1,16 +1,16 @@
 # Writing a Sarv Inbox extension
 
 An extension is a folder with a manifest and, usually, one CommonJS file. Sarv
-Inbox runs that file in a **separate process** it starts for the purpose, hands
-it a context object, and lets it act on mail as it arrives — tag it, star it,
-ask the AI about it, or put a card on screen. An extension that crashes or
-loops takes down nothing but itself.
+Inbox runs that file in a **sandbox of its own**, hands it a context object, and
+lets it act on mail as it arrives — tag it, star it, ask the AI about it, or put a
+card on screen. An extension that crashes or loops takes down nothing but itself.
 
-That process is **not a sandbox**. The file runs as ordinary Node code with full
-access to the user's account on the computer — the app's own data directory
-included — whatever permissions the manifest declares. Permissions gate the app
-APIs an extension can call, not what its code can do. See
-[Trust model](#trust-model).
+The file runs in a Web Worker, not in Node. It has no `require('fs')`, no `process`
+and no network of its own: it cannot read the user's files or send anything
+anywhere unless the app does it on its behalf, and the app does so only under the
+permissions the user approved. See [Trust model](#trust-model), and
+[Coming from the Node runtime](#coming-from-the-node-runtime) if your extension
+was written before this.
 
 An extension can also contribute a **panel**: a page of its own, shown beside
 the open message or as a dialog. A panel needs no build step and no background
@@ -149,10 +149,10 @@ export function deactivate(): void {
 }
 ```
 
-**3. Build it to one file.** The host calls `require()` on `main` from wherever
-the folder happens to sit — a checkout, an unpacked resources directory, a
-folder in Downloads. None of those have a `node_modules` beside them, so the
-entry point must carry everything it needs:
+**3. Build it to one file.** The sandbox loads `main` with a small CommonJS loader
+of its own, which finds your other files by relative path and nothing else: there
+is no `node_modules` lookup and no Node module to require, so the entry point must
+carry everything it needs:
 
 ```ts
 // tsup.config.ts
@@ -168,6 +168,7 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   noExternal: [/.*/], // nothing may be left as an external require
+  platform: 'browser', // your dependencies get their browser builds, with no Node in them
 });
 ```
 
@@ -235,13 +236,12 @@ does not.
 ## Permissions
 
 Declared in the manifest, shown to the user before install, and enforced in the
-main process at the point of effect — not in the extension's own process, which
+main process at the point of effect — not in the extension's own sandbox, which
 only makes an authoring mistake fail where it was written.
 
-What they enforce is the **app API**: `context.mail`, `context.ai`,
-`context.storage`, settings, the UI calls and what a workflow result may change.
-They do not confine the extension's code, which can use any Node module it likes
-(see [Trust model](#trust-model)).
+Because the code has nothing else to reach, these are the whole of what an extension
+can do: `context.mail`, `context.ai`, `context.storage`, `context.network`, settings,
+the UI calls and what a workflow result may change (see [Trust model](#trust-model)).
 
 | Permission | Grants |
 | --- | --- |
@@ -252,7 +252,7 @@ They do not confine the extension's code, which can use any Node module it likes
 | `email:delete` | Move messages to the trash folder — never an expunge |
 | `ai:use` | `context.ai` — categorize, summarize, and raw completions |
 | `storage:local` | `context.storage` — a private JSON store under the app's data directory |
-| `network:fetch` | Declares that the extension talks to the internet, so the user is told before install. Not enforced on the extension's own code, which can reach the network either way |
+| `network:fetch` | `context.network.fetch` — the extension's only way to the internet. `https` to public addresses on the default port. Nothing else in the sandbox can reach the network, with or without this |
 | `settings:read` | Read settings, including the ones the manifest contributes |
 | `settings:write` | Change settings |
 | `ui:notify` | `context.ui.notify()` — a card in the bottom-right of the window, and `context.ui.onAction()` to hear what the reader did with it |
@@ -280,28 +280,144 @@ it. Ask for the permission you need, and no more: the user sees the list.
 Be precise about what the host does and does not protect, both when writing an
 extension and when telling people what yours does:
 
-- **It runs as full code.** Every extension's module runs in one shared
-  separate process (`extension-sandbox.worker`, started with Electron's
-  `utilityProcess`) as plain Node. It can `require('fs')`,
-  `require('child_process')` or `require('net')`, read and write anything the
-  user's account can — including the app's data directory, its database key,
-  mail databases and logs — and make its own network requests. A separate
-  process isolates crashes, not access.
-- **Permissions gate the app API only.** They decide which `context` calls
-  succeed and what a workflow result may change. They are shown to the user and
-  enforced in the main process, but they are not a sandbox.
-- **Panels are the exception.** A panel page is served with a strict
-  Content-Security-Policy and framed in a sandboxed iframe, so it cannot reach
-  the network or Node on its own (see [Panels](#panels)).
+- **Extension code is confined.** Each extension's module runs in a Web Worker of
+  its own hidden renderer, `sandbox: true`, in an in-memory session of its own. It
+  has no `require` of anything but its own files, no `process`, no Node module, and
+  no way to read a file: `fetch('file://…')`, XHR, `import()`, `importScripts` and a
+  nested Worker are all refused.
+- **It has no network of its own.** Inside the sandbox `fetch`, `XMLHttpRequest`,
+  `WebSocket`, `WebTransport`, `EventSource`, fonts and `importScripts` of a URL are
+  blocked by a Content-Security-Policy of `connect-src 'none'` and, except for
+  WebTransport, again by a `webRequest` filter in the main process. The one way out
+  is `context.network.fetch`, which main refuses without `network:fetch`.
+- **Permissions are the whole of what it can do, and they mean what they say.** An
+  extension granted `email:read` and `network:fetch` *can* send a user's mail
+  anywhere: the sandbox limits what it can reach, not what it does with what it was
+  given. Asking for both is what deserves a reader's attention, and the install prompt
+  says so.
+- **One extension cannot reach another.** Each has its own renderer process, its own
+  origin storage and its own message port. Main reads a message's sender from the
+  port, never from the message, so posting in another extension's name is refused.
+- **A hung or crashing extension is stopped, and only that one.** A Worker that does
+  not answer for 30 seconds is killed: do not block for that long. So is one that goes
+  past a [limit](#what-an-extension-may-ask-of-the-app). Those two stay off until
+  something asks for them again (turning it off and on, or the next launch), and the
+  user is told why, on a card and in Settings. A renderer that crashes, or runs out of
+  memory, is restarted for you, after 2, 15 and then 60 seconds; the user hears about
+  it if the third fails. Ten quiet minutes forgive past crashes. Your panel keeps
+  working throughout, and so does anything the app does for you rather than your code,
+  such as attachment scanning.
+- **An extension that takes the whole app down is held back.** That should not be
+  possible, and this is the backstop in case it is: extensions start before the window,
+  so a crash there happens on every launch and leaves nowhere to turn it off. If the
+  app dies while starting extensions, or within a minute of it, on two launches in a
+  row, the next launch starts with no extension code running and a card naming what was
+  held back. **Settings, Extensions** has the button to turn them back on, and they
+  stay held until it is pressed or the app is updated. Their data, settings and
+  approvals are not touched, and panels keep working. Quitting, restarting for an
+  update and shutting the machine down do not count, however quickly. Killing the app
+  by force, twice, in its first minute does, because it cannot be told from a crash.
+- **The operating system sandbox is required.** A release build refuses to run
+  extension code in a renderer that the OS has not sandboxed: it checks the running
+  process rather than trusting the setting (`app.getAppMetrics()` on macOS and
+  Windows, seccomp in `/proc/<pid>/status` on Linux). Without it, one Chromium bug
+  would hand an extension everything the user's account can touch. On a Linux with
+  no working sandbox, Chromium itself refuses to start the app unless it is launched
+  with `--no-sandbox`; launched that way, the app works and its extensions stay off,
+  with a card and a line in Settings saying why. The `.deb` and `.rpm` set up what the
+  sandbox needs. An AppImage needs unprivileged user namespaces, which Ubuntu 24.04
+  and later restrict by default: where it cannot have them, the AppImage launches itself
+  with `--no-sandbox`, so the card there says to install the `.deb` or `.rpm`.
+  Panel-only extensions run no code here and are unaffected. A dev run
+  (`pnpm dev:desktop` passes `--no-sandbox`) runs extensions anyway, with a warning in
+  the log, confined by the session and policy alone.
+- **What it does not stop.** Extension code still has Chromium's attack surface. The
+  policy that stops WebTransport is enforced inside the renderer, so a renderer
+  exploit could send QUIC packets, though the OS sandbox still keeps it from the disk.
+  An extension can burn CPU as long as it keeps answering, and every message it sends
+  costs the main process something; the limits above bound that, they do not remove it.
+- **Some browser APIs are not there at all.** `navigator.storage.getDirectory` and the
+  other File System APIs, `navigator.gpu`, `navigator.serial` and
+  `navigator.storageBuckets` are removed before your code runs. The first filled the
+  app's own memory, since a sandbox's storage lives there, and the rest are a line to a
+  process an extension has no need of. IndexedDB and the Cache API are there, and are
+  emptied when your sandbox closes: what must last belongs in `context.storage`.
+- **Panels are confined separately.** A panel page is served with a strict
+  Content-Security-Policy and framed in a sandboxed iframe, so it cannot reach the
+  network or Node on its own (see [Panels](#panels)).
 - **Registry downloads are checked against a checksum, not a signature.** The
   archive must hash to the SHA-256 the registry publishes, and the manifest
   inside must match what the user approved. That proves the bytes are the ones
   the registry listed; it does not prove who wrote them. There is no publisher
   signature yet.
 - **The user is told.** Both the registry install prompt and **Install from
-  folder** say that an extension runs as full code with the same access to the
-  user's files and mail data as the app, whatever it asks for, and ask the user
-  to install only extensions they trust.
+  folder** say that an extension runs in a sandbox, what it can do through the
+  permissions it asks for, and to install only extensions they trust with those.
+
+### What an extension may ask of the app
+
+Every message your code sends costs the app's main process, so there are limits. They
+are far past anything a working extension reaches. Going past one of the first group
+stops your extension, with a card saying why, because a throttled flood still holds the
+main thread. Going past one of the second is refused with an error your code can catch.
+
+| Stops your extension | Limit |
+| --- | --- |
+| One message to the app, of any kind | 64 MB |
+| All messages together, replies included | 512 MB per 5 seconds |
+| Messages the app did not ask for | 10,000 per 5 seconds, plus 16 for each call it made to you, so draining a backlog never counts against you |
+| Console output | 5,000 lines or 16 MB per 5 seconds |
+| Requests for your own files | 2,000 per 5 seconds |
+| Workflows | 64 at once, 1,024 registrations in a run |
+| Event subscriptions | 64 at once |
+| Functions in `context.exports` | 256 |
+| A workflow, event or export id | 128 characters, with a description of 1,000 |
+
+| Refused with an error | Limit |
+| --- | --- |
+| `context.storage`, one value | 5 MB |
+| `context.storage`, everything together | 25 MB. Data already over this stays readable and is never deleted; only writes that would grow it are refused |
+| `context.storage`, one key | 1,024 characters |
+| `context.settings`, one value | 64 KB, under a key of 256 characters |
+| `context.settings`, how many | 256 |
+| `context.mail`, labels in one change | 32, of 128 characters each |
+| Your own files | Each is served once to a sandbox, with no query string, up to 64 MB in all |
+
+A panel has the same 64 MB limit on a request, and is refused rather than stopped.
+
+### Coming from the Node runtime
+
+Extensions used to run as full Node in a shared process. If yours used anything
+Node provides, it stops working until you update it. The user sees a card and a line in
+Settings naming what it used, for everything in the table below, whether it happens
+while starting or later on. There are two things a card cannot cover. An error your own
+code catches stays yours, on purpose, so that optional dependencies inside a `try` keep
+working: a network request or remote script is the exception, because the app sees those
+refused whatever your code does with the error. And an error with nothing to recognize
+in it, such as a missing file of your own, is reported as a failure to start if it
+happens while starting, and otherwise only in the log.
+
+Their approvals and the data in `context.storage` are kept, so a fixed version picks up
+where it left off.
+
+| You used | Use instead |
+| --- | --- |
+| `require('fs')`, a file under `context.storagePath` | `context.storage` (needs `storage:local`). `storagePath` is now only a name, not a directory. Files already written there stay on disk, but the extension can no longer read them, so move what matters while your users are on the old version |
+| `fetch`, `https`, `net`, a WebSocket | `context.network.fetch` (needs `network:fetch`). `https` on the default port, public addresses only. A local server such as `localhost:11434` is out of reach |
+| `crypto.createHash` | `crypto.subtle.digest` (async), or a small hash bundled into your code |
+| `Buffer` | `Uint8Array`, `TextEncoder`, `TextDecoder`, `atob` |
+| `process.env`, `process.platform` | Nothing: settings are what configure an extension, and `navigator.platform` is there if you must |
+| `child_process`, native addons | No replacement: there is nothing to run them with |
+| `setImmediate` | `setTimeout(fn, 0)` |
+| `setTimeout(...).unref()` | Just `setTimeout`: a timer here returns a number, and there is no process for it to keep alive |
+| `eval`, `new Function` | Nothing: the policy forbids building a script from a string, which also rules out libraries that compile templates at run time |
+
+A `require` of a Node module throws, naming the module, so optional dependencies
+inside a `try` keep working. A `require` of your own files works as it does in Node,
+including a folder (`require('..')`, `require('./lib')`), which finds that folder's
+`package.json` `main` and then its `index.js`. `tsup`'s `platform: 'browser'` is the quickest route: it
+makes bundled dependencies use their browser builds and tells you about whatever
+still needs Node.
 
 ---
 
@@ -309,16 +425,17 @@ extension and when telling people what yours does:
 
 ```ts
 context.manifest            // your own manifest, parsed
-context.storagePath         // a directory that belongs to you
+context.storagePath         // only a name now; there is no filesystem to use it with
 
 context.registerWorkflow(w) // see below
 context.unregisterWorkflow(id)
 
-context.events              // subscribe to pipeline events
+context.events              // subscribe to pipeline events      (email:read)
 context.storage             // get / set / delete / keys / clear  (storage:local)
 context.ai                  // categorize / summarize / complete  (ai:use)
 context.settings            // get / update / has                 (settings:read|write)
 context.mail                // read and change mail on demand     (email:*)
+context.network             // fetch over the internet            (network:fetch)
 context.ui                  // notify / dismiss / onAction /
                             //   openPanel / openMessage          (ui:notify, ui:panel)
 context.log                 // debug / info / warn / error
@@ -330,6 +447,11 @@ context.exports             // the functions your declared capabilities point at
 `context.ai` is `undefined` without `ai:use`, so check it rather than assuming
 it. Everything else is always present and refuses politely without the
 permission.
+
+`context.events` needs `email:read` to subscribe to anything, because the bus says
+what is happening in the mailbox and `email:synced` carries the whole message.
+Extensions listen and cannot emit: the app acts on these events, and must not be able
+to be told about mail that never arrived.
 
 ### `context.exports` and capabilities — being callable on demand
 
@@ -416,6 +538,32 @@ can put a message in the bin; only the reader empties it.
 `get` returns `null` and `folders` returns `[]` for a mailbox this extension
 cannot reach, and an unknown id and an id in a closed account fail *identically*
 — so an extension cannot use the difference to learn which accounts exist.
+
+### `context.network` — the only way to the network
+
+```ts
+const response = await context.network.fetch('https://api.example.com/v1/lookup', {
+  method: 'POST',                               // GET by default
+  headers: { Authorization: `Bearer ${key}` },
+  body: JSON.stringify({ q: email.subject }),   // a string or a Uint8Array
+  timeoutMs: 10_000,                            // for the answer, and again for the body
+});
+
+if (response.ok) {
+  const data = response.json<Lookup>();         // also text() and bytes(); not promises:
+}                                               // the whole body has already arrived
+```
+
+It rejects without `network:fetch`, on a real network failure, and for a destination
+the host refuses: anything but `https` on the default port, and any name or address
+that is not public, checked where the connection is made so a name cannot rebind to
+the reader's router. It follows up to 5 redirects, each held to the same rules, and an
+`Authorization` or `Cookie` header does not follow a redirect to another site. A
+request and a response may each be up to 10 MB, a call waits at most 2 minutes, and
+an extension may have 16 in flight. An answer of any status resolves, as with `fetch`.
+
+There is no cookie jar and nothing of the app's sessions goes with a request, so a site
+the user is signed in to sees a stranger.
 
 ### `context.ui.notify` — a card on screen
 
@@ -801,7 +949,6 @@ first shows the same trust notice as the registry prompt and installs nothing
 until it is confirmed; the extension then gets every permission its manifest
 lists, and is switched on.
 
-Because an extension runs as full code on the user's computer, with the
-permissions it declared on top, tell people what yours does and why it needs
-each one — the README in each of the three published extensions is the pattern
-to follow.
+Because what an extension can do is what its permissions allow, tell people what
+yours does and why it needs each one — the README in each of the three published
+extensions is the pattern to follow.

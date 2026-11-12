@@ -23,7 +23,27 @@ export interface DownloadScanner {
   granted: boolean;
 }
 
-/** Include enabled scanners whose activation or permission grant has failed. */
+/**
+ * Whether a scanner extension is there to be used.
+ *
+ * Scanning is the host's work (`antivirus-scan-service.ts`): the extension is what says a
+ * scanner is wanted and which permissions it holds, and none of its code takes part in a
+ * scan. So this asks whether the extension is installed intact and turned on, not whether
+ * its code happens to be running. Asking that second question blocked every attachment for
+ * anyone whose sandbox could not run, on Linux under `--no-sandbox` or after any crash,
+ * while the thing doing the scanning was perfectly able to, and refused the setup that
+ * might have helped. Whether a scanner can really be reached is `scan`'s answer, which
+ * still fails closed.
+ */
+export function isScannerExtensionAvailable(
+  manager: ExtensionManager | null | undefined,
+  extensionId: string
+): boolean {
+  const registry = manager?.getRegistry();
+  return Boolean(registry?.get(extensionId)?.enabled && registry?.getLoaded(extensionId));
+}
+
+/** Include enabled scanners whose permission grant has failed. */
 export function downloadScanners(manager?: ExtensionManager | null): DownloadScanner[] {
   if (!manager) return [];
   const registry = manager.getRegistry();
@@ -32,7 +52,7 @@ export function downloadScanners(manager?: ExtensionManager | null): DownloadSca
     return {
       id: extension.id,
       enabled: extension.enabled,
-      active: manager.getHost().isActive(extension.id),
+      active: extension.enabled && manifest !== undefined,
       scanner:
         extension.id === 'clamav-scan' ||
         extension.grantedPermissions.includes('security:scan-attachments') ||
@@ -230,7 +250,9 @@ export class AttachmentOperationProtection {
         if (!scanner.active || !scanner.granted) {
           if (options.allowSecurityPrompt !== false) await this.deps.openSetup(scanner.id);
           throw new Error(
-            'The antivirus extension is unavailable or lacks attachment scanning permission. Download blocked.'
+            scanner.granted
+              ? 'The antivirus extension could not be loaded, so attachments cannot be scanned. Reinstall it, or turn it off to read attachments without scanning. Download blocked.'
+              : 'The antivirus extension does not have permission to scan attachments. Download blocked.'
           );
         }
         missingSetup = this.deps.checkSetup
