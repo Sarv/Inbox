@@ -131,6 +131,21 @@ function isImapFlowStarttlsRefusal(err: unknown): boolean {
     && /does not support STARTTLS/i.test(err.message);
 }
 
+/**
+ * A bearer that could not be minted, re-thrown under this client's own code.
+ * The token layer's error rides along as `cause`: its code is the only thing
+ * that says whether the grant is revoked (latch, stop the reconnect ladder) or
+ * the refresh merely failed to complete (keep retrying) — see
+ * `oauthTokenErrorOf`. Dropping it is what kept the ladder POSTing a dead
+ * refresh token after a password change.
+ */
+function oauthRefreshFailedError(err: unknown): IMAPError {
+  return Object.assign(
+    new IMAPError(`OAuth token refresh failed: ${(err as Error).message}`, 'OAUTH_REFRESH_FAILED'),
+    { cause: err },
+  );
+}
+
 export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   private client: ImapFlow | null = null;
   private currentFolder: string | null = null;
@@ -203,10 +218,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
         // caller's outer timeout, wasting a reconnect slot. Fail fast into the ladder.
         oauthAccessToken = await withTimeout(config.resolveBearer(), RESOLVE_BEARER_TIMEOUT_MS, 'OAuth token refresh timed out');
       } catch (err) {
-        throw new IMAPError(
-          `OAuth token refresh failed: ${(err as Error).message}`,
-          'OAUTH_REFRESH_FAILED',
-        );
+        throw oauthRefreshFailedError(err);
       }
     }
 
@@ -226,7 +238,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
         try {
           freshToken = await withTimeout(config.resolveBearer(true), RESOLVE_BEARER_TIMEOUT_MS, 'OAuth token refresh timed out');
         } catch (refreshErr) {
-          throw new IMAPError(`OAuth token refresh failed: ${(refreshErr as Error).message}`, 'OAUTH_REFRESH_FAILED');
+          throw oauthRefreshFailedError(refreshErr);
         }
         await this.establishWithToken(config, freshToken);
       } else {

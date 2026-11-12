@@ -22,6 +22,9 @@ const h = vi.hoisted(() => {
     sent: [] as Array<[string, unknown]>,
     saveImapAccount: vi.fn(async () => {}),
     clearImapAccount: vi.fn(async () => {}),
+    forgetImapAccountFor: vi.fn(async (_account: Record<string, unknown>) => true),
+    /** The engine on screen, when it is not `engine`: makes `engine` a background account. */
+    active: null as object | null,
     engine: {
       isConnected: vi.fn(() => false),
       connect: vi.fn(async (_cfg: Record<string, unknown>) => {}),
@@ -76,7 +79,7 @@ vi.mock('../../../../electron/shared', () => ({
   getStorage: () => null,
   requireStorage: () => ({}),
   getStorageFor: () => null,
-  getSyncEngine: () => h.engine,
+  getSyncEngine: () => h.active ?? h.engine,
   getSyncEngineFor: () => h.engine,
   requireSyncEngine: () => h.engine,
   getMainWindow: () => ({ isDestroyed: () => false, webContents: { send: (channel: string, payload?: unknown) => h.sent.push([channel, payload]) } }),
@@ -97,6 +100,7 @@ vi.mock('../../../../electron/services/backfill-scheduler', () => ({ kickBackfil
 vi.mock('../../../../electron/services/connection-health', () => ({ markConnectionUnstable: vi.fn() }));
 vi.mock('../../../../electron/services/imap-account-store', () => ({
   saveImapAccount: h.saveImapAccount, loadImapAccount: vi.fn(), clearImapAccount: h.clearImapAccount,
+  forgetImapAccountFor: h.forgetImapAccountFor,
 }));
 vi.mock('../../../../electron/sentry', () => ({ identifyClient: vi.fn() }));
 vi.mock('../../../../electron/services/unified-pipeline-service', () => ({
@@ -123,6 +127,8 @@ beforeEach(() => {
   h.sent.length = 0;
   h.saveImapAccount.mockClear();
   h.clearImapAccount.mockClear();
+  h.forgetImapAccountFor.mockClear();
+  h.active = null;
   h.engine.connect.mockReset().mockResolvedValue(undefined);
   h.engine.forceReconnect.mockReset().mockResolvedValue(undefined);
   // Connected with a config = connect() or forceReconnect() dialled that very object.
@@ -187,5 +193,44 @@ describe('imap:connect — connection security (CASA M-5)', () => {
     h.listeners.get('security-error')!(new Error('The incoming mail server … did not agree to encrypt'));
     expect(h.sent).toContainEqual(['imap:security-error', 'The incoming mail server … did not agree to encrypt']);
     expect(h.clearImapAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe('imap:connect — a rejected sign-in, with several accounts', () => {
+  // The account's kind does not matter here: a revoked OAuth grant and a rejected
+  // password reach this same event.
+  const ACCOUNT = { ...NONE_ACCOUNT, host: 'imap.mine.example' };
+
+  // Breaks: the account on screen is rejected and nobody is asked to sign in again,
+  // or its dead config survives to be dialled at the next launch.
+  it('forgets the account on screen and asks the window to sign in again', async () => {
+    expect(await connect(ACCOUNT)).toMatchObject({ success: true });
+    h.listeners.get('auth-error')!(new Error('invalid_grant'));
+
+    expect(h.forgetImapAccountFor).toHaveBeenCalledWith(expect.objectContaining({ host: 'imap.mine.example', username: 'me@x.com' }));
+    expect(h.sent).toContainEqual(['imap:auth-error', undefined]);
+    expect(h.clearImapAccount).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a background account's revoked grant deletes the saved config of
+  // whichever account connected last and puts the sign-in prompt over the active one.
+  it('keeps a background account\'s rejection to that account', async () => {
+    expect(await connect(ACCOUNT)).toMatchObject({ success: true });
+    h.active = { another: 'engine' };
+    h.listeners.get('auth-error')!(new Error('invalid_grant'));
+
+    expect(h.forgetImapAccountFor).toHaveBeenCalledWith(expect.objectContaining({ host: 'imap.mine.example', username: 'me@x.com' }));
+    expect(h.sent.map(([channel]) => channel)).not.toContain('imap:auth-error');
+    expect(h.clearImapAccount).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the bridge is set up on an engine's first connect, so it would forget the
+  // account as it was then, and miss the one saved since a change of user or server.
+  it('forgets the account as it last connected, not as it first did', async () => {
+    expect(await connect(ACCOUNT)).toMatchObject({ success: true });
+    expect(await connect({ ...ACCOUNT, username: 'renamed@x.com' })).toMatchObject({ success: true });
+    h.listeners.get('auth-error')!(new Error('invalid_grant'));
+
+    expect(h.forgetImapAccountFor).toHaveBeenLastCalledWith(expect.objectContaining({ username: 'renamed@x.com' }));
   });
 });
