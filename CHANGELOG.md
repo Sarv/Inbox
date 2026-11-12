@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Typing to Inbox Agent can no longer trash or archive the email you are
+  reading.** With the chat beside your inbox, the first keys of a follow-up
+  question could run as mail shortcuts on the open email. The message box now
+  keeps the keyboard while the agent works.
+- **"Mark all as read" in Inbox Agent no longer marks unrelated mail.** A command
+  that only said "all", "them" or "the rest" was matched against the word itself.
+  The agent now asks which emails you mean. With "Approve for me" on, a phrase
+  is applied without asking only where it is in the sender or subject; mail
+  that merely mentions it waits for your approval.
+- **Asking Inbox Agent to categorize mail no longer marks it as read.** The
+  agent says it cannot assign categories from chat. With "Approve for me" on,
+  a question or a request to check unread or uncategorized mail now shows its
+  suggestions for approval; mail is changed without asking only when you ask
+  for a review, a clean-up or a mark.
 - The blue verified tick now appears beside senders whose brand holds a
   Verified Mark Certificate. Since 1.2.0 the certificate could never be
   checked, so brands showed their logo but never the tick. Brands already seen

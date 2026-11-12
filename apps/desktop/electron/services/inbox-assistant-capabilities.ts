@@ -33,6 +33,15 @@ export function inboxAssistantCapabilityReply(question: string): string | undefi
     || /^(?:delete|archive|trash)\s+(?:all|these|those|them)[!.?]*$/i.test(command)) {
     return 'I cannot archive or delete mail from this chat command. No mail was changed. In Mail, select the conversations and choose Archive or Delete; Delete moves them to Trash. You can also ask “Review my unread emails”, manually select conversations in the review card, then choose Archive or Delete and review the confirmation.';
   }
+  // Assigning categories is not a chat action. Left to the router, the verb was
+  // read as a request to triage uncategorized unread mail, whose only outcome is
+  // marking mail read. A search that merely mentions classifying stays a search.
+  if (/^(?:categori[sz]e|classify|label|tag)\s+(?:.{0,120}\s+)?(?:e-?mails?|mails?|messages?|conversations?|threads?|inbox)\b/i.test(command)
+    || /^(?:categori[sz]e|classify|label|tag)\s+(?:all|these|those|them|everything)[!.?]*$/i.test(command)
+    || /^sort\s+(?:.{0,120}\s+)?(?:e-?mails?|mails?|messages?|conversations?|threads?|inbox)\s+(?:in)?to\s+(?:.{0,40}\s+)?(?:categor(?:y|ies)|labels?|folders?)\b/i.test(command)
+    || /\b(?:e-?mails?|mails?|messages?)\s+ko\s+(?:categori[sz]e|classify|label)\s+(?:kar|karo|kardo|kijiye|kariye)\b/i.test(command)) {
+    return 'I cannot assign or change categories from this chat. No mail was changed. Sorting mail into categories is done automatically by AI Assist (AI → Email Agent) once an AI provider is connected. To see unread mail that sorting has not reached, ask “Review my uncategorized unread emails”; that review suggests what to mark as read and does not assign categories.';
+  }
   if (/^send\s+(?:(?:an?|the|this|that|my)\s+)?(?:emails?|messages?|reply|replies|draft|invitation)\b/i.test(command)) {
     return 'I can prepare a draft, but I cannot send email from this chat command. No email was sent and no mail was changed. Use Draft email to prepare a message from this chat, or open Compose. Review the recipients, subject and body in the composer, then choose Send yourself.';
   }

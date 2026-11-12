@@ -67,6 +67,8 @@ interface Snapshot {
   targetRead: boolean;
   eligible: boolean;
   manualEligible: boolean;
+  /** Scoped command only: every target matched in its sender or subject. */
+  headerMatched?: boolean;
   dateFilter?: InboxAssistantReviewDateFilter;
   result?: InboxAssistantReviewItemResult;
   moveResult?: InboxAssistantReviewItemResult;
@@ -164,12 +166,39 @@ function reviewRecipientContext(account: InboxAssistantAccount, aliases: string[
 }
 
 /** Parse only an explicit, single user command. Source mail never enters here. */
-export function parseInboxAssistantReadCommand(question: string): InboxAssistantReadCommand | undefined {
+/**
+ * Words that point at mail without naming any of it: pronouns, quantifiers,
+ * positional words, glue words and the mail nouns themselves (with the common
+ * romanised-Hindi forms). An unquoted scope made only of these names nothing:
+ * “mark all as read” leaves “as”, “mark them as read” leaves “them”, “mark all
+ * mails as read” leaves “mails”, and matching that word literally changes mail
+ * the user never referred to. Hand-rolled on purpose: this is a closed class for
+ * one command grammar, and general stop-word lists disagree on content words
+ * (“new”, “first”) that are real senders here. Quoting stays the escape hatch:
+ * `mark all "IT" emails as read`.
+ */
+const REFERENTIAL_WORDS = new Set(('a an the my our your all any both each every everything anything nothing rest remaining others other else same such '
+  + 'above below here there this that these those it them they its their one ones two three few some many lot lots stuff thing things '
+  + 'of in from to for with by as at on and or please pls just only also too now then new old pending whole entire '
+  + 'mail mails email emails message messages conversation conversations thread threads inbox '
+  + 'sab sabhi saare sare sara baaki baki inko unko isko usko ye yeh wo woh ko kar karo kardo do de dijiye').split(' '));
+
+/** True when an unquoted scope phrase names no sender, subject or content word. */
+function referentialScope(phrase: string): boolean {
+  const words = phrase.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return words.every(word => word.length < 2 || /^\d{1,2}$/u.test(word) || REFERENTIAL_WORDS.has(word));
+}
+
+const MAIL_NOUN = '(?:e-?mails?|messages?|mails?|conversations?|threads?)';
+
+type ReadCommandParse = { command: InboxAssistantReadCommand } | { reference: string } | undefined;
+
+function parseReadCommand(question: string): ReadCommandParse {
   if (typeof question !== 'string' || question.length > 4_000 || hasControl(question)) return undefined;
   const command = question.trim().match(/^(?:(?:please|can you|could you|would you)\s+)?mark\s+(?:all\s+)?(.+?)\s+(?:as\s+)?(unread|read)[.!?]*$/iu);
   if (!command) return undefined;
   let phrase = command[1]!.replace(/^(?:the|my)\s+/iu, '').trim();
-  phrase = phrase.replace(/^(?:emails?|messages?|mail|conversations?|threads?)\s+/iu, '').replace(/\s+(?:emails?|messages?|mail|conversations?|threads?)$/iu, '').trim();
+  phrase = phrase.replace(new RegExp(`^${MAIL_NOUN}\\s+`, 'iu'), '').replace(new RegExp(`\\s+${MAIL_NOUN}$`, 'iu'), '').trim();
   let field: InboxAssistantReviewScope['field'] = 'any';
   const selector = phrase.match(/^(from|sender|with\s+subject|subject|with\s+body|body|containing|about)\s*:?\s+(.+)$/iu);
   if (selector) {
@@ -181,8 +210,25 @@ export function parseInboxAssistantReadCommand(question: string): InboxAssistant
   else if (/\b(?:not|except|excluding|without|and|or|before|after|since|until|today|yesterday|tomorrow|last|this|category|categories|tag|tags|unread|read|only|delete|archive|move|forward|send|uncategori[sz]ed)\b/iu.test(phrase)
     || /\b(?:older|more)\s+(?:than|then)\s*\d|\b\d+\s*days?\b/iu.test(phrase)
     || /^(?:promotions?|social|finance|invoices?|reminders?|important|starred|flagged)$/iu.test(phrase)) return undefined;
-  if (!validScope({ query: phrase, field }) || /^(?:all|emails?|messages?|mail|inbox|conversations?|threads?)$/iu.test(phrase)) return undefined;
-  return { kind: command[2]!.toLowerCase() === 'read' ? 'mark_read' : 'mark_unread', scope: { query: phrase, field } };
+  // Checked after the unsupported-restriction rules above so a date, category
+  // or combined request keeps its own explanation.
+  if (!quoted && referentialScope(phrase)) return { reference: phrase || command[1]!.trim() };
+  if (!validScope({ query: phrase, field })) return undefined;
+  return { command: { kind: command[2]!.toLowerCase() === 'read' ? 'mark_read' : 'mark_unread', scope: { query: phrase, field } } };
+}
+
+export function parseInboxAssistantReadCommand(question: string): InboxAssistantReadCommand | undefined {
+  const parsed = parseReadCommand(question);
+  return parsed && 'command' in parsed ? parsed.command : undefined;
+}
+
+/**
+ * The pointing words of a mark-read/unread command that names no mail (“them”,
+ * “as”, “the rest”). The caller explains instead of searching for the word.
+ */
+export function inboxAssistantReadCommandReference(question: string): string | undefined {
+  const parsed = parseReadCommand(question);
+  return parsed && 'reference' in parsed ? parsed.reference : undefined;
 }
 
 function validScope(value: unknown): value is InboxAssistantReviewScope {
@@ -190,7 +236,7 @@ function validScope(value: unknown): value is InboxAssistantReviewScope {
   const scope = value as InboxAssistantReviewScope;
   return Object.keys(scope).sort().join() === 'field,query' && ['any', 'sender', 'subject', 'body'].includes(scope.field)
     && typeof scope.query === 'string' && scope.query.trim().length >= 2 && scope.query.length <= 200 && !hasControl(scope.query)
-    && !/^(?:all|emails?|messages?|mail|inbox|conversations?|threads?)$/iu.test(scope.query.trim());
+    && !/^(?:all|e-?mails?|messages?|mails?|inbox|conversations?|threads?)$/iu.test(scope.query.trim());
 }
 
 function scopeMatches(email: EmailRecord, scope: InboxAssistantReviewScope): boolean {
@@ -656,6 +702,7 @@ async function prepareScopedReview(
               if (!thread.length || thread.some(email => email.accountId && email.accountId !== account.id)) continue;
               const initial = new Map(thread.map(email => [email.id, headers(email)]));
               const matching: string[] = [];
+              const headerMatches = new Set<string>();
               const protection: string[] = [];
               let bodyUnavailable = false;
               if (thread.length > LIMIT.members || (!storage.getEmailsByThread && seed.threadId)) protection.push('Complete conversation membership exceeds the review limit or is unavailable.');
@@ -667,7 +714,7 @@ async function prepareScopedReview(
                 // A sender/subject match is sufficient for the explicit flag
                 // request; attachments cannot expand the matched message set.
                 const headerMatch = scope.field !== 'body' && scopeMatches({ ...email, rawBody: '', cleanBody: '', hasBody: false }, scope);
-                if (headerMatch) { matching.push(email.id); continue; }
+                if (headerMatch) { matching.push(email.id); headerMatches.add(email.id); continue; }
                 if (scope.field === 'sender' || scope.field === 'subject') continue;
                 if (!body(email) && email.pgpStatus !== 'encrypted' && !indexedIds.has(email.id)) {
                   // The zero-query pass recovers cached raw-body matches only.
@@ -709,7 +756,8 @@ async function prepareScopedReview(
                 reason: protection.length ? unique(protection).join(' ') : `Matches your${scope.field === 'any' ? '' : ` ${scope.field}`} request “${scope.query}”. Only ${ids.length === 1 ? 'this matching message' : `these ${ids.length} matching messages`} will be marked ${targetRead ? 'read' : 'unread'}.`,
                 protectedReasons: unique(protection), bodyUnavailable, attachmentsUnknown, manualSelectionAllowed: protection.length === 0, mailActionsAllowed: protection.length === 0, status: 'pending' };
               review.items.push(item); coverage.reviewedThreads++;
-              trusted.items.set(item.id, { ...target, accountId: account.id, storage, members: snapshot(thread), targetIds: [...ids], targetRead, eligible: protection.length === 0, manualEligible: protection.length === 0 });
+              trusted.items.set(item.id, { ...target, accountId: account.id, storage, members: snapshot(thread), targetIds: [...ids], targetRead, eligible: protection.length === 0, manualEligible: protection.length === 0,
+                headerMatched: ids.every(id => headerMatches.has(id)) });
             }
             coverage.nextOffset = (page + 1) * LIMIT.page;
             if (coverage.hasMore || new Set(rows.map(threadKey)).size < LIMIT.page) break;
@@ -864,6 +912,17 @@ async function mutate(review: InboxAssistantReview, itemIds: string[], deps: Inb
     review.status = [...trusted.items.values()].some(target => (target.eligible || target.manualEligible) && !target.result && !target.moveResult) ? 'partial' : 'completed';
     return outcome(review, results);
   } finally { trusted.busy = false; }
+}
+
+/**
+ * Items of a scoped mark-read/unread review whose every target matched in the
+ * sender or subject. A phrase that only occurs somewhere in a message body is a
+ * much weaker sign that the user meant that conversation, so callers that apply
+ * without asking use this to leave body-only matches for the user to approve.
+ */
+export function inboxAssistantHeaderMatchedItems(review: InboxAssistantReview): Set<string> {
+  const trusted = reviews.get(review);
+  return new Set(trusted ? [...trusted.items].filter(([, item]) => item.headerMatched === true).map(([id]) => id) : []);
 }
 
 export function applyInboxAssistantReview(review: InboxAssistantReview, itemIds: string[], deps: InboxAssistantActionDeps, signal?: AbortSignal, options: InboxAssistantReviewApplyOptions = {}): Promise<InboxAssistantReviewApplyResult> {

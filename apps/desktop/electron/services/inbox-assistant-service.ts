@@ -8,7 +8,7 @@ import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest, Local
 import { readInboxAssistantAIWorkload } from '../../src/utils/inbox-assistant-workload';
 
 import { isMeetingDraft, meetingAvailabilityRequests, recheckMeetingAvailability } from './assistant-calendar';
-import { applyInboxAssistantReview, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps } from './inbox-assistant-actions';
+import { applyInboxAssistantReview, inboxAssistantHeaderMatchedItems, inboxAssistantReadCommandReference, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps } from './inbox-assistant-actions';
 import { answerInboxAssistant, planInboxAssistantSearch } from './inbox-assistant-answer';
 import { inboxAssistantCapabilityReply } from './inbox-assistant-capabilities';
 import { buildInboxAssistantContext } from './inbox-assistant-context';
@@ -100,14 +100,30 @@ export function inboxAssistantReviewIntent(question: string): InboxAssistantRevi
   if (/\bunread\b/i.test(question) && /\b(?:all|including|include|also)\b/i.test(question)
     && /\b(?:review|triage|clean|mark|look|check)\b/i.test(question)) return 'unread';
   if (/\b(?:uncategori[sz]ed|unlabelled|unlabeled|unclassified)\b/i.test(question)
-    && /\b(?:review|check|find|show|triage|look|process|categori[sz]e)\b/i.test(question)) return 'uncategorized';
+    && /\b(?:review|check|find|show|triage|look|process)\b/i.test(question)) return 'uncategorized';
   if (/\bunread\b/i.test(question) && /\b(?:review|triage|clean|mark|look|check)\b/i.test(question)) return 'unread';
   return undefined;
 }
 
+/**
+ * “Approve for me” applies the actions the user REQUESTS. A typed review that
+ * only asks to see or check mail, a question, or a look at uncategorized mail
+ * requests no change, so its recommendations wait on the card for approval.
+ * Imperative review/triage/clean/mark requests, and the app's own continuation
+ * buttons (which send an explicit kind), keep applying without asking.
+ */
+export function viewOnlyReviewRequest(request: Pick<InboxAssistantRequest, 'question' | 'reviewKind' | 'continueReviewId'>, kind: InboxAssistantReviewKind): boolean {
+  if (request.reviewKind || request.continueReviewId) return false;
+  const question = request.question.trim().replace(/^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?/iu, '');
+  if (/^(?:do|does|did|is|are|was|were|have|has|had|which|what|who|whom|whose|when|where|why|how|should|shall|any|kya|kitne|kitni|kaun)\b/iu.test(question)
+    || /\b(?:do|if)\s+i\s+have\b/iu.test(question)) return true;
+  if (kind === 'uncategorized') return !/\b(?:mark|clean|cleanup|triage)\b/iu.test(question);
+  return !/\b(?:review|triage|clean|cleanup|mark|process)\b/iu.test(question);
+}
+
 /** This first tool has an explicit account scope and no hidden free-text filters. */
 function genericReviewWords(question: string): boolean {
-  const allowed = new Set('a about across all an and are as at available can categorize categorise categorization categorisation categories check classify clean cleanup conversation conversations could do email emails for have help i if in inbox inboxes into is it let look low mail mails mark me my no nonvaluable not of or our please process read review should show that the them these they this those triage uncategorized uncategorised unclassified unlabelled unlabeled unread unvaluable up us useful valuable value what which will with worthless worth would you your accounts account'.split(' '));
+  const allowed = new Set('a about across all an and are as at available can categorization categorisation categories check clean cleanup conversation conversations could do email emails for have help i if in inbox inboxes into is it let look low mail mails mark me my no nonvaluable not of or our please process read review should show that the them these they this those triage uncategorized uncategorised unclassified unlabelled unlabeled unread unvaluable up us useful valuable value what which will with worthless worth would you your accounts account'.split(' '));
   const words = question.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
   return words.length > 0 && words.every(word => allowed.has(word));
 }
@@ -134,6 +150,11 @@ export function inboxAssistantReviewPreferences(question: string): string | unde
 export function inboxAssistantGenericReviewRequest(question: string): boolean {
   const dated = parseInboxAssistantReviewDate(question, Date.now());
   return !dated.invalid && (genericReviewWords(dated.question) || inboxAssistantReviewPreferences(dated.question) !== undefined);
+}
+
+function unscopedReadCommandMessage(reference: string): string {
+  const pronoun = /^(?:(?:all|both|each)\s+)?(?:of\s+)?(?:it|them|they|these|those|that|this|ones?)(?:\s+(?:all|two|three|\d{1,2}))?$/iu.test(reference.trim());
+  return `${pronoun ? `I can’t tell which emails “${reference.trim()}” refers to, so nothing was matched.` : 'This command does not say which emails to change.'} Name a sender, subject or phrase, for example “Mark all BigBlueButton emails as read”, or put the exact words in quotes. To go through everything unread, ask “Review my unread emails”. No mail was changed.`;
 }
 
 function reviewText(review: InboxAssistantReview): string {
@@ -806,6 +827,11 @@ export class InboxAssistantService {
       // Never reinterpret a rejected mark-unread command as low-value triage
       // (which has the opposite flag direction). Only parsed literal scopes can
       // enter the explicit flag tool.
+      // “Mark all as read”, “Mark them as read”: the scope is a pointing word,
+      // not a sender or subject. Searching for that word would change mail the
+      // user never referred to, so explain instead. Never routed to triage.
+      const reference = command ? undefined : inboxAssistantReadCommandReference(request.question);
+      if (reference !== undefined && !request.reviewKind) throw new Error(unscopedReadCommandMessage(reference));
       if ((!command && (requestsMarkUnread
           || (!broadReview && /^(?:(?:please|can you|could you|would you)\s+)?mark\b[\s\S]*\bread\b/iu.test(request.question))))
         || (request.reviewKind?.startsWith('mark_') && command?.kind !== request.reviewKind)
@@ -815,6 +841,9 @@ export class InboxAssistantService {
       const reviewKind = command?.kind ?? requestedReviewKind;
       if (reviewKind) {
         if (!command && !inboxAssistantGenericReviewRequest(request.question)) {
+          // The review can only suggest marking mail read; it must not stand in
+          // for a request to categorize, even one combined with a review.
+          if (/\b(?:categori[sz]e|classify|label|tag)\b/iu.test(request.question)) throw new Error('I cannot assign categories from this chat, so nothing was started and no mail was changed. Ask “Review my unread emails” to review unread mail, or “Review my uncategorized unread emails” to see what sorting has not reached.');
           throw new Error('This unread review uses the selected accounts. Sender, category and other date restrictions are not supported yet, so no mail was changed. Use “Review my unread emails older than 15 days” or choose fewer accounts.');
         }
         if (/\ball\s+accounts\b/i.test(request.question) && selected.length !== known.length) throw new Error('Select all accounts before reviewing mail across all accounts. No mail was changed.');
@@ -851,9 +880,14 @@ export class InboxAssistantService {
         // Approval is a saved choice for user requests in this conversation.
         // Changing it never starts work by itself or enables a mail daemon.
         const mode = this.deps.history.load(request.chatId, { select: false }).actionMode ?? 'review';
-        if (mode === 'approve_for_me' && !request.reviewOnly) {
+        if (mode === 'approve_for_me' && !request.reviewOnly && !(command ? false : viewOnlyReviewRequest(request, reviewKind))) {
+          // A bare phrase (“Mark all Acme emails read”) is applied without asking
+          // only where it matched a sender or subject. Conversations that merely
+          // contain the word in a body stay on the card for the user to approve,
+          // so an unforeseen common word cannot silently flip unrelated mail.
+          const anchored = command?.scope.field === 'any' ? inboxAssistantHeaderMatchedItems(review) : undefined;
           const ids = review.items.filter(item => command
-            ? item.recommendation === command.kind && item.confidence === 1 && (item.targetEmailIds?.length ?? 0) > 0
+            ? item.recommendation === command.kind && item.confidence === 1 && (item.targetEmailIds?.length ?? 0) > 0 && (!anchored || anchored.has(item.id))
             : item.recommendation === 'mark_read' && item.confidence >= 0.9
               && !item.protectedReasons.length && !item.bodyUnavailable && !item.attachmentsUnknown).map(item => item.id);
           if (ids.length) {
@@ -861,6 +895,8 @@ export class InboxAssistantService {
             exchange.reviewResult = await this.withMailActions(run, () => applyInboxAssistantReview(review, ids, this.reviewDeps(controller.signal), controller.signal));
             exchange.answer.text = reviewText(review);
           }
+          const held = anchored ? review.items.filter(item => item.recommendation === command!.kind && item.status === 'pending' && !anchored.has(item.id)).length : 0;
+          if (held) exchange.answer.text += `\n\n${held} ${held === 1 ? 'conversation matches' : 'conversations match'} only inside the message text, not in the sender or subject, so ${held === 1 ? 'it was' : 'they were'} not changed. Select ${held === 1 ? 'it' : 'them'} below to apply.`;
         }
         const unverified = review.items.filter(item => item.needsRetry).length;
         report({ stage: 'complete', status: unverified ? 'warning' : 'done', message: unverified ? 'Unread review needs another attempt' : command ? 'Matching email review ready' : 'Unread review ready',

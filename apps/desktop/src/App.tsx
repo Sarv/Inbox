@@ -46,6 +46,7 @@ import { UpdateDialog } from './components/UpdateDialog';
 import { UpdateReadyBanner } from './components/UpdateReadyBanner';
 import { useActiveSection } from './hooks/useActiveSection';
 import { useAppVersion } from './hooks/useAppVersion';
+import { useAssistantShortcutGate } from './hooks/useAssistantShortcutGate';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNotificationBridge } from './hooks/useNotificationBridge';
 import { AI_ASSIST_CHANGED_EVENT, loadAgentSettings, pushAgentSettingsToBackend, pushCategoryLabelSetting } from './services/agent-settings';
@@ -133,7 +134,6 @@ function App() {
   const [assistantSource, setAssistantSource] = useState<InboxAssistantSource | null>(null);
   const [assistantReplyRequestId, setAssistantReplyRequestId] = useState<number | undefined>();
   const assistantReplySequence = useRef(0);
-  const [assistantFocused, setAssistantFocused] = useState(false);
   const openAssistantSource = useCallback((source: InboxAssistantSource) => {
     setAssistantReplyRequestId(undefined);
     setAssistantSource(source);
@@ -295,7 +295,8 @@ function App() {
     return () => { try { off?.(); } catch { /* ignore */ } };
   }, []);
 
-  useKeyboardShortcuts({ setActiveSection: requestSection, focusSearch, enabled: !showOnboarding && (activeSection === 'assistant' ? !!assistantSource : !assistantFocused), allowListNavigation: activeSection !== 'assistant' && !assistantFocused });
+  const { setAssistantFocused, ...mailShortcuts } = useAssistantShortcutGate({ onboarding: showOnboarding, section: activeSection, source: assistantSource });
+  useKeyboardShortcuts({ setActiveSection: requestSection, focusSearch, ...mailShortcuts });
   useNotificationBridge();
 
   // Load user-defined labels once on mount (local DB — no connection needed).

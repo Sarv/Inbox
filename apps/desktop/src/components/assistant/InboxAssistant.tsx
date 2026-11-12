@@ -59,7 +59,7 @@ const starterQuestions = [
 ];
 const starterActions = [
   { title: 'Review unread', description: 'Find low-value mail to mark as read.', question: 'Review my unread emails and mark low-value conversations as read.', Icon: MailCheck },
-  { title: 'Check uncategorized', description: 'Include mail the categorization process missed.', question: 'Review my uncategorized unread emails.', Icon: ListFilter },
+  { title: 'Review uncategorized', description: 'Suggest what to mark as read in mail that sorting missed.', question: 'Review my uncategorized unread emails.', Icon: ListFilter },
   { title: 'Find an answer', description: 'Search emails and attachments across accounts.', question: 'What quote did I send to TCS?', Icon: Search },
   { title: 'Find what needs a reply', description: 'Locate customer requests and open conversations.', question: 'Which recent customer emails need a response?', Icon: Inbox },
 ];
@@ -412,7 +412,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
   const activityTrigger = useRef<HTMLButtonElement | null>(null);
   const questionInput = useRef<HTMLTextAreaElement>(null);
   const accountPicker = useRef<HTMLDivElement>(null);
-  const focusQuestionAfterRewind = useRef(false);
+  const focusQuestionWhenReady = useRef(false);
   const messages = useRef<HTMLDivElement>(null);
   const pendingChatMutations = useRef(new Set<string>());
   const pendingDeletion = useRef(false);
@@ -568,11 +568,11 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
 
   useEffect(() => { if (sourcePane) setActivityOpen(false); }, [sourcePane]);
   useEffect(() => {
-    if (visible && !rewinding && focusQuestionAfterRewind.current) {
-      focusQuestionAfterRewind.current = false;
+    if (visible && !rewinding && !creating && activeChatId && focusQuestionWhenReady.current) {
+      focusQuestionWhenReady.current = false;
       if (visibleRef.current) questionInput.current?.focus();
     }
-  }, [rewinding, visible]);
+  }, [rewinding, visible, creating, activeChatId]);
   useEffect(() => {
     if (visible && messages.current) messages.current.scrollTop = messages.current.scrollHeight;
   }, [activeChatId, chatLoading, exchanges.length, pendingQuestion, compact, visible]);
@@ -730,7 +730,9 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
       if (!result.success) throw new Error(result.error);
       if (selectedScope) drafts.current.set(result.data.id, { question: seed?.question ?? '', accountIds: [...selectedScope] });
       applyChat(result.data, accounts);
-      if (visibleRef.current) questionInput.current?.focus();
+      // The composer is still disabled (no active chat rendered yet), and
+      // focus() on a disabled control does nothing: focus once it is ready.
+      focusQuestionWhenReady.current = true;
     } catch (cause) {
       if (version === generation.current) setChatError(cause instanceof Error ? cause.message : 'Could not create a conversation.');
     } finally {
@@ -796,7 +798,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
       setEditQuestion('');
       setDraftFormOpen(false);
       onCloseSourcePane?.();
-      focusQuestionAfterRewind.current = true;
+      focusQuestionWhenReady.current = true;
     } catch (cause) {
       if (mounted.current && version === generation.current) setError(cause instanceof Error ? cause.message : 'Could not rewind this conversation.');
     } finally {
@@ -840,6 +842,9 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
     const chatId = activeChatRef.current;
     const accountIds = override?.accountIds ?? selectedAccountIds;
     if (!text || !chatId || accountIds.length === 0 || loading || chatLoading || creating || rewinding || editingExchangeId || request.current) return;
+    // The composer stays focusable while other work runs (see its readOnly), so
+    // Enter can still submit the form; the Send button's own guards apply here.
+    if (!override && (draftCreating || actionCreating || modeSaving || stoppingRequestId)) return;
     const requestId = globalThis.crypto.randomUUID();
     const chatRevision = chatRevisions.current.get(chatId) ?? 0;
     const run = startWork(chatId, requestId, { kind: 'question', question: text, activities: [], status: 'running', coverage: [], warnings: [] });
@@ -1257,14 +1262,14 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
         {!overview && <form onSubmit={event => void ask(event)} className={`assistant-composer ${compact ? 'assistant-composer-compact' : ''}`}>
           <label htmlFor="inbox-assistant-question" className="sr-only">Message Inbox Agent</label>
           <div className="assistant-raised assistant-composer-input">
-            <textarea ref={questionInput} id="inbox-assistant-question" value={question} maxLength={4000} disabled={!!pendingQuestion || busy || !!editingExchangeId || !!loadError || !!chatError || !accounts.length || !activeChatId} onChange={event => changeQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} placeholder="Message Inbox Agent…" className="assistant-composer-textarea" />
+            <textarea ref={questionInput} id="inbox-assistant-question" value={question} maxLength={4000} readOnly={!!pendingQuestion || busy} aria-busy={!!pendingQuestion || busy} disabled={!!editingExchangeId || !!loadError || !!chatError || !accounts.length || !activeChatId} onChange={event => changeQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} placeholder="Message Inbox Agent…" className="assistant-composer-textarea" />
             {workActive ? renderStopButton(stoppingRequestId ? stopFailed ? 'Retry stop' : 'Stopping request' : draftCreating ? 'Stop drafting' : 'Stop answering', true) : <button type="submit" disabled={!question.trim() || selectedAccountIds.length === 0 || busy || !!editingExchangeId || !!loadError || !!chatError || !activeChatId} aria-label="Ask Inbox Agent" title="Send message" className="assistant-primary-action assistant-composer-action assistant-composer-send"><ArrowUp aria-hidden="true" className="h-4 w-4" /></button>}
           </div>
           {compact && <div className="assistant-composer-options">{renderAccountPicker()}{modeControl}</div>}
           {selectedAccountIds.length === 0 && !loading && <p className="text-xs text-muted-foreground">Choose at least one account.</p>}
         </form>}
       </div>
-      {sourcePane ? <div aria-label="Assistant email source" className={`inset-y-0 right-0 z-40 flex min-h-0 flex-col border-l border-border bg-background shadow-xl ${compact ? 'absolute w-full' : 'fixed w-[min(56rem,100vw)] lg:static lg:z-auto lg:h-full lg:w-1/2 lg:shrink-0 lg:shadow-none'}`}>{workActive && renderWorkBar(true)}<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">{sourcePane}</div></div> : activityOpen && inspection && <ActivitySidebar inspection={inspection} accounts={accounts} onClose={closeActivity} compact={compact} visible={visible} stopButton={workActive ? renderStopButton('Stop work from activity') : undefined} />}
+      {sourcePane ? <div aria-label="Assistant email source" data-assistant-source="true" className={`inset-y-0 right-0 z-40 flex min-h-0 flex-col border-l border-border bg-background shadow-xl ${compact ? 'absolute w-full' : 'fixed w-[min(56rem,100vw)] lg:static lg:z-auto lg:h-full lg:w-1/2 lg:shrink-0 lg:shadow-none'}`}>{workActive && renderWorkBar(true)}<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">{sourcePane}</div></div> : activityOpen && inspection && <ActivitySidebar inspection={inspection} accounts={accounts} onClose={closeActivity} compact={compact} visible={visible} stopButton={workActive ? renderStopButton('Stop work from activity') : undefined} />}
     </section>
   );
 }

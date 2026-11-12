@@ -43,6 +43,7 @@ export function AssistantWorkspace({ section, onOpenInbox, onOpenAssistant, onFo
   const lastActivity = useRef<string | null>(null);
   const focusListener = useRef(onFocusChange);
   useEffect(() => { focusListener.current = onFocusChange; }, [onFocusChange]);
+  const modeRef = useRef('hidden');
   const report = useCallback((next: InboxAssistantViewState) => {
     setState(previous => Object.keys(next).every(key => previous[key as keyof InboxAssistantViewState] === next[key as keyof InboxAssistantViewState]) ? previous : next);
   }, []);
@@ -60,8 +61,32 @@ export function AssistantWorkspace({ section, onOpenInbox, onOpenAssistant, onFo
     if (active) lastActivity.current = activityId;
   }, [section, active, activityId, dismissed, awayOpen]);
   useEffect(() => {
+    modeRef.current = mode;
     if (mode === 'hidden') focusListener.current?.(false);
   }, [mode]);
+  // Mail's single-key shortcuts (d = Trash, e = Archive) are armed whenever the
+  // chat is NOT the surface in use, so "in use" follows the last place the user
+  // clicked or focused, never a blur. A chat control that is disabled or
+  // unmounted while focused drops focus to <body> with no relatedTarget; read
+  // as "left the chat", the next words of a follow-up ran as mail shortcuts.
+  useEffect(() => {
+    const inChat = (target: EventTarget | null) => target instanceof Element
+      && !!target.closest('[data-assistant-workspace],[data-assistant-separator]')
+      // In the full view the cited email is a mail surface with its own shortcuts.
+      && !(modeRef.current === 'full' && target.closest('[data-assistant-source]'));
+    const track = (event: Event) => focusListener.current?.(inChat(event.target));
+    // A click inside an email frame never reaches this document; the frame
+    // taking focus is the only signal that the user moved to the mail pane.
+    const frame = () => { const active = document.activeElement; if (active instanceof HTMLIFrameElement && !inChat(active)) focusListener.current?.(false); };
+    document.addEventListener('pointerdown', track, true);
+    document.addEventListener('focusin', track, true);
+    window.addEventListener('blur', frame);
+    return () => {
+      document.removeEventListener('pointerdown', track, true);
+      document.removeEventListener('focusin', track, true);
+      window.removeEventListener('blur', frame);
+    };
+  }, []);
   useEffect(() => {
     const resize = () => { setSize(viewport()); setRect(current => bounds(current)); };
     window.addEventListener('resize', resize);
@@ -101,14 +126,12 @@ export function AssistantWorkspace({ section, onOpenInbox, onOpenAssistant, onFo
   const button = 'flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary';
   return <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden" data-assistant-layout={mode}>
     <div hidden={mode === 'full'} style={mode === 'full' ? { display: 'none' } : undefined} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">{children}</div>
-    {mode === 'split' && <div role="separator" aria-label="Resize Inbox and AI panels" aria-orientation="vertical" aria-valuemin={360} aria-valuemax={Math.round(splitMax)} aria-valuenow={Math.round(Math.min(splitWidth, splitMax))} tabIndex={0}
-      onFocus={() => focusListener.current?.(true)} onBlur={() => focusListener.current?.(false)}
+    {mode === 'split' && <div role="separator" aria-label="Resize Inbox and AI panels" aria-orientation="vertical" aria-valuemin={360} aria-valuemax={Math.round(splitMax)} aria-valuenow={Math.round(Math.min(splitWidth, splitMax))} tabIndex={0} data-assistant-separator="true"
       onPointerDown={event => startGesture(event, 'split')} onKeyDown={event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault(); event.stopPropagation(); setSplitWidth(current => event.key === 'Home' ? 360 : event.key === 'End' ? splitMax : Math.max(360, Math.min(splitMax, current + (event.key === 'ArrowLeft' ? 24 : -24))));
       }} className="group relative z-10 w-1.5 shrink-0 cursor-col-resize touch-none bg-border/60 transition-colors hover:bg-primary/20 focus:bg-primary/20 focus:outline-none"><span aria-hidden="true" className="absolute left-1/2 top-1/2 h-8 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted-foreground/30 group-hover:bg-primary/60" /></div>}
     <aside data-assistant-workspace="true" aria-label={mode === 'pip' ? 'Floating Inbox Agent' : 'Inbox Agent workspace'} aria-hidden={mode === 'hidden'} inert={mode === 'hidden'}
-      onFocusCapture={() => focusListener.current?.(true)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) focusListener.current?.(false); }}
       style={mode === 'hidden' ? { display: 'none' } : mode === 'pip' ? { left: rect.x, top: rect.y, width: rect.width, height: rect.height }
         : mode === 'split' ? { width: Math.min(splitWidth, splitMax) } : undefined}
       className={`assistant-theme flex min-h-0 min-w-0 flex-col overflow-hidden bg-background ${mode === 'pip' ? 'fixed z-30 rounded-2xl border border-border shadow-[0_8px_40px_-8px_rgba(0,0,0,0.25)]' : mode === 'split' ? 'relative shrink-0' : 'relative flex-1'}`}>

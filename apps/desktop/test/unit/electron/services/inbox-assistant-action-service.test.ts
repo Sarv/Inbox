@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../../../electron/services/core-db', () => ({ getCoreDb: () => { throw new Error('Use the isolated action-service test database.'); } }));
 
 import { createInboxAssistantHistoryStore, type InboxAssistantHistoryStore } from '../../../../electron/services/inbox-assistant-history';
-import { InboxAssistantService, inboxAssistantGenericReviewRequest, inboxAssistantReviewPreferences, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
+import { InboxAssistantService, inboxAssistantGenericReviewRequest, inboxAssistantReviewPreferences, viewOnlyReviewRequest, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
 import type { InboxAssistantAccount, InboxAssistantAIUsage, InboxAssistantExchange, InboxAssistantReviewActionRequest } from '../../../../src/types/inbox-assistant';
 import { emailRecord } from '../../../helpers/email-fixtures';
 
@@ -728,5 +728,118 @@ describe('Inbox Agent conversation approval orchestration', () => {
     expect(deps.callAI).not.toHaveBeenCalled();
     expect(deps.setRead).not.toHaveBeenCalled();
     expect([...rows.values()].every(row => !row.tags.includes('|read|'))).toBe(true);
+  });
+});
+
+describe('Inbox Agent never changes mail the user did not point at', () => {
+  // Regression: "Mark all as read" searched for the word "as" and "Mark them as
+  // read" for "them"; in Approve-for-me the matches were marked at once. If one
+  // of these opens a mailbox or sets a flag, a pointing word is being matched
+  // literally again. Both flag directions, in the mode that applies unasked.
+  it.each(['Mark all as read', 'Mark as read', 'Mark them as read', 'Mark it read', 'Mark these as read', 'Mark those as unread', 'Mark that as read',
+    'Mark all of them as read', 'Mark the rest as read', 'mark everything unread', 'Mark all mails as read', 'Mark these mails as unread',
+    'Can you mark all as read?', 'mark sab mails as read'])('explains instead of matching the pointing word in: %s', async question => {
+    service.updateChat({ chatId, actionMode: 'approve_for_me' });
+    await expect(service.ask({ ...request(), question, accountIds: ['primary', 'secondary'] })).rejects.toThrow(/Name a sender, subject or phrase.*No mail was changed\.$/);
+    expect(deps.openMailbox).not.toHaveBeenCalled();
+    expect(deps.callAI).not.toHaveBeenCalled();
+    expect(deps.setRead).not.toHaveBeenCalled();
+    expect([...rows.values()].every(row => !row.tags.includes('|read|'))).toBe(true);
+  });
+
+  it('names the pronoun it could not resolve and points to the unread review', async () => {
+    await expect(service.ask({ ...request(), question: 'Mark them as read' })).rejects.toThrow('I can’t tell which emails “them” refers to');
+    await expect(service.ask({ ...request('prepare-2'), question: 'Mark all as read' })).rejects.toThrow('This command does not say which emails to change. Name a sender');
+    await expect(service.ask({ ...request('prepare-3'), question: 'Mark all mails as read' })).rejects.toThrow('“Review my unread emails”');
+  });
+
+  // Regression guard for unforeseen common words: in Approve-for-me a bare
+  // phrase is applied unasked only where it matched a sender or subject. If the
+  // body-only conversation below is marked without a click, any word that
+  // happens to occur in message text can flip unrelated mail.
+  it('applies a bare phrase without asking only to sender or subject matches and holds body-only matches for approval', async () => {
+    rows.clear();
+    rows.set('by-subject', newsletter('by-subject', { subject: 'BigBlueButton update' }));
+    rows.set('by-body', newsletter('by-body', { rawBody: '<p>Notes from the BigBlueButton call.</p>', cleanBody: 'Notes from the BigBlueButton call.' }));
+    service.updateChat({ chatId, actionMode: 'approve_for_me' });
+    const result = await service.ask({ ...request(), question: 'Mark all BigBlueButton emails as read' });
+    expect(deps.setRead).toHaveBeenCalledExactlyOnceWith('primary', ['by-subject'], true, { source: 'user' });
+    expect(rows.get('by-body')!.tags).not.toContain('|read|');
+    expect(result.answer.text).toContain('1 conversation matches only inside the message text, not in the sender or subject, so it was not changed. Select it below to apply.');
+    const held = result.review!.items.find(item => item.emailId === 'by-body')!;
+    expect(held.status).toBe('pending');
+    // The user's click on the card is still enough for the held conversation.
+    await service.applyReview({ ...applyRequest(result), itemIds: [held.id] });
+    expect(rows.get('by-body')!.tags).toContain('|read|');
+  });
+
+  it('applies an explicit body selector without asking, because the user named the body', async () => {
+    rows.clear();
+    rows.set('by-body', newsletter('by-body', { rawBody: '<p>Notes from the BigBlueButton call.</p>', cleanBody: 'Notes from the BigBlueButton call.' }));
+    service.updateChat({ chatId, actionMode: 'approve_for_me' });
+    const result = await service.ask({ ...request(), question: 'mark emails with body "BigBlueButton call" as read' });
+    expect(deps.setRead).toHaveBeenCalledExactlyOnceWith('primary', ['by-body'], true, { source: 'user' });
+    expect(result.answer.text).not.toContain('only inside the message text');
+  });
+
+  // Regression: "Categorize my uncategorized emails" ran the unread triage and,
+  // in Approve-for-me, marked mail read while assigning no category.
+  it.each(['Categorize my uncategorized emails', 'Please categorise my uncategorized mails', 'Can you classify my unlabelled emails?'])('answers a categorize request without reviewing or changing mail: %s', async question => {
+    service.updateChat({ chatId, actionMode: 'approve_for_me' });
+    const result = await service.ask({ ...request(), question });
+    expect(result.review).toBeUndefined();
+    expect(result.answer.text).toContain('cannot assign or change categories');
+    expect(deps.openMailbox).not.toHaveBeenCalled();
+    expect(deps.callAI).not.toHaveBeenCalled();
+    expect(deps.setRead).not.toHaveBeenCalled();
+  });
+
+  it.each(['Check my unread emails and categorize them', 'Review unread mail and classify it'])('refuses a review combined with categorizing rather than silently dropping the second half: %s', async question => {
+    service.updateChat({ chatId, actionMode: 'approve_for_me' });
+    await expect(service.ask({ ...request(), question })).rejects.toThrow(/cannot assign categories from this chat.*no mail was changed/);
+    expect(deps.openMailbox).not.toHaveBeenCalled();
+    expect(deps.setRead).not.toHaveBeenCalled();
+  });
+
+  // Regression: in Approve-for-me a question such as "Which unread emails should
+  // I look at?" marked conversations read although no change was requested.
+  // These must come back as a held review card with nothing applied.
+  it.each(['Which unread emails should I look at?', 'Check my unread emails', 'Can you check my unread mail?', 'Do I have unread mail? please check',
+    'Review my uncategorized unread emails.', 'Show my uncategorized emails'])('prepares a review but applies nothing in Approve-for-me when no change was requested: %s', async question => {
+    service.updateChat({ chatId, actionMode: 'approve_for_me' });
+    const result = await service.ask({ ...request(), question });
+    expect(result.review!.items.some(item => item.recommendation === 'mark_read' && item.status === 'pending')).toBe(true);
+    expect(result.reviewResult).toBeUndefined();
+    expect(deps.setRead).not.toHaveBeenCalled();
+    expect([...rows.values()].every(row => !row.tags.includes('|read|'))).toBe(true);
+  });
+
+  // The other direction: an imperative review or clean-up is still a request,
+  // and the app's own continuation buttons carry an explicit kind.
+  it.each([
+    { question: 'Review unread mail' }, { question: 'Can you review my unread emails?' }, { question: 'Please clean up my unread mail' },
+    { question: 'Review my uncategorized unread emails and mark low value mail as read' },
+    { question: 'Check my unread emails', reviewKind: 'unread' as const },
+  ])('still applies without asking in Approve-for-me for $question', async override => {
+    service.updateChat({ chatId, actionMode: 'approve_for_me' });
+    const result = await service.ask({ ...request(), ...override });
+    expect(result.reviewResult!.appliedCount).toBeGreaterThan(0);
+    expect(deps.setRead).toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Review unread mail', 'unread', false], ['Triage my unread emails', 'unread', false], ['Please review my unread emails', 'unread', false],
+    ['Would you please clean up my unread mail', 'unread', false], ['Check my unread emails', 'unread', true], ['Look at my unread mail', 'unread', true],
+    ['Which unread emails should I review?', 'unread', true], ['Are there unread emails I should review?', 'unread', true],
+    ['Check if I have unread mail to review', 'unread', true], ['unread mails kitne hain, check karo', 'unread', true],
+    ['Review my uncategorized unread emails.', 'uncategorized', true], ['Find uncategorized mail', 'uncategorized', true],
+    ['Triage my uncategorized unread emails', 'uncategorized', false], ['Review uncategorized mail and mark low value as read', 'uncategorized', false],
+  ] as const)('classifies “%s” (%s) as view-only=%s', (question, kind, expected) => {
+    expect(viewOnlyReviewRequest({ question }, kind)).toBe(expected);
+  });
+
+  it('never treats an app continuation or an explicit kind as view-only', () => {
+    expect(viewOnlyReviewRequest({ question: 'Check my unread emails', reviewKind: 'unread' }, 'unread')).toBe(false);
+    expect(viewOnlyReviewRequest({ question: 'Which unread emails should I look at?', continueReviewId: 'review-1' }, 'unread')).toBe(false);
   });
 });

@@ -243,7 +243,7 @@ describe('Inbox Agent independent chat runs', () => {
     if (finishesFirst === 'first') {
       await act(async () => first.resolve(ok(answer(firstRequest, 'The supplier quote is attached.')))); await settle();
       expect(view.byLabel('Stop answering')).not.toBeNull();
-      expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(true);
+      expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(true);
       await act(async () => second.resolve(ok(answer(secondRequest, 'The meeting is on Wednesday.')))); await settle();
       typeInto(view.find('#inbox-assistant-question'), 'Keep this follow-up in the second chat.');
     } else {
@@ -299,14 +299,14 @@ describe('Inbox Agent independent chat runs', () => {
     const view = await mount();
     expect(view.byLabel('View current activity')?.textContent).toContain('Reading the original quotation');
     expect(view.byLabel('Stop answering')).not.toBeNull();
-    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(true);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(true);
     const completed = answer({ requestId: restored.requestId, chatId: restored.chatId, question: restored.question, accountIds: restored.accountIds }, 'Recovered final answer.');
     stored.set('chat-a', { ...chat('chat-a'), exchanges: [completed], runs: [{ ...restored, status: 'completed' }], exchangeCount: 1 });
     await act(async () => { await vi.advanceTimersByTimeAsync(1_500); }); await settle();
     expect(api.chat).toHaveBeenCalledTimes(2);
     expect(view.container.textContent).toContain('Recovered final answer.');
     expect(view.byLabel('Stop answering')).toBeNull();
-    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(false);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).readOnly).toBe(false);
     expect(api.ask).not.toHaveBeenCalled();
     expect(api.cancel).not.toHaveBeenCalled();
   });
@@ -398,5 +398,67 @@ describe('Inbox Agent independent chat runs', () => {
     fire(button(view, 'Open draft'), 'click');
     expect(onOpenDraft).toHaveBeenCalledExactlyOnceWith(draft);
     expect(api.cancel).not.toHaveBeenCalled();
+  });
+});
+
+describe('Inbox Agent composer keeps the keyboard', () => {
+  // Regression: the composer was DISABLED the moment a question was sent.
+  // Chromium blurs a disabled control to <body>, and in the split and floating
+  // views the next keystrokes of a follow-up then ran as mail shortcuts
+  // (d = Trash, e = Archive) on the open email. happy-dom does not blur a
+  // disabled control by itself, so this pins the cause: the composer is never
+  // disabled by a run and remains the active element throughout.
+  it('stays focused and focusable while a question runs and after the answer lands', async () => {
+    const pending = deferred<InboxAssistantExchange>();
+    api.ask.mockImplementationOnce(() => pending.promise);
+    const view = await mount();
+    const composer = view.find('#inbox-assistant-question') as HTMLTextAreaElement;
+    act(() => composer.focus());
+    typeInto(composer, 'What quote did I send to TCS?');
+    fire(composer, 'keydown', { key: 'Enter' }); await settle();
+    expect(api.ask).toHaveBeenCalledOnce();
+    expect(composer.disabled).toBe(false);
+    expect(composer.readOnly).toBe(true);
+    expect(composer.getAttribute('aria-busy')).toBe('true');
+    expect(document.activeElement).toBe(composer);
+    // The box is read-only, not gone: Enter must not start a second request.
+    fire(composer, 'keydown', { key: 'Enter' }); await settle();
+    expect(api.ask).toHaveBeenCalledOnce();
+    await act(async () => pending.resolve(ok(answer(api.ask.mock.calls[0]![0], 'The quote was INR 18,50,000.')))); await settle();
+    expect(composer.readOnly).toBe(false);
+    expect(composer.disabled).toBe(false);
+    expect(document.activeElement).toBe(composer);
+  });
+
+  // The composer no longer goes dead while other work runs, so Enter reaches
+  // the form. Without the guard a question would start mid-way through saving
+  // the action mode (or a draft, a mail action, a Stop) and race it.
+  it('ignores Enter while the action mode is being saved, then sends normally', async () => {
+    const saving = deferred<InboxAssistantChat>();
+    api.updateChat.mockImplementationOnce(() => saving.promise);
+    const view = await mount();
+    const composer = view.find('#inbox-assistant-question') as HTMLTextAreaElement;
+    typeInto(composer, 'What quote did I send to TCS?');
+    const mode = view.byLabel('Action mode') as HTMLSelectElement;
+    mode.value = 'approve_for_me';
+    fire(mode, 'change'); await settle();
+    expect(composer.readOnly).toBe(true);
+    fire(composer, 'keydown', { key: 'Enter' }); await settle();
+    expect(api.ask).not.toHaveBeenCalled();
+    await act(async () => saving.resolve(ok({ ...chat('chat-a'), actionMode: 'approve_for_me' }))); await settle();
+    expect(composer.readOnly).toBe(false);
+    fire(composer, 'keydown', { key: 'Enter' }); await settle();
+    expect(api.ask).toHaveBeenCalledOnce();
+  });
+
+  // A new conversation should be ready to type into. focus() used to be called
+  // while the composer was still disabled, where it does nothing.
+  it('focuses the composer once a new conversation is ready', async () => {
+    const view = await mount();
+    fire(button(view, 'New conversation'), 'click'); await settle();
+    expect(view.find('h1')?.textContent).toBe('Second conversation');
+    const composer = view.find('#inbox-assistant-question') as HTMLTextAreaElement;
+    expect(composer.disabled).toBe(false);
+    expect(document.activeElement).toBe(composer);
   });
 });
