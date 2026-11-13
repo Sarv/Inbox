@@ -164,8 +164,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app.**
 - **A folder with "star" in its name opens as itself.** Folders such as
   Startups, Restart or Mustard opened showing your starred mail instead of the
-  mail filed in them. Only your mail provider's Starred or Flagged mailbox shows
-  starred mail now.
+  mail filed in them, and a folder such as "Starred clients" showed only its
+  starred messages. Only your mail provider's Starred or Flagged mailbox shows
+  starred mail now, and only it has the star icon in the folder list. Starring
+  a message now updates that mailbox's count, not another folder's.
 - **Antivirus sign-in always shows you what happened.** On Windows, the page
   saying an antivirus sign-in was declined or incomplete could show up as a
   connection error in your browser instead.
