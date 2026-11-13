@@ -22,6 +22,14 @@ export type AIErrorKind =
   | 'client' // other 4xx (bad request) — won't fix by retrying
   | 'unknown';
 
+/**
+ * Carried as `code` by the error a provider call raises when it gives up on its
+ * OWN request budget. Without it that error is indistinguishable from a socket
+ * failure: its message says "timed out", which the connection-error wording
+ * also matches, so a slow model was reported as "could not reach the provider".
+ */
+export const AI_REQUEST_TIMEOUT_CODE = 'AI_REQUEST_TIMEOUT';
+
 export interface AIErrorInfo {
   kind: AIErrorKind;
   /**
@@ -129,6 +137,10 @@ export function classifyAIError(err: unknown): AIErrorInfo {
       status,
       reason: 'The AI provider is temporarily unavailable (gateway error).',
     };
+  }
+  // Before the connection check, whose wording also matches "timed out".
+  if ((err as { code?: unknown } | null)?.code === AI_REQUEST_TIMEOUT_CODE) {
+    return { kind: 'timeout', terminal: false, status, reason: 'The AI provider timed out.' };
   }
   if (isConnectionError(err)) {
     return { kind: 'network', terminal: false, status, reason: 'Could not reach the AI provider (network issue).' };

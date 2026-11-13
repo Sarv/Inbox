@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { classifyAIError } from '../../../src/utils/ai-error';
+import { AI_REQUEST_TIMEOUT_CODE, classifyAIError } from '../../../src/utils/ai-error';
 
 // This classifier decides, after AI categorization stops mid-run, whether to show
 // the user a "Fix your provider" banner (terminal) or silently auto-restart
@@ -116,6 +116,17 @@ describe('classifyAIError — transient failures keep retrying', () => {
   it('classifies socket / DNS failures as network (not terminal)', () => {
     expect(classifyAIError(new Error('socket hang up'))).toMatchObject({ kind: 'network', terminal: false });
     expect(classifyAIError(new Error('ETIMEDOUT connect'))).toMatchObject({ kind: 'network', terminal: false });
+  });
+
+  // Breaks: a provider call that gave up on its own request budget is reported
+  // as a network failure, because "timed out" also matches the connection wording.
+  it('classifies the provider call\'s own request timeout as a timeout, ahead of the connection wording', () => {
+    const cut = Object.assign(new Error('AI request timed out'), { code: AI_REQUEST_TIMEOUT_CODE });
+    expect(classifyAIError(cut)).toMatchObject({ kind: 'timeout', terminal: false, reason: 'The AI provider timed out.' });
+    // The same words without the code are still a connection-level failure.
+    expect(classifyAIError(new Error('AI request timed out'))).toMatchObject({ kind: 'network', terminal: false });
+    // An auth or credit failure is never downgraded by the code.
+    expect(classifyAIError(Object.assign(new Error('unauthorized'), { code: AI_REQUEST_TIMEOUT_CODE, status: 401 })).kind).toBe('auth');
   });
 
   it('classifies HTTP 408 and timeout wording as a timeout (not terminal)', () => {

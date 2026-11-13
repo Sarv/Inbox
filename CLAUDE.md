@@ -348,6 +348,18 @@ Established shared helpers (extend this list as you add more):
   an extension archive (allowlisted paths, plain files and the expected folders,
   never links). The installer and the build-time seed both unpack with it.
 
+- `errorDiagnostic(error)` — `packages/core/src/utils/error-diagnostic.ts`. What a
+  caught failure WAS (`{ name, code?, status? }`) and nothing of what it was
+  working on. Use it at any `catch` whose record outlives the request (a saved
+  diagnostics object, a log line) instead of keeping or logging `error.message`,
+  which can quote query words, mail text or a provider's response body.
+- `createAssistantHarness()` — `apps/desktop/test/helpers/assistant-harness.ts`.
+  The real Inbox Agent end to end for tests (real databases, history store and
+  provider call path; scripted network). Use it instead of hand-wiring
+  `InboxAssistantServiceDeps` when a test asks the agent a question. The
+  evaluation in `apps/desktop/test/eval/assistant/` is built on it; see
+  [docs/TESTING.md](docs/TESTING.md), "Inbox Agent evaluation".
+
 ## Prefer a mature library over hand-rolled / regex logic
 
 For any solved, standardized problem — parsing, dates, MIME, email addresses,

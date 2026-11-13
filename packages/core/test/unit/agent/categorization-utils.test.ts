@@ -21,7 +21,7 @@ import {
   type EnrichedEmail,
 } from '../../../src/agent/categorization-utils';
 import { formatSenderBehaviorFacts, SENDER_BEHAVIOR_GUIDANCE, SENDER_BEHAVIOR_UNAVAILABLE, type SenderBehaviorSignals } from '../../../src/agent/sender-behavior-context';
-import { classifyAIError } from '../../../src/utils/ai-error';
+import { AI_REQUEST_TIMEOUT_CODE, classifyAIError } from '../../../src/utils/ai-error';
 import { MAX_MESSAGE_BYTES } from '../../../src/utils/json-size';
 
 // This module is the whole contract with the LLM: what we SEND (prompt +
@@ -804,6 +804,20 @@ describe('callAIProvider — request timeout', () => {
     const assertion = expect(pending).rejects.toThrow(/AI request timed out/);
     await vi.advanceTimersByTimeAsync(60_000);
     await assertion;
+  });
+
+  // Breaks: the 60-second cut is reported as "could not reach the AI provider",
+  // so a model that is simply slow looks like a network problem in the Email
+  // Agent banner and in an Inbox Agent run's diagnostics.
+  it('marks its own timeout so it classifies as a timeout, not a network failure', async () => {
+    const fetchImpl = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject((init.signal as AbortSignal).reason));
+    }));
+    const pending = callAIProvider(config({ fetchImpl }), 's', 'u').catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await pending;
+    expect(error).toMatchObject({ code: AI_REQUEST_TIMEOUT_CODE });
+    expect(classifyAIError(error)).toMatchObject({ kind: 'timeout', terminal: false });
   });
 
   it('propagates the caller aborting mid-flight (pipeline shutdown)', async () => {

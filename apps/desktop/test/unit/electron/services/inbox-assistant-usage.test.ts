@@ -102,6 +102,41 @@ describe('Inbox Agent provider usage accounting', () => {
     await expect(pending).rejects.toThrow();
     expect(cancelled).toHaveBeenCalledOnce();
     expect(cancelled.mock.calls[0]![0]).toMatchObject({ status: 'cancelled', attempts: 1, tokenSource: 'unavailable' });
+    // Stopping is not a provider failure, so it carries no failure class.
+    expect(cancelled.mock.calls[0]![0]).not.toHaveProperty('errorKind');
+    expect(cancelled.mock.calls[0]![0]).not.toHaveProperty('httpStatus');
+  });
+
+  // Breaks: a failed call is saved as "failed" with no reason, so a rejected key,
+  // an empty wallet and a dropped connection cannot be told apart afterwards. Or
+  // the reason kept is the provider's message, which is its response body.
+  it('records why a call failed as a class and an HTTP status, never the provider\'s message', async () => {
+    const failedWith = async (fetchImpl: NonNullable<AIProviderConfig['fetchImpl']>) => {
+      const onUsage = vi.fn();
+      await expect(callInboxAssistantAI(config(fetchImpl), 'system', 'prompt', undefined, onUsage)).rejects.toThrow();
+      return onUsage.mock.calls[0]![0] as InboxAssistantAIUsage;
+    };
+    const refused = (status: number) => async () => new Response(JSON.stringify({ error: { message: 'PRIVATE provider detail' } }), { status });
+    expect(await failedWith(refused(401))).toMatchObject({ status: 'failed', errorKind: 'auth', httpStatus: 401 });
+    expect(await failedWith(refused(402))).toMatchObject({ status: 'failed', errorKind: 'credit', httpStatus: 402 });
+    expect(await failedWith(refused(400))).toMatchObject({ status: 'failed', errorKind: 'client', httpStatus: 400 });
+    const offline = await failedWith(async () => { throw Object.assign(new Error('fetch failed PRIVATE provider detail'), { code: 'ECONNRESET' }); });
+    expect(offline).toMatchObject({ status: 'failed', errorKind: 'network' });
+    expect(offline).not.toHaveProperty('httpStatus');
+    // A status that is not an HTTP status is not kept as one.
+    const odd = await failedWith(async () => { throw Object.assign(new Error('strange'), { status: 0 }); });
+    expect(odd).toMatchObject({ status: 'failed', errorKind: 'unknown' });
+    expect(odd).not.toHaveProperty('httpStatus');
+    for (const usage of [offline, odd, await failedWith(refused(401))]) expect(JSON.stringify(usage)).not.toContain('PRIVATE');
+  });
+
+  // Breaks: a completed call carries a stale failure class from a failed attempt
+  // that the retry recovered from.
+  it('records no failure class on a call that completed', async () => {
+    const onUsage = vi.fn();
+    await callInboxAssistantAI(config(async () => answer({ prompt_tokens: 3, completion_tokens: 1 })), 'system', 'prompt', undefined, onUsage);
+    expect(onUsage.mock.calls[0]![0]).toMatchObject({ status: 'completed' });
+    expect(onUsage.mock.calls[0]![0]).not.toHaveProperty('errorKind');
   });
 
   it('keeps retry attempts visible and reports known final counts as partial when an earlier attempt had no usage', async () => {

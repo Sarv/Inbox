@@ -92,6 +92,8 @@ export interface InboxAssistantAIWorkload {
   behaviorContextChars?: number;
 }
 
+export type InboxAssistantAIPurpose = 'plan' | 'answer' | 'repair' | 'review' | 'draft';
+
 /** Provider-reported accounting, with optional host-recorded workload. Prompts and API credentials are excluded. */
 export interface InboxAssistantAIUsage {
   id: string;
@@ -113,6 +115,11 @@ export interface InboxAssistantAIUsage {
   pricingSource?: string;
   pricingAsOf?: string;
   workload?: InboxAssistantAIWorkload;
+  /** Which step of a run made this call. Set by the host, never by the provider. */
+  purpose?: InboxAssistantAIPurpose;
+  /** Why a failed call failed, as a class (`auth`, `rate_limit`, `timeout`). Never the provider's message. */
+  errorKind?: string;
+  httpStatus?: number;
 }
 
 export interface InboxAssistantUsage {
@@ -124,6 +131,111 @@ export interface InboxAssistantUsage {
   estimatedCostUsd?: number;
   costComplete: boolean;
   currency: 'USD';
+}
+
+/** A caught failure reduced to what it was: class, machine code, HTTP status. Never its message. */
+export interface InboxAssistantErrorDiagnostic {
+  name: string;
+  code?: string;
+  status?: number;
+}
+
+export type InboxAssistantFactRejectionReason =
+  | 'invalid_fact_shape' | 'unknown_source' | 'missing_exact_quote' | 'unsupported_number_or_currency' | 'personal_sent_attribution';
+
+/** What the verifier did with one model reply. */
+export interface InboxAssistantAnswerPassDiagnostics {
+  /** `malformed`: the reply did not satisfy the JSON contract and no fact could be read from it. */
+  format: 'valid' | 'malformed';
+  factsReturned: number;
+  factsVerified: number;
+  rejected: Partial<Record<InboxAssistantFactRejectionReason, number>>;
+}
+
+export interface InboxAssistantPlanDiagnostics {
+  /** `fallback`: the model's plan was not used and host keyword rules built the search. */
+  source: 'model' | 'fallback';
+  /** Why the model's plan was not used: `invalid_json`, `invalid_plan`, or an AI failure class. */
+  failure?: string;
+  httpStatus?: number;
+  followUp: boolean;
+  intent: 'sent' | 'all';
+  quoteIntent: boolean;
+  meetingIntent: boolean;
+  invitationIntent: boolean;
+  timeWindow: boolean;
+  /** Which filters were applied, by name only. */
+  filters: string[];
+  queryCount: number;
+  topicTermCount: number;
+  participantTermCount: number;
+  requiredGroupCount: number;
+  /**
+   * The search words themselves. They are derived from the question and are
+   * saved beside it in the encrypted chat store. They are never logged, and a
+   * copied report leaves them out unless the user asks for them.
+   */
+  terms: {
+    queries: string[];
+    entityTerms: string[];
+    topicTerms: string[];
+    participantTerms: string[];
+    requiredTopicGroups: string[][];
+    timeWindow?: string;
+  };
+}
+
+export interface InboxAssistantAccountDiagnostics {
+  accountId: string;
+  status: 'searched' | 'unavailable';
+  /** Why the account could not be fully searched. */
+  failure?: InboxAssistantErrorDiagnostic;
+  searches: number;
+  matchedMessages: number;
+  reviewedMessages: number;
+  evidenceItems: number;
+  evidenceChars: number;
+  missingBodies: number;
+  bodyDownloadFailures: number;
+  attachmentsRead: number;
+  attachmentsSkipped: number;
+  /** Attachments that were opened and could not be read, counted by reason. */
+  attachmentFailures: Record<string, number>;
+  truncated: boolean;
+  durationMs: number;
+}
+
+/**
+ * Why a run ended the way it did. Saved with the run in the encrypted chat
+ * store so a bad answer can be explained afterwards. Holds ids, classes, counts
+ * and durations, plus the search words under `plan.terms`. Never mail text,
+ * model output or an error message.
+ */
+export interface InboxAssistantRunDiagnostics {
+  version: 1;
+  /** Which path handled the request. `refused`: the host declined it before doing any work. */
+  route?: 'capability' | 'review' | 'mail_command' | 'search' | 'refused';
+  reviewKind?: string;
+  plan?: InboxAssistantPlanDiagnostics;
+  accounts?: InboxAssistantAccountDiagnostics[];
+  answer?: {
+    /** No model call was made because the search found nothing to answer from. */
+    skipped?: 'no_evidence';
+    first?: InboxAssistantAnswerPassDiagnostics;
+    repair?: {
+      reason: 'malformed' | 'rejected_facts' | 'no_facts';
+      /** The repair call was not made: no collected source was relevant enough to retry with. */
+      skipped?: 'no_relevant_sources';
+      sources: number;
+      pass?: InboxAssistantAnswerPassDiagnostics;
+      factsRecovered: number;
+    };
+    factsFinal: number;
+  };
+  outcome?: 'verified' | 'related' | 'no_evidence' | 'capability' | 'review' | 'refused' | 'failed' | 'stopped';
+  /** Set when the run threw. `stage` is the last step that had started. */
+  failure?: { stage: 'route' | 'plan' | 'search' | 'answer' | 'review'; error: InboxAssistantErrorDiagnostic };
+  durationMs?: number;
 }
 
 export type InboxAssistantRunStatus = 'pending' | 'running' | 'completed' | 'stopped' | 'failed';
@@ -142,6 +254,7 @@ export interface InboxAssistantRunRecord {
   error?: string;
   usage?: InboxAssistantUsage;
   draft?: InboxAssistantDraft;
+  diagnostics?: InboxAssistantRunDiagnostics;
 }
 
 export interface InboxAssistantExchange {
@@ -161,6 +274,7 @@ export interface InboxAssistantExchange {
   updatedAt?: number;
   error?: string;
   usage?: InboxAssistantUsage;
+  diagnostics?: InboxAssistantRunDiagnostics;
 }
 
 export interface InboxAssistantRequest {

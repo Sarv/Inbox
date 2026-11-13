@@ -1,17 +1,18 @@
 import { randomUUID } from 'node:crypto';
 
-import { waitForAbortableOperation } from '@sarvinbox/core';
+import { createLogger, errorDiagnostic, waitForAbortableOperation } from '@sarvinbox/core';
 
-import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantAIWorkload, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
+import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantAIWorkload, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord, InboxAssistantAIPurpose, InboxAssistantRunDiagnostics } from '../../src/types/inbox-assistant';
 import type { InboxAssistantReview, InboxAssistantReviewAutomation, InboxAssistantReviewDateFilter, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest, LocalCalendarPreferences } from '../../src/types/local-calendar';
 import { readInboxAssistantAIWorkload } from '../../src/utils/inbox-assistant-workload';
 
 import { isMeetingDraft, meetingAvailabilityRequests, recheckMeetingAvailability } from './assistant-calendar';
 import { applyInboxAssistantReview, inboxAssistantHeaderMatchedItems, inboxAssistantReadCommandReference, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps } from './inbox-assistant-actions';
-import { answerInboxAssistant, planInboxAssistantSearch } from './inbox-assistant-answer';
+import { answerInboxAssistant, INBOX_ASSISTANT_OUTPUT_TOKENS, planInboxAssistantSearch } from './inbox-assistant-answer';
 import { inboxAssistantCapabilityReply } from './inbox-assistant-capabilities';
 import { buildInboxAssistantContext } from './inbox-assistant-context';
+import { inboxAssistantDegradedStages, inboxAssistantRunSummary } from './inbox-assistant-diagnostics';
 import { generateInboxAssistantDraft } from './inbox-assistant-draft';
 import type { InboxAssistantHistoryStore } from './inbox-assistant-history';
 import { InboxAssistantRecommendationCache } from './inbox-assistant-recommendation-cache';
@@ -46,6 +47,9 @@ interface ActiveRun {
   finish(): void;
   reviewBudget?: { calls: number; inputChars: number; reason?: string };
 }
+
+// Content-free lines only: see inbox-assistant-diagnostics.ts.
+const logger = createLogger('InboxAssistant');
 
 const AUTOMATIC_REVIEW_LIMITS = { batches: 10, aiCalls: 20, inputChars: 500_000, durationMs: 10 * 60_000 };
 
@@ -243,6 +247,7 @@ export class InboxAssistantService {
       const question: InboxAssistantExchange = { ...(previous ?? { id: run.record.exchangeId, chatId: run.chatId, question: run.record.question,
         accountIds: run.record.accountIds, createdAt: run.record.startedAt, answer: { text: '', sources: [], coverage: [], warnings: [] } }),
         requestId: run.id, status: run.record.status, updatedAt: record.updatedAt, activities: record.activities, ...(record.usage ? { usage: record.usage } : {}),
+        ...(record.diagnostics ? { diagnostics: record.diagnostics } : {}),
         ...(run.record.error ? { error: run.record.error } : {}) };
       exchanges = previous ? exchanges.map(value => value.id === question.id ? question : value) : [...exchanges, question];
     }
@@ -267,7 +272,8 @@ export class InboxAssistantService {
     run.record.updatedAt = run.record.kind === 'action' && exchange
       ? Math.max(Date.now(), (exchange.updatedAt ?? exchange.createdAt) + 1) : Date.now();
     const saved = exchange ? run.record.kind === 'question' ? { ...exchange, requestId: run.id, status: run.record.status, updatedAt: run.record.updatedAt,
-      activities: [...run.record.activities], ...(run.record.error ? { error: run.record.error } : {}), ...(run.record.usage ? { usage: run.record.usage } : {}) } : { ...exchange, updatedAt: run.record.updatedAt } : undefined;
+      activities: [...run.record.activities], ...(run.record.error ? { error: run.record.error } : {}), ...(run.record.usage ? { usage: run.record.usage } : {}),
+      ...(run.record.diagnostics ? { diagnostics: run.record.diagnostics } : {}) } : { ...exchange, updatedAt: run.record.updatedAt } : undefined;
     this.persistRun(run, saved);
     return saved;
   }
@@ -286,7 +292,7 @@ export class InboxAssistantService {
     } finally { release(); }
   }
 
-  private callRunAI(run: ActiveRun, prompt: string, signal: AbortSignal, maxOutputTokens?: number, workload?: InboxAssistantAIWorkload): Promise<string> {
+  private callRunAI(run: ActiveRun, prompt: string, signal: AbortSignal, maxOutputTokens?: number, workload?: InboxAssistantAIWorkload, purpose?: InboxAssistantAIPurpose): Promise<string> {
     signal.throwIfAborted();
     if (run.reviewBudget) {
       const budget = run.reviewBudget;
@@ -301,8 +307,9 @@ export class InboxAssistantService {
     const onUsage = (usage: InboxAssistantAIUsage) => {
       // Only the host's actual prepared batch describes workload. Provider
       // accounting remains unchanged and cannot supply these diagnostic counts.
-      const { workload: _providerWorkload, ...reported } = usage;
-      run.record.usage = aggregateInboxAssistantUsage([...(run.record.usage?.calls ?? []), { ...reported, ...(trustedWorkload ? { workload: trustedWorkload } : {}) }]);
+      // The step name is the host's too: which of a run's calls this was.
+      const { workload: _providerWorkload, purpose: _providerPurpose, ...reported } = usage;
+      run.record.usage = aggregateInboxAssistantUsage([...(run.record.usage?.calls ?? []), { ...reported, ...(trustedWorkload ? { workload: trustedWorkload } : {}), ...(purpose ? { purpose } : {}) }]);
       // Reported accounting can arrive during cancellation. Keep the saved
       // receipt on its originating run without waking or selecting that chat.
       if (run.generation === (this.generations.get(run.chatId) ?? 0)) this.persistRun(run);
@@ -487,7 +494,7 @@ export class InboxAssistantService {
         const run = [...this.running.values()].find(value => value.controller.signal === signal);
         if (!run) throw new Error('This Inbox Agent request is no longer running.');
         expectedAccounts?.forEach(account => assertAccount(account.id));
-        return this.callRunAI(run, prompt, effective, 4_000, workload);
+        return this.callRunAI(run, prompt, effective, 4_000, workload, 'review');
       },
       setRead: async (accountId, ids, read, context) => {
         assertAccount(accountId);
@@ -738,7 +745,7 @@ export class InboxAssistantService {
       report({ stage: 'answer', status: 'running', message: 'Preparing email draft', detail: account.email });
       const callAI = (prompt: string) => {
         assertCurrent();
-        return this.callRunAI(run, prompt, controller.signal);
+        return this.callRunAI(run, prompt, controller.signal, undefined, undefined, 'draft');
       };
       const draft = await waitForAbortableOperation(
         generateInboxAssistantDraft(chat, account, request.instructions ?? '', callAI, controller.signal, availability), controller.signal,
@@ -788,7 +795,7 @@ export class InboxAssistantService {
     const context = buildInboxAssistantContext(history, request);
     const { historyContext } = context;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error('Search took too long. Narrow the question or date range and try again.')), 300_000);
+    const timeout = setTimeout(() => controller.abort(Object.assign(new Error('Search took too long. Narrow the question or date range and try again.'), { code: 'ASSISTANT_TIMEOUT' })), 300_000);
     timeout.unref?.();
     const generation = this.generations.get(request.chatId) ?? 0;
     const assertCurrent = () => {
@@ -798,9 +805,20 @@ export class InboxAssistantService {
     };
     const run = this.beginRequest(request.requestId, request.chatId, controller, 'question', request.question, request.accountIds, randomUUID());
     const report = (progress: InboxAssistantProgress) => this.reportRun(run, progress, onActivity);
+    // Why this run ends the way it does. Saved with the run, so every progress
+    // write also saves how far it got; see InboxAssistantRunDiagnostics.
+    const diagnostics: InboxAssistantRunDiagnostics = { version: 1 };
+    run.record.diagnostics = diagnostics;
+    let stage: NonNullable<InboxAssistantRunDiagnostics['failure']>['stage'] = 'route';
+    const conclude = (outcome: NonNullable<InboxAssistantRunDiagnostics['outcome']>) => {
+      diagnostics.outcome = outcome;
+      diagnostics.durationMs = Math.max(0, Date.now() - run.record.startedAt);
+    };
     try {
       const capabilityReply = !request.reviewKind && !request.continueReviewId ? inboxAssistantCapabilityReply(request.question) : undefined;
       if (capabilityReply) {
+        diagnostics.route = 'capability';
+        conclude('capability');
         const exchange: InboxAssistantExchange = { id: run.record.exchangeId!, chatId: request.chatId, question: request.question,
           accountIds: request.accountIds, createdAt: run.record.startedAt,
           answer: { text: capabilityReply, sources: [], coverage: [], warnings: [] } };
@@ -809,7 +827,7 @@ export class InboxAssistantService {
       }
       if (historyContext) report({ stage: 'context', status: 'done', message: 'Loaded conversation context', detail: 'Earlier questions supply context; original emails and attachments are checked again for facts.' });
       report({ stage: 'search', status: 'running', message: 'Preparing email search', detail: `Searching ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}, including Sent and Archive.` });
-      const callAI = (prompt: string) => { assertCurrent(); return this.callRunAI(run, prompt, controller.signal, 8_000); };
+      const callAI = (prompt: string, purpose: InboxAssistantAIPurpose = 'answer') => { assertCurrent(); return this.callRunAI(run, prompt, controller.signal, INBOX_ASSISTANT_OUTPUT_TOKENS.answer, undefined, purpose); };
       const command = parseInboxAssistantReadCommand(request.question);
       const datedReview = parseInboxAssistantReviewDate(request.question, this.deps.now?.() ?? Date.now());
       const requestedReviewKind = request.reviewKind ?? inboxAssistantReviewIntent(request.question);
@@ -864,6 +882,9 @@ export class InboxAssistantService {
           reviewPreferences = prior.reviewPreferences;
           dateFilter = prior.dateFilter ? { ...prior.dateFilter } : undefined;
         }
+        diagnostics.route = command ? 'mail_command' : 'review';
+        diagnostics.reviewKind = reviewKind;
+        stage = 'review';
         report({ stage: 'search', status: 'running', message: command ? 'Finding matching emails' : 'Reviewing unread conversations', detail: command ? `Matching “${command.scope.query}” in ${command.scope.field === 'any' ? 'sender, subject and original body' : command.scope.field}. Preparing mark as ${command.kind === 'mark_unread' ? 'unread' : 'read'}.` : `${dateFilter ? `Unread emails ${inboxAssistantReviewDateLabel(dateFilter)}. ` : ''}Including uncategorized mail and checking complete conversations.` });
         const reviewCacheIdentity = this.deps.reviewCacheIdentity?.();
         const review = await waitForAbortableOperation(prepareInboxAssistantReview(selected, reviewKind, this.reviewDeps(controller.signal), controller.signal, report, { excludeThreadIds: excludedThreads,
@@ -901,25 +922,33 @@ export class InboxAssistantService {
         const unverified = review.items.filter(item => item.needsRetry).length;
         report({ stage: 'complete', status: unverified ? 'warning' : 'done', message: unverified ? 'Unread review needs another attempt' : command ? 'Matching email review ready' : 'Unread review ready',
           detail: unverified ? `${review.items.length - unverified} conversations reviewed; ${unverified} stay unread until the AI review is retried.` : `${review.items.length} conversations reviewed.` });
+        conclude('review');
         return this.settleRun(run, undefined, exchange)!;
       }
+      diagnostics.route = 'search';
+      stage = 'plan';
       const timeZone = researchTimeZone(this.deps);
       const plan = await planInboxAssistantSearch(context.contextualizedQuestion, prompt => {
         assertCurrent();
-        return this.callRunAI(run, prompt, controller.signal, 1_600);
+        return this.callRunAI(run, prompt, controller.signal, INBOX_ASSISTANT_OUTPUT_TOKENS.plan, undefined, 'plan');
       }, {
         historyContext, topicTerms: context.topicTerms, participantTerms: context.participantTerms, intent: context.intent,
         nowMs: this.deps.now?.() ?? Date.now(),
-        timeZone,
+        timeZone, diagnostics,
       });
+      // A plan call interrupted by Stop is not a planner failure. The fallback
+      // it produced is never searched, so do not record it as one.
+      if (controller.signal.aborted) delete diagnostics.plan;
       assertCurrent();
+      stage = 'search';
       const research = await waitForAbortableOperation(researchInboxAssistant(selected, plan, this.deps, controller.signal, {
-        onProgress: report, sourceRefs: context.sourceRefs,
+        onProgress: report, sourceRefs: context.sourceRefs, diagnostics,
       }), controller.signal);
       assertCurrent();
+      stage = 'answer';
       report({ stage: 'answer', status: 'running', message: 'Preparing answer from sources', detail: `${research.evidence.length} source excerpts collected.` });
       const answerEvidence = research.evidence.map(source => ({ ...source, dateTimeZone: timeZone }));
-      const grounded = await answerInboxAssistant(request.question, answerEvidence, research.coverage, callAI, historyContext, plan.scope);
+      const grounded = await answerInboxAssistant(request.question, answerEvidence, research.coverage, callAI, historyContext, plan.scope, diagnostics);
       assertCurrent();
       const used = new Set(grounded.sourceIds);
       // Unverified originals remain inspectable as explicitly related mail.
@@ -937,16 +966,30 @@ export class InboxAssistantService {
       report({ stage: 'complete', status: used.size ? 'done' : 'warning', message: used.size ? 'Answer verified against sources' : sources.length ? 'Related emails found; answer not verified' : 'No supporting email found',
         detail: used.size ? `${sources.length} cited ${sources.length === 1 ? 'source' : 'sources'}.`
           : sources.length ? 'Related originals are available to inspect. They do not support a verified answer.' : 'Check the search coverage and account scope before concluding that no email exists.' });
+      conclude(used.size ? 'verified' : sources.length ? 'related' : 'no_evidence');
       return this.settleRun(run, undefined, exchange)!;
     } catch (error) {
       if (!controller.signal.aborted && generation === (this.generations.get(request.chatId) ?? 0)) {
         report({ stage: 'complete', status: 'warning', message: 'Could not finish this question', detail: error instanceof Error ? error.message : 'Please try again.' });
       }
+      // Stopping is the user's choice, and a host refusal ("which emails?") is
+      // an answer. Only a run that broke records a failure, and only its class.
+      if (run.cancelled) conclude('stopped');
+      else if (!diagnostics.route) { diagnostics.route = 'refused'; conclude('refused'); }
+      else { diagnostics.failure = { stage, error: errorDiagnostic(error) }; conclude('failed'); }
       this.settleRun(run, error);
       throw error;
     } finally {
       clearTimeout(timeout);
       this.finishRequest(controller);
+      this.logRun(run, diagnostics);
     }
+  }
+
+  /** One content-free line per question, and one more when a step was degraded. */
+  private logRun(run: ActiveRun, diagnostics: InboxAssistantRunDiagnostics): void {
+    logger.info(inboxAssistantRunSummary(run.id, run.record.status, diagnostics, run.record.usage));
+    const degraded = inboxAssistantDegradedStages(diagnostics, run.record.usage);
+    if (degraded.length) logger.warn(`run=${run.id} degraded: ${degraded.join(' ')}`);
   }
 }

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Inbox Agent can tell you how an answer was produced.** Open **View activity**
+  on any answer to see whether the AI planned the search or keyword rules did,
+  how many emails were found and read, and which statements were left out and
+  why. **Copy diagnostics** puts a report on the clipboard that you can send
+  when an answer is wrong. The report contains counts and error types, not your
+  question, the answer or any email. Your search words are added only if you
+  tick the box.
+
 ### Fixed
 - **Typing to Inbox Agent can no longer trash or archive the email you are
   reading.** With the chat beside your inbox, the first keys of a follow-up
