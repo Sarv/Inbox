@@ -4,7 +4,7 @@
 // imports at all), so the renderer shares the one implementation. Alias is
 // declared in vite.config.ts, vitest.config.ts and tsconfig.json.
 import { conversationFoldersOf, isDraftRow } from '@sarvinbox/core/conversation-membership';
-import { classifyFolder } from '@sarvinbox/core/folder-mapping';
+import { classifyFolder, isStarredFolder } from '@sarvinbox/core/folder-mapping';
 import { createLogger } from '@sarvinbox/core/logger';
 
 import { addTag, removeTag, hasTag } from '../../utils/tags';
@@ -894,9 +894,10 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     const newSearchResults = setStarAcrossThread(searchResults, emailId, starred);
     if (newSearchResults) updates.searchResults = newSearchResults;
 
-    const starredFolderIndex = folders.findIndex(f =>
-      f.path.toLowerCase().includes('starred') || f.path.includes('[Gmail]/Starred')
-    );
+    // The provider's Starred mailbox, by the same rule that decides what opening
+    // a folder lists. A substring test bumped the count of a user folder such as
+    // "Starred clients" (when listed first) instead of the real Starred.
+    const starredFolderIndex = folders.findIndex(isStarredFolder);
     if (starredFolderIndex !== -1) {
       const newFolders = [...folders];
       const currentTotal = newFolders[starredFolderIndex].totalCount || 0;

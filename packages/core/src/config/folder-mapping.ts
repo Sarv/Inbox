@@ -567,6 +567,7 @@ export const isDraftsFolder  = (f: ClassifiableFolder) => classifyFolder(f) === 
 export const isTrashFolder   = (f: ClassifiableFolder) => classifyFolder(f) === 'trash';
 export const isSpamFolder    = (f: ClassifiableFolder) => classifyFolder(f) === 'spam';
 export const isArchiveFolder = (f: ClassifiableFolder) => classifyFolder(f) === 'archive';
+export const isStarredFolder = (f: ClassifiableFolder) => classifyFolder(f) === 'starred';
 
 /**
  * True for an RFC-6154 `\All` "all messages" folder — Gmail's `[Gmail]/All Mail`.
