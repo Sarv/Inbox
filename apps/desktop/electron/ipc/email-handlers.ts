@@ -6,7 +6,7 @@
 
 import path from 'path';
 
-import { classifyFolder, createDeferredFetchError, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
+import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, isStarredFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
 import { app, ipcMain, dialog, shell, type IpcMainInvokeEvent } from 'electron';
 import ICAL from 'ical.js';
 
@@ -630,7 +630,7 @@ export function registerEmailHandlers(): void {
       // Server stars reach these rows through the folder sync's syncFlags (\Flagged
       // ⇄ the `starred` tag, with pending local ops left alone), which opening the
       // folder already runs — so no second, hand-rolled star pass belongs here.
-      if (folder && classifyFolder(folder) === 'starred') {
+      if (folder && isStarredFolder(folder)) {
         logger.info('[Main] Loading starred emails (virtual folder)');
 
         const emails = await storage.searchEmails({

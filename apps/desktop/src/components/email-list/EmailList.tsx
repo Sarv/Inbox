@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppearance } from '../../appearance';
-import { classifyFolder, isDraftsFolder } from '../../config/folder-mapping';
+import { classifyFolder, isDraftsFolder, isStarredFolder } from '../../config/folder-mapping';
 import { SECTION_FILTER_LABELS, SETTINGS_KEY, DEFAULT_SECTIONS } from '../../config/inbox-types';
 import type { SectionFilter } from '../../config/inbox-types';
 import { useEmailStore } from '../../store/email-store';
@@ -203,8 +203,10 @@ export function EmailList() {
   // True while this folder's mail is still resolving (global sync or this
   // folder's own sync) — lets empty sections show "checking…" not "none".
   const isViewSyncing = syncing || (selectedFolder ? syncingFolders.has(selectedFolder.path) : false);
-  const isStarredFolder = selectedFolder?.path?.toLowerCase().includes('starred') ||
-                          selectedFolder?.path?.includes('[Gmail]/Starred');
+  // Must agree with the main process's emails:list, which lists only starred
+  // mail for this same classification — a looser test here hid the real mail of
+  // any folder whose name merely contained "starred".
+  const viewIsStarred = !!selectedFolder && isStarredFolder(selectedFolder);
   const isImportantFolder = selectedFolder?.path?.toLowerCase().includes('important') ||
                             selectedFolder?.path?.includes('[Gmail]/Important');
   const isTrashFolder = !!selectedFolder && classifyFolder(selectedFolder) === 'trash';
@@ -231,7 +233,7 @@ export function EmailList() {
   // Filter emails
   const displayEmails = useMemo(() => {
     let baseEmails = searchQuery ? searchResults : emails;
-    if (isStarredFolder) {
+    if (viewIsStarred) {
       baseEmails = baseEmails.filter(email => (email.tags || '').includes('|starred|'));
     }
     // Active search filter with a live state token (is:unread / is:starred):
@@ -241,7 +243,7 @@ export function EmailList() {
       baseEmails = baseEmails.filter(email => emailMatchesLiveSearchFilter(email, searchFilter!));
     }
     return baseEmails;
-  }, [searchQuery, searchResults, emails, isStarredFolder, searchFilter]);
+  }, [searchQuery, searchResults, emails, viewIsStarred, searchFilter]);
 
   const isSearching = searchQuery && searching;
 

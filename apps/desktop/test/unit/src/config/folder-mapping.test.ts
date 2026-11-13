@@ -1,6 +1,7 @@
 import {
   categoryNameSlug as coreCategoryNameSlug,
   isSarvHost as coreIsSarvHost,
+  isStarredFolder as coreIsStarredFolder,
   matchKnownCategory as coreMatchKnownCategory,
 } from '@sarvinbox/core';
 import { describe, it, expect } from 'vitest';
@@ -24,6 +25,7 @@ import {
   isSentFolder,
   isSarvHost,
   isSpamFolder,
+  isStarredFolder,
   isSystemCategoryFolder,
   isTrashFolder,
   shouldHideFolder,
@@ -497,6 +499,26 @@ describe('renderer copies agree with @sarvinbox/core', () => {
     ];
     for (const host of hosts) {
       expect([host, isSarvHost(host)]).toEqual([host, coreIsSarvHost(host)]);
+    }
+  });
+
+  // Breaks if the renderer and main process disagree on which folder is the
+  // starred one: main then lists a folder's own mail while EmailList filters it
+  // down to starred rows (or the reverse), so the list and its count disagree.
+  it('isStarredFolder decides identically, and never by substring', () => {
+    const cases: Array<[{ path: string; specialUse?: string }, boolean]> = [
+      [{ path: '[Gmail]/Starred' }, true],
+      [{ path: 'Starred' }, true],
+      [{ path: 'Flagged' }, true],
+      [{ path: 'INBOX/Starred' }, true],
+      [{ path: '[Gmail]/Markiert', specialUse: '\\Flagged' }, true],
+      [{ path: 'Startups' }, false],
+      [{ path: 'Clients/Restart' }, false],
+      [{ path: 'Starred clients' }, false],
+      [{ path: 'INBOX' }, false],
+    ];
+    for (const [folder, expected] of cases) {
+      expect([folder.path, isStarredFolder(folder), coreIsStarredFolder(folder)]).toEqual([folder.path, expected, expected]);
     }
   });
 
