@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was no supporting mail. Each word you name now has to appear, in any order.
   When no email mentions everything you named, the agent shows the closest
   matches and says so.
+- **Inbox Agent answers "how much" questions instead of dropping the amount.**
+  Correct amounts were thrown away as unverifiable when an invoice wrote
+  "Total Amount(INR): 18,446.00", when a PayPal receipt wrote "$ 34.95 USD",
+  or when the answer gave a total across several receipts or card alerts. These
+  amounts are now checked and shown. A total is shown only when the answer
+  also lists each amount it adds, so you can see what was counted.
 - **Typing to Inbox Agent can no longer trash or archive the email you are
   reading.** With the chat beside your inbox, the first keys of a follow-up
   question could run as mail shortcuts on the open email. The message box now
