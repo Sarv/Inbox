@@ -1,15 +1,10 @@
 import {
-  Inbox,
   Layers,
   Send,
-  Archive,
-  Trash2,
   RefreshCw,
   Loader2,
   Star,
-  FileText,
   Mail,
-  Ban,
   Folder,
   Plus,
   Square,
@@ -43,6 +38,7 @@ import { countDue, subscribeFollowUps, useFollowUpsStore } from '../store/follow
 
 import { AccountSwitcher } from './AccountSwitcher';
 import { getConnectionBarStatus } from './connection-status';
+import { FolderIcon } from './FolderIcon';
 import { quotaRowState } from './quota-format';
 import { SidebarLabels } from './SidebarLabels';
 import { Tooltip } from './Tooltip';
@@ -234,32 +230,6 @@ export function Sidebar() {
 
   const handleCompose = () => {
     openCompose('new');
-  };
-
-  // Gmail-style folder icons
-  const getFolderIcon = (path: string) => {
-    const lowerPath = path.toLowerCase();
-
-    // Gmail specific folders
-    if (lowerPath.includes('starred') || lowerPath.includes('star'))
-      return <Star className="h-4 w-4 text-yellow-500" />;
-    if (lowerPath.includes('important'))
-      return <ChevronRight className="h-4 w-4 text-yellow-500 fill-yellow-500" />;
-    if (lowerPath.includes('all mail'))
-      return <Mail className="h-4 w-4" />;
-
-    // Standard folders
-    if (lowerPath === 'inbox') return <Inbox className="h-4 w-4" />;
-    if (lowerPath.includes('sent')) return <Send className="h-4 w-4" />;
-    if (lowerPath.includes('draft')) return <FileText className="h-4 w-4" />;
-    if (lowerPath.includes('archive')) return <Archive className="h-4 w-4" />;
-    if (lowerPath.includes('trash') || lowerPath.includes('deleted'))
-      return <Trash2 className="h-4 w-4" />;
-    if (lowerPath.includes('spam') || lowerPath.includes('junk'))
-      return <Ban className="h-4 w-4" />;
-
-    // Default folder icon for labels
-    return <Folder className="h-4 w-4" />;
   };
 
   // Categorize folders into system and user-defined (labels) using the shared
@@ -486,7 +456,7 @@ export function Sidebar() {
             : 'hover:bg-accent/50'
         }`}
       >
-        {getFolderIcon(folder.path)}
+        <FolderIcon folder={folder} />
         <div className="flex-1 min-w-0">
           <div className="text-sm truncate">
             {displayName}

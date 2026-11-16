@@ -22,6 +22,7 @@ export {
   isTrashFolder,
   isSpamFolder,
   isArchiveFolder,
+  isStarredFolder,
   isAllMailSuperset,
   isOwnMailFolder,
   isSentMailFolder,

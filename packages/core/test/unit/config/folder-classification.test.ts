@@ -8,6 +8,7 @@ import {
   folderTypeMatchStrength,
   isTrashFolder,
   isSpamFolder,
+  isStarredFolder,
   isOwnMailFolder,
   isSentMailFolder,
 } from '../../../src/config/folder-mapping';
@@ -466,6 +467,32 @@ describe('isSentMailFolder', () => {
   it('never matches a word that merely contains "sent", nor Drafts', () => {
     for (const path of ['Presentations', 'Consent Forms', 'INBOX.Unsent', 'Drafts', 'INBOX']) {
       expect([path, isSentMailFolder({ path })]).toEqual([path, false]);
+    }
+  });
+});
+
+describe('isStarredFolder — exact, not substring', () => {
+  // Breaks if a real starred mailbox stops being recognised: opening it shows
+  // the folder's raw contents instead of the starred list, and the sidebar
+  // drops its star. A localised Gmail Starred is recognisable only by \Flagged.
+  it('recognises the real starred folders, localised ones by SPECIAL-USE', () => {
+    for (const folder of [
+      { path: '[Gmail]/Starred' },
+      { path: 'Starred' },
+      { path: 'Flagged' },
+      { path: 'INBOX/Starred' },
+      { path: '[Gmail]/Markiert', specialUse: '\\Flagged' },
+    ]) {
+      expect([folder.path, isStarredFolder(folder)]).toEqual([folder.path, true]);
+    }
+  });
+
+  // Breaks if the old `path.includes('star')` test comes back: a user folder
+  // whose name merely contains "star" opens as the starred list and its own
+  // mail disappears from view.
+  it('does not treat a folder that merely contains "star" as starred', () => {
+    for (const path of ['Startups', 'Clients/Restart', 'Mustard', 'Stars', 'Starred clients', 'Unstarred']) {
+      expect([path, isStarredFolder({ path })]).toEqual([path, false]);
     }
   });
 });

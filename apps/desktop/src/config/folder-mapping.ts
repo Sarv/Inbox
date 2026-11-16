@@ -211,6 +211,7 @@ export const isDraftsFolder  = (f: ClassifiableFolder) => classifyFolder(f) === 
 export const isTrashFolder   = (f: ClassifiableFolder) => classifyFolder(f) === 'trash';
 export const isSpamFolder    = (f: ClassifiableFolder) => classifyFolder(f) === 'spam';
 export const isArchiveFolder = (f: ClassifiableFolder) => classifyFolder(f) === 'archive';
+export const isStarredFolder = (f: ClassifiableFolder) => classifyFolder(f) === 'starred';
 
 /**
  * Canonical sidebar labels for the standard folder roles, so a mailbox shows
