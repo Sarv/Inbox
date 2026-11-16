@@ -29,7 +29,7 @@ import { createEvalHarness, squash } from './seed';
  */
 
 type Mode = 'floor' | 'ceiling';
-interface Outcome { route: string; routeOk: boolean; retrievalOk: boolean | null; problems: string[] }
+interface Outcome { route: string; routeOk: boolean; retrievalOk: boolean | null; problems: string[]; broadened?: boolean }
 
 let harness: AssistantHarness;
 const scores = new Map<Mode, Array<{ item: EvalCase; outcome: Outcome }>>([['floor', []], ['ceiling', []]]);
@@ -76,7 +76,7 @@ async function run(item: EvalCase, mode: Mode): Promise<Outcome> {
           + `window ${plan.terms.timeWindow ?? 'none'}, filters ${JSON.stringify(plan.filters)}, queries ${JSON.stringify(plan.terms.queries)}` : ''));
     }
   }
-  return { route, routeOk, retrievalOk, problems };
+  return { route, routeOk, retrievalOk, problems, ...(exchange?.diagnostics?.searchBroadened ? { broadened: true } : {}) };
 }
 
 beforeAll(async () => { harness = await createEvalHarness(); }, 120_000);
@@ -88,7 +88,9 @@ afterAll(async () => {
     const retrieval = results.filter(result => result.outcome.retrievalOk !== null);
     process.stdout.write(`[assistant-eval] ${mode.padEnd(7)} route ${results.filter(result => result.outcome.routeOk).length}/${results.length}`
       + `  retrieval ${retrieval.filter(result => result.outcome.retrievalOk).length}/${retrieval.length}`
-      + `  known gaps ${results.filter(result => KNOWN_GAPS[result.item.id]?.[mode]).length}\n`);
+      + `  known gaps ${results.filter(result => KNOWN_GAPS[result.item.id]?.[mode]).length}`
+      // Answered only after dropping a topic the question named: found, but by the weaker search.
+      + `  broadened ${results.filter(result => result.outcome.broadened).map(result => result.item.id).join(', ') || 'none'}\n`);
   }
 });
 

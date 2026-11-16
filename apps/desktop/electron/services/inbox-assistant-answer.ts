@@ -7,7 +7,7 @@ import { dateInTimeZone } from '../../src/utils/local-calendar';
 
 import { compactInboxAssistantContent } from './inbox-assistant-content';
 import { INBOX_ASSISTANT_FOLLOWUP_SEPARATOR, inboxAssistantExplicitIntent, inboxAssistantParticipantTerms, inboxAssistantTopicTerms } from './inbox-assistant-context';
-import { meaningfulInboxAssistantTerms, matchesInboxAssistantTerm, resolveInboxAssistantSearchScope, type InboxAssistantSearchScope } from './inbox-assistant-search-scope';
+import { matchesAllInboxAssistantWords, meaningfulInboxAssistantTerms, matchesInboxAssistantTerm, resolveInboxAssistantSearchScope, type InboxAssistantSearchScope } from './inbox-assistant-search-scope';
 
 export interface InboxAssistantSearchPlan {
   queries: string[];
@@ -165,9 +165,14 @@ function literalTopicGroups(question: string, plan: InboxAssistantSearchPlan): s
   const phrases = [...latest.matchAll(/\b[A-Z][\p{L}\p{N}-]*(?:\s+[A-Z][\p{L}\p{N}-]*){1,5}\b/gu)].map(match => match[0]);
   const qualified = [...latest.matchAll(/\b(?:for|regarding|about)\s+([^\n?()]{2,120})/gi)]
     .map(match => match[1]!.split(/\b(?:to|from|did|have|has|was|were|in|on|during|before|after|since|between|with)\b/i)[0]!);
+  // Each required topic is reduced to its meaningful words before anything
+  // else: "the SCADA upgrade" is required as SCADA + upgrade, never with "the";
+  // "Karnataka's GCC policy" as Karnataka + GCC + policy; a capitalised opener
+  // such as "Has Wipro" as Wipro. Retrieval then requires those words, in any
+  // order, as the search index does.
   const candidates = distinct([...(plan.topicTerms ?? []), ...plan.entityTerms, ...phrases, ...qualified]
-    .map(term => term.trim().split(/\s+/).filter(word => !generic.has(word.toLowerCase())).join(' '))
-    .filter(term => !/^\d[\d.-]*$/.test(term) && meaningfulInboxAssistantTerms([term]).length && matchesInboxAssistantTerm(latest, term)
+    .map(term => meaningfulInboxAssistantTerms([term.trim().split(/\s+/).filter(word => !generic.has(word.toLowerCase())).join(' ')])[0] ?? '')
+    .filter(term => term && !/^\d[\d.-]*$/.test(term) && matchesAllInboxAssistantWords(latest, term)
       && !people.some(person => person.toLowerCase() === term.toLowerCase())));
   const longest = candidates.filter(term => !candidates.some(other => other.length > term.length && matchesInboxAssistantTerm(other, term)));
   const groups = longest.map(term => [term]);

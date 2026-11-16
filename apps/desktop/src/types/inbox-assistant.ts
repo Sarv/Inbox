@@ -217,6 +217,13 @@ export interface InboxAssistantRunDiagnostics {
   route?: 'capability' | 'review' | 'mail_command' | 'search' | 'refused';
   reviewKind?: string;
   plan?: InboxAssistantPlanDiagnostics;
+  /**
+   * The search was widened after its first pass, which found mail and turned
+   * all of it away. `required_topics`: no email mentioned every topic the
+   * question named. `model_topics`: no email matched the model's topic in full,
+   * so its entity terms stood in. `accounts` describes the widened search.
+   */
+  searchBroadened?: Array<'required_topics' | 'model_topics'>;
   accounts?: InboxAssistantAccountDiagnostics[];
   answer?: {
     /** No model call was made because the search found nothing to answer from. */

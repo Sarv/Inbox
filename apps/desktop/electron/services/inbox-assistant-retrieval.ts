@@ -7,7 +7,7 @@ import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssista
 import type { AssistantAttachmentResult } from './assistant-attachment-types';
 import type { InboxAssistantSearchPlan } from './inbox-assistant-answer';
 import type { UnreadReviewBehaviorContext } from './inbox-assistant-review-behavior';
-import { matchesInboxAssistantTerm, meaningfulInboxAssistantTerms } from './inbox-assistant-search-scope';
+import { inboxAssistantTermWords, matchesInboxAssistantTerm, meaningfulInboxAssistantTerms } from './inbox-assistant-search-scope';
 
 export type AssistantResearchStorage = Pick<SQLiteStorage,
   'getFolders' | 'searchEmails' | 'getEmail' | 'getContacts' | 'getAttachments'>
@@ -188,10 +188,54 @@ function planFilters(plan: InboxAssistantSearchPlan): Pick<SearchQuery, 'dateFro
   };
 }
 
-/** Account/folder scope is enforced here, independently of the AI's search hints. */
+/**
+ * Account/folder scope is enforced here, independently of the AI's search hints.
+ *
+ * A question that names two things ("BHEL" and "the SCADA upgrade") requires
+ * mail about both. When no email in any selected account mentions all of them,
+ * but the search did find mail about some, the requirement is dropped and the
+ * closest matches are used, with a warning that says so. Answering "I could
+ * not find supporting mail" about mail the search had just found is the worse
+ * failure: the user is told it does not exist.
+ */
 export async function researchInboxAssistant(
   accounts: InboxAssistantAccount[], plan: InboxAssistantSearchPlan,
   deps: AssistantResearchDeps, signal?: AbortSignal, options: InboxAssistantResearchOptions = {},
+): Promise<InboxAssistantResearch> {
+  const rejected: PassRejections = { requiredTopics: new Set(), topics: new Set() };
+  const strict = await researchPass(accounts, plan, deps, signal, options, rejected, false);
+  if (strict.evidence.length) return strict;
+  // Widen only what actually turned found mail away, and only once.
+  const groups = plan.requiredTopicGroups ?? [];
+  const dropGroups = groups.length > 0 && rejected.requiredTopics.size > 0;
+  const useEntities = !!plan.topicTerms?.length && plan.entityTerms.length > 0 && rejected.topics.size > 0;
+  if (!dropGroups && !useEntities) return strict;
+  checkAbort(signal);
+  const warnings = [
+    ...(dropGroups ? [`No email mentions all of: ${groups.map(group => group[0]).join(', ')}. These are the closest matches; check that they are about the right thing.`] : []),
+    ...(useEntities ? [`No email matched the search exactly, so emails that mention ${plan.entityTerms.slice(0, 3).join(', ')} are shown; check that they are about the right thing.`] : []),
+  ];
+  options.onProgress?.({ stage: 'search', status: 'warning', message: 'No email matched the question exactly', detail: 'Searching again for the closest matches.' });
+  // The diagnostics describe the search the answer was built from.
+  if (options.diagnostics) {
+    options.diagnostics.accounts = [];
+    options.diagnostics.searchBroadened = [...(dropGroups ? ['required_topics' as const] : []), ...(useEntities ? ['model_topics' as const] : [])];
+  }
+  const { requiredTopicGroups: _strict, ...withoutGroups } = plan;
+  const relaxed = await researchPass(accounts, dropGroups ? withoutGroups : plan, deps, signal, options, { requiredTopics: new Set(), topics: new Set() }, useEntities);
+  for (const covered of relaxed.coverage) covered.warnings = unique([...warnings, ...covered.warnings], 12);
+  return relaxed;
+}
+
+/** The emails a pass's own checks turned away, which decide whether a wider pass is worth running. */
+interface PassRejections { requiredTopics: Set<string>; topics: Set<string> }
+
+async function researchPass(
+  accounts: InboxAssistantAccount[], plan: InboxAssistantSearchPlan, deps: AssistantResearchDeps,
+  signal: AbortSignal | undefined, options: InboxAssistantResearchOptions,
+  rejected: PassRejections,
+  /** Let the model's entity terms stand in for a topic no email matched in full. */
+  entityFallback: boolean,
 ): Promise<InboxAssistantResearch> {
   const evidence: InboxAssistantEvidence[] = [];
   const coverage: InboxAssistantAccountCoverage[] = [];
@@ -301,8 +345,19 @@ export async function researchInboxAssistant(
         ? plan.scope.topicTerms.filter(term => term !== 'meeting') : plan.entityTerms).slice(0, 6);
       const plannedTopics = plan.scope?.meetingIntent ? plan.scope.topicTerms : plan.topicTerms?.length
         ? plan.topicTerms : entities.filter(term => !plan.participantTerms?.some(person => person.toLowerCase() === term.toLowerCase()));
-      const topics = meaningfulInboxAssistantTerms(plannedTopics.length ? plannedTopics : plan.queries).slice(0, 6);
       const people = unique(plan.participantTerms ?? [], 6);
+      // With no topic but a named person ("Sharma ji ka payment pending hai?")
+      // the person is the anchor. The model's whole queries ("Sharma payment
+      // pending") are things to search for, not words every email must hold.
+      const topics = meaningfulInboxAssistantTerms(plannedTopics.length ? plannedTopics : people.length ? [] : plan.queries).slice(0, 6);
+      // A model topic can name more than the mail does ("Business WhatsApp
+      // postpaid plan" for an invoice that never says "plan"). On the wider
+      // pass its own entity terms ("WhatsApp") stand in, ranked below any
+      // email that matches a topic. Never on the first pass: an entity such as
+      // "GST" would let every GST email in beside the right one.
+      const entityTopics = entityFallback && plan.topicTerms?.length && !plan.scope?.meetingIntent
+        ? entities.filter(term => !people.some(person => person.toLowerCase() === term.toLowerCase())
+          && !topics.some(topic => topic.toLowerCase() === term.toLowerCase())) : [];
       const customerProductAnchors = unique(meaningfulInboxAssistantTerms([...topics, ...entities, ...plan.queries])
         .filter(term => !ownIdentityTopic(term)), 12);
       const requireCustomerProduct = !plan.scope?.meetingIntent && topics.some(ownIdentityTopic) && customerProductAnchors.length > 0;
@@ -315,7 +370,11 @@ export async function researchInboxAssistant(
       }
       const queries = plan.scope?.meetingIntent ? unique(plan.scope.queryTerms, 8)
         : unique(topics.length
-          ? [...topics, ...meaningfulInboxAssistantTerms(plan.queries).filter(query => topics.some(topic => matchesTerm(query, topic)))]
+          // Searches that contain a topic first, then the model's other
+          // searches: a shorter "Business WhatsApp" finds what the longer
+          // topic, which needs every word, does not.
+          ? [...topics, ...meaningfulInboxAssistantTerms(plan.queries).filter(query => topics.some(topic => matchesTerm(query, topic))),
+            ...meaningfulInboxAssistantTerms(plan.queries)]
           : [...entities, ...meaningfulInboxAssistantTerms(plan.queries)], 8);
       const participants = unique([...people, ...entities.filter(value => value.includes('@') || value.includes('.')), ...contactTerms(contacts)], 12);
       const requests: SearchQuery[] = [];
@@ -362,21 +421,37 @@ export async function researchInboxAssistant(
         const identityNeutralContent = withoutOwnAddresses(content);
         const topicInHeader = (term: string) => matchesTerm(ownIdentityTopic(term) ? subject : header, term);
         const topicInBody = (term: string) => matchesTerm(ownIdentityTopic(term) ? identityNeutralContent : content, term);
+        // A topic of several words also counts when all its words are present,
+        // in any order and split between subject and body, as the search index
+        // matches them ("Office lease renewal - Baner" for "Baner office
+        // lease"). It scores below the exact phrase, so the phrase ranks first.
+        const topicByWords = (term: string) => {
+          const words = inboxAssistantTermWords(term);
+          return words.length > 1 && words.every(word => topicInHeader(word) || topicInBody(word));
+        };
         const searchable = `${header}\n${content}`;
         const invited = plan.scope?.invitationIntent === true && invitationEvidence(email, body);
         if (plan.scope?.invitationIntent && !invited) return -1;
         const meetingTerm = (term: string) => /^(?:meetings?|invites?|invitations?|appointments?)$/i.test(term);
         if (!threadMatch && plan.scope?.topicGroups.some(group => !group.some(term => matchesTerm(searchable, term) || invited && meetingTerm(term)))) return -1;
-        if (!threadMatch && requiredTopicGroups.some(group => !group.some(term => topicInHeader(term) || topicInBody(term)))) return -1;
+        if (!threadMatch && requiredTopicGroups.some(group => !group.some(term => topicInHeader(term) || topicInBody(term) || topicByWords(term)))) {
+          rejected.requiredTopics.add(email.id);
+          return -1;
+        }
         if (!threadMatch && requireCustomerProduct && !customerProductAnchors.some(term => topicInHeader(term) || topicInBody(term))) return -1;
         const inHeader = topics.filter(topicInHeader).length;
         const inBody = topics.filter(topic => topicInBody(topic) || invited && meetingTerm(topic)).length;
+        const byWords = topics.filter(topic => !topicInHeader(topic) && !topicInBody(topic) && topicByWords(topic)).length;
+        const byEntity = !inHeader && !inBody && !byWords && entityTopics.some(term => topicInHeader(term) || topicInBody(term) || topicByWords(term));
         const reopenedWithoutNewTopic = pinnedIds.has(email.id) && !plannedTopics.length && !plan.scope?.meetingIntent;
-        if (topics.length && !inHeader && !inBody && !threadMatch && !reopenedWithoutNewTopic) return -1;
+        if (topics.length && !inHeader && !inBody && !byWords && !byEntity && !threadMatch && !reopenedWithoutNewTopic) {
+          rejected.topics.add(email.id);
+          return -1;
+        }
         const person = people.some(term => matchesTerm(participantText(email), term));
         const authoredByPerson = people.some(term => matchesTerm(`${email.fromAddress} ${email.fromName ?? ''}`, term));
         if (!topics.length && !person && !threadMatch && !pinnedIds.has(email.id) && !plan.scope?.timeWindow) return -1;
-        return inHeader * 80 + inBody * 25 + Number(person) * 40 + Number(authoredByPerson) * 160
+        return inHeader * 80 + inBody * 25 + byWords * 12 + Number(byEntity) * 8 + Number(person) * 40 + Number(authoredByPerson) * 160
           + Number(plan.quoteIntent && /quot|proposal|pricing|price.?bid|commercial/i.test(`${email.subject ?? ''} ${email.attachmentNames ?? ''}`)) * 30
           + Number(pinnedIds.has(email.id)) * 10 + Number(threadMatch) * 5;
       };

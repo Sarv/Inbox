@@ -107,6 +107,7 @@ export function inboxAssistantDiagnosticsReport(
       }) : undefined,
     }) : undefined,
     // Accounts are numbered, never named: an id or address identifies the user.
+    searchBroadened: Array.isArray(diagnostics.searchBroadened) ? words(diagnostics.searchBroadened) : undefined,
     accounts: accounts?.map((account, index) => compact({
       account: index + 1, status: word(account.status), failure: errorOf(account.failure), searches: count(account.searches),
       matchedMessages: count(account.matchedMessages), reviewedMessages: count(account.reviewedMessages), evidenceItems: count(account.evidenceItems),
@@ -160,6 +161,9 @@ export function inboxAssistantDiagnosticsSummary(exchange: Pick<InboxAssistantEx
     const failure = word(plan.failure);
     lines.push(`The search used keyword rules because AI planning failed${failure ? `: ${PLAN_FAILURE_LABELS[failure] ?? failure.replace(/_/g, ' ')}` : ''}.`);
   }
+  const broadened = Array.isArray(diagnostics.searchBroadened) ? diagnostics.searchBroadened : [];
+  if (broadened.includes('required_topics')) lines.push('No email mentioned every topic in the question, so the closest matches were used.');
+  if (broadened.includes('model_topics')) lines.push('No email matched the AI\'s search exactly, so emails mentioning its key names were used.');
   const accounts = Array.isArray(diagnostics.accounts) ? diagnostics.accounts.map(object).filter((item): item is Json => !!item) : [];
   if (accounts.length) {
     const total = (key: string) => accounts.reduce((sum, account) => sum + (count(account[key]) ?? 0), 0);
