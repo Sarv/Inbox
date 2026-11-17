@@ -96,7 +96,7 @@ export function inboxAssistantDiagnosticsReport(
     durationMs: count(diagnostics.durationMs),
     failure: failure ? compact({ stage: word(failure.stage), error: errorOf(failure.error) }) : undefined,
     plan: plan ? compact({
-      source: word(plan.source), failure: word(plan.failure), httpStatus: count(plan.httpStatus), followUp: flag(plan.followUp), intent: word(plan.intent),
+      source: word(plan.source), failure: word(plan.failure), failedField: word(plan.failedField), httpStatus: count(plan.httpStatus), followUp: flag(plan.followUp), intent: word(plan.intent),
       quoteIntent: flag(plan.quoteIntent), meetingIntent: flag(plan.meetingIntent), invitationIntent: flag(plan.invitationIntent), timeWindow: flag(plan.timeWindow),
       filters: words(plan.filters), queryCount: count(plan.queryCount), topicTermCount: count(plan.topicTermCount),
       participantTermCount: count(plan.participantTermCount), requiredGroupCount: count(plan.requiredGroupCount),

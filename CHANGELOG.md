@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or when the answer gave a total across several receipts or card alerts. These
   amounts are now checked and shown. A total is shown only when the answer
   also lists each amount it adds, so you can see what was counted.
+- **Inbox Agent plans its search with the AI again on most questions.** When a
+  question named no date, sender or attachment, the AI's search plan was
+  thrown away and simpler keyword rules searched instead. This happened on
+  about half of real questions. Those plans are now used. **View activity**
+  also shows which part of a plan was wrong when one is still rejected.
 - **Typing to Inbox Agent can no longer trash or archive the email you are
   reading.** With the chat beside your inbox, the first keys of a follow-up
   question could run as mail shortcuts on the open email. The message box now

@@ -168,3 +168,17 @@ describe('the plain-language summary in the activity panel', () => {
       'The run stopped with an error while some_new_stage.']);
   });
 });
+
+describe('a search plan the model got wrong', () => {
+  // Breaks: a copied report says only that the plan was unusable, so the next
+  // planner regression can only be found from raw model output; or prose in
+  // the field slot is copied out with the report.
+  it('carries which plan field was unusable, as a fixed name only', () => {
+    const rejected = { ...exchange, diagnostics: { ...diagnostics, plan: { ...diagnostics.plan!, failure: 'invalid_shape', failedField: 'filters' as const } } };
+    expect(JSON.parse(inboxAssistantDiagnosticsReport(rejected)).plan).toMatchObject({ failure: 'invalid_shape', failedField: 'filters' });
+    const prose = { ...exchange, diagnostics: { ...diagnostics, plan: { ...diagnostics.plan!, failure: 'invalid_shape', failedField: `${SECRET} field` as never } } };
+    const report = inboxAssistantDiagnosticsReport(prose);
+    expect(report).not.toContain(SECRET);
+    expect(JSON.parse(report).plan).not.toHaveProperty('failedField');
+  });
+});
