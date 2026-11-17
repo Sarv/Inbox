@@ -2,7 +2,7 @@
 
 import { classifyAIError } from '@sarvinbox/core';
 
-import type { InboxAssistantAccountCoverage, InboxAssistantAIPurpose, InboxAssistantAnswerPassDiagnostics, InboxAssistantEvidence, InboxAssistantFactRejectionReason, InboxAssistantRunDiagnostics } from '../../src/types/inbox-assistant';
+import type { InboxAssistantAccountCoverage, InboxAssistantAIPurpose, InboxAssistantAnswerPassDiagnostics, InboxAssistantEvidence, InboxAssistantFactRejectionReason, InboxAssistantPlanField, InboxAssistantRunDiagnostics } from '../../src/types/inbox-assistant';
 import { dateInTimeZone } from '../../src/utils/local-calendar';
 
 import { compactInboxAssistantContent } from './inbox-assistant-content';
@@ -47,10 +47,13 @@ export type InboxAssistantAICall = (prompt: string, purpose?: InboxAssistantAIPu
 export class InboxAssistantResponseError extends Error {
   /** What was wrong with the reply, for diagnostics. The message stays user-facing. */
   readonly kind: 'too_large' | 'invalid_json' | 'invalid_shape';
-  constructor(message: string, kind: InboxAssistantResponseError['kind'] = 'invalid_shape') {
+  /** Which search-plan field was unusable: a fixed name, never its value. */
+  readonly field?: InboxAssistantPlanField;
+  constructor(message: string, kind: InboxAssistantResponseError['kind'] = 'invalid_shape', field?: InboxAssistantPlanField) {
     super(message);
     this.name = 'InboxAssistantResponseError';
     this.kind = kind;
+    if (field) this.field = field;
   }
 }
 
@@ -58,8 +61,8 @@ export class InboxAssistantResponseError extends Error {
  * Why a model call or its reply could not be used, as a class and never a
  * message: a provider error carries the endpoint's response body.
  */
-export function inboxAssistantAIFailure(error: unknown): { failure: string; httpStatus?: number } {
-  if (error instanceof InboxAssistantResponseError) return { failure: error.kind };
+export function inboxAssistantAIFailure(error: unknown): { failure: string; httpStatus?: number; failedField?: InboxAssistantPlanField } {
+  if (error instanceof InboxAssistantResponseError) return { failure: error.kind, ...(error.field ? { failedField: error.field } : {}) };
   if (error instanceof Error && error.name === 'AbortError') return { failure: 'cancelled' };
   const { kind, status } = classifyAIError(error);
   return { failure: kind, ...(status !== undefined ? { httpStatus: status } : {}) };
@@ -226,48 +229,77 @@ export function buildInboxAssistantSearchPlanPrompt(question: string, today?: st
     'topicTerms and participantTerms are optional literal lists of at most 6 items each. Keep the customer/project in topicTerms and the requested sender/person in participantTerms. A follow-up asking what a team member submitted retains the earlier customer/project; generic proposal/pricing terms are not customer topics. Do not replace the topic with the person or search their unrelated customers.',
     'Use intent "sent" only when the user asks for their outgoing/sent mail; otherwise "all". A received/forwarded quotation does not prove the user sent it.',
     'Collective "we sent" or team submissions can exist as received/CC copies and use intent "all". Reserve strict "sent" for personal "I/my outgoing" or an explicitly requested Sent folder. Preserve the actual author and original sending date in the eventual evidence.',
-    'Set quoteIntent for quotation/proposal/pricing questions. Only include filters explicitly requested by the user. Omit absent optional filters.',
+    'Set quoteIntent for quotation/proposal/pricing questions. Only include filters explicitly requested by the user. Omit absent optional filters; use "filters":{} when the user requested none.',
     `Today (${timeZone} calendar date for interpreting relative date requests): ${localToday}. before is exclusive; after is inclusive. The host enforces local-day bounds independently.`,
     `USER_QUESTION_JSON: ${JSON.stringify(question.trim().slice(0, MAX_QUESTION))}`,
   ].join('\n');
 }
 
+/**
+ * A field the model left out or set to null is absent, not malformed. The
+ * prompt tells the model to omit what the user did not ask for, and models
+ * read that as leaving out the whole filters object (or an empty optional
+ * list). Rejecting those replies threw away a usable plan for the weaker
+ * keyword fallback on about half of real questions. A field that IS present
+ * must still be exactly right, and an unknown field still rejects the plan.
+ */
+function given(value: unknown): unknown {
+  return value === null ? undefined : value;
+}
+
+function invalidPlan(field: InboxAssistantPlanField, message = 'The AI search plan was invalid.'): never {
+  throw new InboxAssistantResponseError(message, 'invalid_shape', field);
+}
+
 export function parseInboxAssistantSearchPlan(raw: string, question: string): InboxAssistantSearchPlan {
   const plan = jsonObject(raw, MAX_PLAN_RESPONSE);
+  if (!onlyKeys(plan, ['queries', 'entityTerms', 'topicTerms', 'participantTerms', 'intent', 'quoteIntent', 'filters'])) invalidPlan('unknown_field');
   const queries = stringList(plan.queries, 6, 160);
-  const entities = stringList(plan.entityTerms, 8, 100);
-  const topics = plan.topicTerms === undefined ? undefined : stringList(plan.topicTerms, 6, 100);
-  const participants = plan.participantTerms === undefined ? undefined : stringList(plan.participantTerms, 6, 100);
-  const filters = record(plan.filters);
-  if (!onlyKeys(plan, ['queries', 'entityTerms', 'topicTerms', 'participantTerms', 'intent', 'quoteIntent', 'filters']) || !queries?.length || !entities
-    || topics === null || participants === null
-    || (plan.intent !== 'sent' && plan.intent !== 'all') || typeof plan.quoteIntent !== 'boolean'
-    || !filters || !onlyKeys(filters, ['after', 'before', 'from', 'to', 'hasAttachment'])) {
-    throw new InboxAssistantResponseError('The AI search plan was invalid.');
-  }
+  if (!queries?.length) invalidPlan('queries');
+  const entities = given(plan.entityTerms) === undefined ? [] : stringList(plan.entityTerms, 8, 100);
+  if (!entities) invalidPlan('entity_terms');
+  const topics = given(plan.topicTerms) === undefined ? undefined : stringList(plan.topicTerms, 6, 100);
+  if (topics === null) invalidPlan('topic_terms');
+  const participants = given(plan.participantTerms) === undefined ? undefined : stringList(plan.participantTerms, 6, 100);
+  if (participants === null) invalidPlan('participant_terms');
+  const intent = given(plan.intent);
+  if (intent !== undefined && intent !== 'sent' && intent !== 'all') invalidPlan('intent');
+  const quoteIntent = given(plan.quoteIntent) ?? false;
+  if (typeof quoteIntent !== 'boolean') invalidPlan('quote_intent');
+  const filters = given(plan.filters) === undefined ? {} : record(plan.filters);
+  if (!filters) invalidPlan('filters');
+  if (!onlyKeys(filters, ['after', 'before', 'from', 'to', 'hasAttachment'])) invalidPlan('unknown_filter');
+  // An empty or null filter value means the model had nothing to put there.
+  const filter = (key: string): unknown => {
+    const value = given(filters[key]);
+    return typeof value === 'string' && !value.trim() ? undefined : value;
+  };
   const parsed: InboxAssistantSearchPlan['filters'] = {};
   for (const key of ['after', 'before'] as const) {
-    if (filters[key] === undefined) continue;
-    if (!validDate(filters[key])) throw new InboxAssistantResponseError('The AI search date was invalid.');
-    parsed[key] = filters[key];
+    const value = filter(key);
+    if (value === undefined) continue;
+    if (!validDate(value)) invalidPlan('date', 'The AI search date was invalid.');
+    parsed[key] = value;
   }
-  if (parsed.after && parsed.before && parsed.after >= parsed.before) throw new InboxAssistantResponseError('The AI search date range was invalid.');
+  if (parsed.after && parsed.before && parsed.after >= parsed.before) invalidPlan('date_range', 'The AI search date range was invalid.');
   for (const key of ['from', 'to'] as const) {
-    if (filters[key] === undefined) continue;
-    const address = text(filters[key], 254);
-    if (!address || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(address)) throw new InboxAssistantResponseError('The AI search address was invalid.');
+    const value = filter(key);
+    if (value === undefined) continue;
+    const address = text(value, 254);
+    if (!address || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(address)) invalidPlan('address', 'The AI search address was invalid.');
     parsed[key] = address;
   }
-  if (filters.hasAttachment !== undefined) {
-    if (typeof filters.hasAttachment !== 'boolean') throw new InboxAssistantResponseError('The AI attachment filter was invalid.');
-    parsed.hasAttachment = filters.hasAttachment;
+  const hasAttachment = filter('hasAttachment');
+  if (hasAttachment !== undefined) {
+    if (typeof hasAttachment !== 'boolean') invalidPlan('attachment', 'The AI attachment filter was invalid.');
+    parsed.hasAttachment = hasAttachment;
   }
   return {
     queries,
     entityTerms: entities,
     // A model cannot narrow a generic question to only Sent, or broaden an explicit sent-mail question.
     intent: sentIntent(question) ? 'sent' : 'all',
-    quoteIntent: plan.quoteIntent || fallbackInboxAssistantSearchPlan(question).quoteIntent,
+    quoteIntent: quoteIntent || fallbackInboxAssistantSearchPlan(question).quoteIntent,
     filters: parsed,
     ...(topics?.length ? { topicTerms: topics } : {}),
     ...(participants?.length ? { participantTerms: participants } : {}),
@@ -787,7 +819,7 @@ export async function planInboxAssistantSearch(
 }
 
 function recordPlan(diagnostics: InboxAssistantRunDiagnostics | undefined, plan: InboxAssistantSearchPlan, followUp: boolean,
-  failed?: { failure: string; httpStatus?: number }): void {
+  failed?: { failure: string; httpStatus?: number; failedField?: InboxAssistantPlanField }): void {
   if (!diagnostics) return;
   diagnostics.plan = {
     source: failed ? 'fallback' : 'model', ...failed, followUp, intent: plan.intent, quoteIntent: plan.quoteIntent,

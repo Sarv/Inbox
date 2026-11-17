@@ -15,7 +15,7 @@ import {
   parseInboxAssistantSearchPlan,
   planInboxAssistantSearch,
 } from '../../../../electron/services/inbox-assistant-answer';
-import type { InboxAssistantAccountCoverage, InboxAssistantEvidence } from '../../../../src/types/inbox-assistant';
+import type { InboxAssistantAccountCoverage, InboxAssistantEvidence, InboxAssistantRunDiagnostics } from '../../../../src/types/inbox-assistant';
 
 const question = 'What quote did I sent to TCS?';
 const makeCoverage = (overrides: Partial<InboxAssistantAccountCoverage> = {}): InboxAssistantAccountCoverage => ({
@@ -243,6 +243,99 @@ describe('Inbox Agent read-only search planning', () => {
     expect(buildInboxAssistantSearchPlanPrompt(question)).toContain('READ-ONLY');
     expect(buildInboxAssistantSearchPlanPrompt(question, '2026-10-23', 'Asia/Kolkata')).toContain('Today (Asia/Kolkata calendar date');
     expect(buildInboxAssistantSearchPlanPrompt(question, '2026-10-23', 'Asia/Kolkata')).not.toContain('Today (UTC date');
+  });
+});
+
+// Real planner replies (shapes recorded from a live model, terms replaced) that
+// were thrown away for the weaker keyword fallback on 8 of 16 questions.
+describe('Inbox Agent search plans that leave out what the question did not need', () => {
+  const bare = (fields: Record<string, unknown>) => JSON.stringify(fields);
+  const newDiagnostics = (): InboxAssistantRunDiagnostics => ({ version: 1 });
+
+  // Breaks: a plan with no filters object (the prompt says to omit absent
+  // filters) is rejected and the question is searched by keyword rules instead.
+  it('uses a model plan that leaves out the filters object', async () => {
+    const diagnostics = newDiagnostics();
+    const reply = bare({ queries: ['Northwind follow up', 'Northwind'], entityTerms: ['Northwind'], participantTerms: ['Northwind'], intent: 'all', quoteIntent: false });
+    const result = await planInboxAssistantSearch('What did Northwind follow up about?', vi.fn().mockResolvedValue(reply), { diagnostics });
+    expect(diagnostics.plan?.source).toBe('model');
+    expect(diagnostics.plan?.failure).toBeUndefined();
+    expect(result.queries).toEqual(expect.arrayContaining(['Northwind follow up', 'Northwind']));
+    expect(result.filters).toEqual({});
+  });
+
+  // Breaks: null or empty optional fields, which models send instead of
+  // leaving them out, reject an otherwise usable plan.
+  it.each([
+    ['filters null', { filters: null }],
+    ['empty filter values', { filters: { after: null, before: '', from: '', to: null, hasAttachment: null } }],
+    ['empty participant list', { participantTerms: [] }],
+    ['null topic and participant lists', { topicTerms: null, participantTerms: null }],
+    ['no entity terms', { entityTerms: undefined }],
+    ['null entity terms', { entityTerms: null }],
+  ])('accepts %s', (_label, fields) => {
+    const parsed = parseInboxAssistantSearchPlan(plan(fields), question);
+    expect(parsed.queries).toEqual(['TCS', 'quotation', 'proposal']);
+    expect(parsed.filters).toEqual({});
+    expect(parsed.topicTerms).toBeUndefined();
+    expect(parsed.participantTerms).toBeUndefined();
+  });
+
+  // Breaks: a plan without intent or quoteIntent is rejected, or a missing
+  // quoteIntent turns a quotation question into a plain one. Both are decided
+  // from the question in any case.
+  it('derives intent and quoteIntent from the question when the plan leaves them out', () => {
+    const parsed = parseInboxAssistantSearchPlan(bare({ queries: ['TCS'] }), question);
+    expect(parsed).toEqual({ queries: ['TCS'], entityTerms: [], intent: 'sent', quoteIntent: true, filters: {} });
+    expect(parseInboxAssistantSearchPlan(bare({ queries: ['TCS'] }), 'What did TCS say?')).toMatchObject({ intent: 'all', quoteIntent: false });
+  });
+
+  // Breaks: leniency about absent fields lets a present but malformed field,
+  // an action field or an operator through; or the diagnostics cannot say
+  // which field the model got wrong.
+  it.each([
+    [{ deleteMessages: true }, 'unknown_field'],
+    [{ queries: undefined }, 'queries'],
+    [{ queries: null }, 'queries'],
+    [{ queries: [] }, 'queries'],
+    [{ queries: ['TCS OR *'] }, 'queries'],
+    [{ entityTerms: 'TCS' }, 'entity_terms'],
+    [{ topicTerms: 'EPFO' }, 'topic_terms'],
+    [{ participantTerms: ['Prakash OR *'] }, 'participant_terms'],
+    [{ intent: 'trash' }, 'intent'],
+    [{ intent: '' }, 'intent'],
+    [{ quoteIntent: 'yes' }, 'quote_intent'],
+    [{ filters: 'none' }, 'filters'],
+    [{ filters: [] }, 'filters'],
+    [{ filters: { cc: 'a@b.example' } }, 'unknown_filter'],
+    [{ filters: { after: '2026-02-30' } }, 'date'],
+    [{ filters: { after: '2026-11-01', before: '2026-10-01' } }, 'date_range'],
+    [{ filters: { from: 'TCS' } }, 'address'],
+    [{ filters: { hasAttachment: 'yes' } }, 'attachment'],
+  ])('rejects %j and names the field %s', (fields, field) => {
+    let thrown: unknown;
+    try { parseInboxAssistantSearchPlan(plan(fields), question); } catch (error) { thrown = error; }
+    expect(thrown).toBeInstanceOf(InboxAssistantResponseError);
+    expect(inboxAssistantAIFailure(thrown)).toEqual({ failure: 'invalid_shape', failedField: field });
+  });
+
+  // Breaks: a rejected plan's diagnostics say only "not a usable search plan",
+  // so the next planner regression needs raw model output to diagnose.
+  it('records which field made the plan unusable, never its value', async () => {
+    const diagnostics = newDiagnostics();
+    await planInboxAssistantSearch(question, vi.fn().mockResolvedValue(plan({ filters: { from: 'secret-term' } })), { diagnostics });
+    expect(diagnostics.plan).toMatchObject({ source: 'fallback', failure: 'invalid_shape', failedField: 'address' });
+    expect(JSON.stringify({ ...diagnostics.plan, terms: undefined })).not.toContain('secret-term');
+    const notJson = newDiagnostics();
+    await planInboxAssistantSearch(question, vi.fn().mockResolvedValue('not JSON'), { diagnostics: notJson });
+    expect(notJson.plan).toMatchObject({ source: 'fallback', failure: 'invalid_json' });
+    expect(notJson.plan?.failedField).toBeUndefined();
+  });
+
+  // Breaks: the prompt keeps telling the model only to omit absent filters,
+  // and providers that follow it literally keep sending no filters object.
+  it('tells the model to send an empty filters object when none was requested', () => {
+    expect(buildInboxAssistantSearchPlanPrompt(question, '2026-11-17', 'UTC')).toContain('use "filters":{} when the user requested none');
   });
 });
 

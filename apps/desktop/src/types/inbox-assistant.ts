@@ -152,11 +152,18 @@ export interface InboxAssistantAnswerPassDiagnostics {
   rejected: Partial<Record<InboxAssistantFactRejectionReason, number>>;
 }
 
+/** The search-plan field a model reply got wrong. A fixed name, never the field's value. */
+export type InboxAssistantPlanField =
+  | 'unknown_field' | 'queries' | 'entity_terms' | 'topic_terms' | 'participant_terms' | 'intent' | 'quote_intent'
+  | 'filters' | 'unknown_filter' | 'date' | 'date_range' | 'address' | 'attachment';
+
 export interface InboxAssistantPlanDiagnostics {
   /** `fallback`: the model's plan was not used and host keyword rules built the search. */
   source: 'model' | 'fallback';
-  /** Why the model's plan was not used: `invalid_json`, `invalid_plan`, or an AI failure class. */
+  /** Why the model's plan was not used: `invalid_json`, `invalid_shape`, or an AI failure class. */
   failure?: string;
+  /** With `invalid_shape`: which field of the plan was unusable. */
+  failedField?: InboxAssistantPlanField;
   httpStatus?: number;
   followUp: boolean;
   intent: 'sent' | 'all';

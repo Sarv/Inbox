@@ -112,14 +112,14 @@ describe('a planner that fails is recorded, not hidden', () => {
   // Breaks: a rate limit or a timeout (it will pass by itself) and a rejected
   // API key (the user must fix it) leave the same trace, or none, and both look
   // like an ordinary answer built on the weaker keyword search.
-  const failures: Array<[string, () => string, { failure: string; httpStatus?: number }]> = [
+  const failures: Array<[string, () => string, { failure: string; httpStatus?: number; failedField?: string }]> = [
     ['a rate limit', (): string => { throw Object.assign(new Error('Too many requests'), { status: 429 }); }, { failure: 'rate_limit', httpStatus: 429 }],
     ['a gateway outage', (): string => { throw Object.assign(new Error('Bad gateway'), { status: 502 }); }, { failure: 'upstream', httpStatus: 502 }],
     ['the provider call giving up after its own time limit', (): string => { throw Object.assign(new Error('AI request timed out'), { code: AI_REQUEST_TIMEOUT_CODE }); }, { failure: 'timeout' }],
     ['a dropped connection', (): string => { throw Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' }); }, { failure: 'network' }],
     ['a rejected key', (): string => { throw Object.assign(new Error('Incorrect API key provided'), { status: 401 }); }, { failure: 'auth', httpStatus: 401 }],
     ['a reply that is not JSON', (): string => 'Sure! Here is the plan you asked for.', { failure: 'invalid_json' }],
-    ['a reply with the wrong shape', (): string => JSON.stringify({ queries: [], entityTerms: [], intent: 'everything', quoteIntent: 'yes', filters: {} }), { failure: 'invalid_shape' }],
+    ['a reply with the wrong shape', (): string => JSON.stringify({ queries: [], entityTerms: [], intent: 'everything', quoteIntent: 'yes', filters: {} }), { failure: 'invalid_shape', failedField: 'queries' }],
     ];
   it.each(failures)('records %s as the reason the keyword fallback was used', async (_name, fail, expected) => {
     const diagnostics = await planFailure(fail);
@@ -128,7 +128,7 @@ describe('a planner that fails is recorded, not hidden', () => {
     // The search still ran on the fallback and found the mail.
     expect(diagnostics.route).toBe('search');
     expect(diagnostics.accounts![0]!.matchedMessages).toBe(1);
-    expect(inboxAssistantDegradedStages(diagnostics)).toContain(`plan_fallback:${expected.failure}`);
+    expect(inboxAssistantDegradedStages(diagnostics)).toContain(`plan_fallback:${expected.failure}${expected.failedField ? `/${expected.failedField}` : ''}`);
   });
 
   // Breaks: a planner failure reached through the real provider path loses its
@@ -464,5 +464,13 @@ describe('the one-line run summary', () => {
     expect(inboxAssistantRunSummary('req-7', 'completed', { version: 1, route: 'search', outcome: 'related', durationMs: 1,
       answer: { first: { format: 'valid', factsReturned: 0, factsVerified: 0, rejected: {} }, repair: { reason: 'no_facts', skipped: 'no_relevant_sources', sources: 0, factsRecovered: 0 }, factsFinal: 0 } }))
       .toBe('run=req-7 status=completed route=search outcome=related ms=1 facts=0/0 rejected=none repair=skipped:no_relevant_sources recovered=0');
+  });
+
+  // Breaks: app.log says only that a plan was unusable, so a planner
+  // regression cannot be told apart by field without raw model output.
+  it('names the unusable plan field in the run line and the degraded stages', () => {
+    const plan = { ...diagnostics.plan!, failure: 'invalid_shape', failedField: 'filters' as const, httpStatus: undefined };
+    expect(inboxAssistantRunSummary('req-8', 'completed', { version: 1, plan })).toContain(' plan=fallback:invalid_shape/filters ');
+    expect(inboxAssistantDegradedStages({ version: 1, plan })).toEqual(['plan_fallback:invalid_shape/filters']);
   });
 });

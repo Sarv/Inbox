@@ -29,7 +29,7 @@ function sum<T>(items: readonly T[], pick: (item: T) => number): number {
 /** Steps that completed in a weaker way than intended. An empty list is a clean run. */
 export function inboxAssistantDegradedStages(diagnostics: InboxAssistantRunDiagnostics, usage?: InboxAssistantUsage): string[] {
   const degraded: string[] = [];
-  if (diagnostics.plan?.source === 'fallback') degraded.push(`plan_fallback:${diagnostics.plan.failure ?? 'unknown'}`);
+  if (diagnostics.plan?.source === 'fallback') degraded.push(`plan_fallback:${diagnostics.plan.failure ?? 'unknown'}${diagnostics.plan.failedField ? `/${diagnostics.plan.failedField}` : ''}`);
   const accounts = diagnostics.accounts ?? [];
   const unavailable = accounts.filter(account => account.status === 'unavailable');
   if (unavailable.length) degraded.push(`accounts_unavailable(${counts(tally(unavailable, account => account.failure?.name ?? 'unknown'))})`);
@@ -57,7 +57,7 @@ export function inboxAssistantRunSummary(requestId: string, status: InboxAssista
   if (diagnostics.failure) parts.push(`failed_at=${diagnostics.failure.stage}`, `error=${diagnostics.failure.error.name}`
     + `${diagnostics.failure.error.code ? `/${diagnostics.failure.error.code}` : ''}${diagnostics.failure.error.status ? `/${diagnostics.failure.error.status}` : ''}`);
   const plan = diagnostics.plan;
-  if (plan) parts.push(`plan=${plan.source}${plan.failure ? `:${plan.failure}` : ''}${plan.httpStatus ? `/${plan.httpStatus}` : ''}`,
+  if (plan) parts.push(`plan=${plan.source}${plan.failure ? `:${plan.failure}` : ''}${plan.failedField ? `/${plan.failedField}` : ''}${plan.httpStatus ? `/${plan.httpStatus}` : ''}`,
     `queries=${plan.queryCount}`, `followup=${plan.followUp ? 1 : 0}`);
   if (diagnostics.searchBroadened?.length) parts.push(`broadened=${diagnostics.searchBroadened.join('+')}`);
   const accounts = diagnostics.accounts;
