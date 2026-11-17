@@ -22,6 +22,7 @@ import type { LocalCalendarAvailabilityRequest, LocalCalendarOpenEvent } from '.
 import { AccountSelectorTrigger } from '../AccountSelectorTrigger';
 
 import { AssistantDashboard } from './AssistantDashboard';
+import { AssistantDiagnostics } from './AssistantDiagnostics';
 import { AssistantReviewCard } from './AssistantReviewCard';
 import { AssistantUsage } from './AssistantUsage';
 import { ChatSidebar } from './ChatSidebar';
@@ -116,6 +117,8 @@ interface WorkInspection {
   coverage: InboxAssistantAccountCoverage[];
   warnings: string[];
   error?: string;
+  /** The saved answer, when the panel shows one: the source of its diagnostics. */
+  exchange?: InboxAssistantExchange;
 }
 
 interface ChatWork {
@@ -185,6 +188,7 @@ function ActivitySidebar({ inspection, accounts, onClose, compact, visible, stop
           </section>
         )}
         <Coverage accounts={inspection.coverage} />
+        {inspection.exchange && <AssistantDiagnostics exchange={inspection.exchange} />}
       </div>
     </aside>
   );
@@ -1093,7 +1097,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
   const inspection: WorkInspection | null = activitySelection === 'live' ? liveWork : selectedExchange ? {
     question: selectedExchange.question, activities: selectedExchange.activities ?? [], status: selectedExchange.status === 'failed' ? 'error' : selectedExchange.status === 'stopped' ? 'cancelled' : selectedExchange.status === 'pending' || selectedExchange.status === 'running' ? 'running' : 'done',
     coverage: selectedExchange.answer.coverage, warnings: coverageWarnings(selectedExchange),
-    error: selectedExchange.error,
+    error: selectedExchange.error, exchange: selectedExchange,
   } : selectedRun ? workFromRun(selectedRun) : null;
   const viewActivity = (selection: string, trigger: HTMLButtonElement) => {
     onCloseSourcePane?.();

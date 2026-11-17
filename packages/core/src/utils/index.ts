@@ -16,6 +16,7 @@ export * from './trailing-slash';
 export * from './trim-chars';
 export * from './address-tokens';
 export * from './error-class-name';
+export * from './error-diagnostic';
 export * from './bearer-retry';
 export * from './abortable-operation';
 export * from './connect-timeout';

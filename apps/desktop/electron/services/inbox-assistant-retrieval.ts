@@ -1,8 +1,8 @@
 import type { ContactRecord, EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
-import { htmlToPlainText, parseAddresses, parseAttachmentNames, waitForAbortableOperation } from '@sarvinbox/core';
+import { errorDiagnostic, htmlToPlainText, parseAddresses, parseAttachmentNames, waitForAbortableOperation } from '@sarvinbox/core';
 import type { SQLiteStorage } from '@sarvinbox/storage-node';
 
-import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssistantEvidence, InboxAssistantProgress } from '../../src/types/inbox-assistant';
+import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssistantAccountDiagnostics, InboxAssistantEvidence, InboxAssistantProgress, InboxAssistantRunDiagnostics } from '../../src/types/inbox-assistant';
 
 import type { AssistantAttachmentResult } from './assistant-attachment-types';
 import type { InboxAssistantSearchPlan } from './inbox-assistant-answer';
@@ -29,6 +29,8 @@ export interface AssistantResearchDeps {
 export interface InboxAssistantResearchOptions {
   onProgress?: (progress: InboxAssistantProgress) => void;
   sourceRefs?: Array<{ accountId: string; emailId: string }>;
+  /** Filled with one record per account: counts, and the class of any failure that was swallowed. */
+  diagnostics?: InboxAssistantRunDiagnostics;
 }
 
 export interface InboxAssistantResearch {
@@ -207,6 +209,14 @@ export async function researchInboxAssistant(
       truncated: false, warnings: [],
     };
     coverage.push(covered);
+    const accountStarted = Date.now();
+    const evidenceBefore = evidence.length;
+    const charsBefore = totalChars;
+    // Counts and failure classes only. The caught errors themselves can quote
+    // query words or mail text, so they are reduced before they are kept.
+    const traced: Pick<InboxAssistantAccountDiagnostics, 'searches' | 'bodyDownloadFailures' | 'attachmentFailures' | 'failure'>
+      = { searches: 0, bodyDownloadFailures: 0, attachmentFailures: {} };
+    const attachmentFailed = (reason: string) => { traced.attachmentFailures[reason] = (traced.attachmentFailures[reason] ?? 0) + 1; };
     // Reserve evidence space and extraction work for every selected account.
     // A busy first account must not consume the entire answer context.
     const accountCharEnd = Math.min(MAX_EVIDENCE_CHARS, totalChars + Math.floor(MAX_EVIDENCE_CHARS / accounts.length));
@@ -391,6 +401,7 @@ export async function researchInboxAssistant(
       for (const request of requests.slice(0, 48)) {
         checkAbort(signal);
         const rows = await mailbox.storage.searchEmails(request);
+        traced.searches++;
         if (rows.length >= QUERY_LIMIT) covered.truncated = true;
         for (const email of rows) {
           if (!eligible(email)) continue;
@@ -481,7 +492,7 @@ export async function researchInboxAssistant(
               unavailableOriginal = !email.rawBody?.trim() && (!downloaded || downloaded.hasBody === false
                 || downloaded.cleanBody === downloadingEmail.cleanBody);
             }
-            catch { unavailableOriginal = true; }
+            catch { unavailableOriginal = true; traced.bodyDownloadFailures++; }
           }
           checkAbort(signal);
           body = fullBody(email);
@@ -560,6 +571,7 @@ export async function researchInboxAssistant(
             }));
             checkAbort(signal);
             if (result.status !== 'ready' || !result.segments.length) {
+              attachmentFailed(result.status === 'ready' ? 'empty' : result.status);
               covered.attachmentsSkipped++;
               covered.warnings.push(`${filename}: ${result.message || result.status.replace(/_/g, ' ')}.`);
               progress({ stage: 'attachment', status: 'warning', accountId: account.id, emailId: email.id, filename, message: `${filename} could not be read`, detail: result.message || result.status.replace(/_/g, ' ') });
@@ -601,6 +613,7 @@ export async function researchInboxAssistant(
             }
           } catch (error) {
             checkAbort(signal);
+            attachmentFailed(`threw:${errorDiagnostic(error).name}`);
             covered.attachmentsSkipped++;
             covered.warnings.push(`${filename}: attachment could not be read.`);
             progress({ stage: 'attachment', status: 'warning', accountId: account.id, emailId: email.id, filename, message: `${filename} could not be downloaded or read` });
@@ -611,9 +624,19 @@ export async function researchInboxAssistant(
       progress({ stage: 'search', status: 'done', accountId: account.id, message: `Reviewed ${covered.reviewedMessages} emails and ${covered.attachmentsRead} attachments`, detail: account.email });
     } catch (error) {
       checkAbort(signal);
+      traced.failure = errorDiagnostic(error);
       covered.status = 'unavailable';
       covered.warnings.push('This account could not be fully searched. Its results may be incomplete.');
       progress({ stage: 'search', status: 'warning', accountId: account.id, message: `${account.email} could not be fully searched`, detail: 'Results from this account may be incomplete.' });
+    } finally {
+      // Also on cancellation, so a stopped run still shows how far it got.
+      if (options.diagnostics) (options.diagnostics.accounts ??= []).push({
+        accountId: account.id, status: covered.status, ...traced,
+        matchedMessages: covered.matchedMessages, reviewedMessages: covered.reviewedMessages,
+        evidenceItems: evidence.length - evidenceBefore, evidenceChars: totalChars - charsBefore,
+        missingBodies: covered.missingBodies, attachmentsRead: covered.attachmentsRead, attachmentsSkipped: covered.attachmentsSkipped,
+        truncated: covered.truncated, durationMs: Math.max(0, Date.now() - accountStarted),
+      });
     }
   }
   return { evidence, coverage };

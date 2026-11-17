@@ -153,6 +153,80 @@ job, and we don't re-test a dependency.
 would defeat the purpose: this is the layer where a wrong SQL predicate loses
 mail. See `packages/storage-node/test/unit/thread-resolver.test.ts` for the pattern.
 
+**Inbox Agent, end to end** — `apps/desktop/test/helpers/assistant-harness.ts`
+runs the real agent for a test that asks it a question: the service, planner,
+retrieval over real account databases, verifier, the chat history store on a
+real SQLite table, and the production provider call path (so usage accounting
+and error classification are the real ones). Only the network (a scripted
+endpoint) and attachment reading are replaced. Use it instead of hand-wiring
+`InboxAssistantServiceDeps` when the subject is what a question does:
+
+```ts
+const harness = await createAssistantHarness({ ai: (prompt, purpose) => purpose === 'plan' ? PLAN : NO_FACTS });
+await harness.mail('primary', 'thread-1', { id: 'm1', sent: true, subject: 'Acme quotation', cleanBody: QUOTE, rawBody: `<p>${QUOTE}</p>` });
+const exchange = await harness.ask('What did we quote Acme?');
+harness.chat().exchanges.at(-1)!.diagnostics;  // read back from the store
+harness.calls;        // every model call, with its step
+harness.logs;         // every log line, for "nothing private was logged" checks
+harness.readChanges;  // every mark-as-read the agent made
+```
+
+## Inbox Agent evaluation
+
+Unit tests prove the agent's plumbing with hand-written model replies. They do
+not show whether a question finds the right email. `apps/desktop/test/eval/assistant/`
+does, and it runs in CI with the rest of the suite (`pnpm test`), in about two
+seconds. To run it alone: `pnpm --filter @sarvinbox/desktop eval:assistant`.
+
+| File | What it is |
+| --- | --- |
+| `mailbox.ts` | The seeded two-account mailbox. Synthetic, `.example` domains only. Written to look like real mail (signatures, quoted chains, long documents, Hinglish), because retrieval measured on tidy mail overstates how well it works. |
+| `cases.ts` | The questions, each with the route it should take and the exact words that must reach the model. A case states what a user expects, not what the code does today. |
+| `known-gaps.ts` | The cases known to fail today, each with what was observed and the audit issue that covers it. |
+| `assistant-eval.test.ts` | Scores every case twice with no model: `floor` (the planner is refused, host keyword rules plan the search) and `ceiling` (the planner returns the case's hand-written ideal plan). A case that fails at the ceiling cannot be fixed by a better model. |
+| `review-safety.test.ts` | Runs a review in "Approve for me" mode with a model that says "mark as read, 98% sure" about everything, and checks which mail labelled `keep` the host's own rules protect. |
+| `recordings.test.ts` | Replays replies recorded from real providers through the verifier. |
+
+**The gate is per case, not a total.** Each case is its own test, named after
+the question. A case not in `known-gaps.ts` must pass. A case in it must still
+fail: when a fix makes it pass, the run fails with a message telling you to
+delete the entry, which is how the fix becomes protected. Never add an entry to
+get a change through without saying so in the commit message: it is a decision
+to ship a regression. The printed totals (`route 61/71 retrieval 34/51`) are for
+reading, not for gating.
+
+**Adding a case.** Add the mail to `mailbox.ts` if it needs any, then the case to
+`cases.ts` with the answer's exact words as `needle`. Run the evaluation. If it
+fails for a reason that is already a known problem, list it in `known-gaps.ts`
+with what you observed; the failure message prints the search plan (required
+phrases, date window, queries) so the cause is visible.
+
+### Asking a real model (opt-in, never in CI)
+
+The deterministic run cannot show what a particular model actually returns.
+This asks every retrieval question of a real provider, through the production
+system prompt, output limits and call path, against the seeded mailbox only:
+
+```bash
+ASSISTANT_EVAL_MODEL=gpt-5-mini ASSISTANT_EVAL_API_KEY=... pnpm --filter @sarvinbox/desktop eval:assistant:live
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `ASSISTANT_EVAL_MODEL` | The model id. The run is skipped unless this is set. |
+| `ASSISTANT_EVAL_API_KEY` | The provider key. Leave unset for a local model. |
+| `ASSISTANT_EVAL_BASE_URL` | An OpenAI-compatible base URL, for example `http://localhost:11434/v1`. Defaults to the provider's own. |
+| `ASSISTANT_EVAL_TYPE` | `openai` (default, any OpenAI-compatible endpoint) or `gemini`. |
+| `ASSISTANT_EVAL_RUNS` | Runs per question, 1 to 5. Use 3 for a local model, whose replies vary. |
+
+It prints counts (plan accepted, statements verified and rejected by reason,
+repair calls, answers found) and saves every raw reply, with exactly what the
+verifier was given, under `test/eval/assistant/recorded/<model>/`. Commit the
+recordings: `recordings.test.ts` then replays them on every push, so a change to
+the parser or verifier is checked against what real models really write. The
+mailbox is synthetic, so a recording holds no real mail; the key is never saved.
+It costs what 25 questions cost on that provider (two or three calls each).
+
 ## House rules
 
 - **Name the regression.** Every test (or block) carries a short comment saying

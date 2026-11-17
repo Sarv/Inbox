@@ -5,8 +5,12 @@ import {
   buildInboxAssistantAnswerPrompt,
   buildInboxAssistantSearchPlanPrompt,
   fallbackInboxAssistantSearchPlan,
+  INBOX_ASSISTANT_OUTPUT_TOKENS,
+  inboxAssistantAIFailure,
+  inboxAssistantAnswerPass,
   inboxAssistantCoverageWarnings,
   inboxAssistantEvidenceText,
+  InboxAssistantResponseError,
   parseInboxAssistantAnswer,
   parseInboxAssistantSearchPlan,
   planInboxAssistantSearch,
@@ -831,5 +835,40 @@ describe('Inbox Agent grounded answers', () => {
     for (const raw of ['I think the quote is 100000.', '[]', '{"facts":"hello"}', JSON.stringify({ facts: Array(17).fill({}) }), 'x'.repeat(48_001)]) {
       expect(() => parseInboxAssistantAnswer(raw, [firstQuote], [makeCoverage()])).toThrow();
     }
+  });
+});
+
+describe('diagnostics helpers for model replies', () => {
+  // Breaks: a run's record blames the provider for a Stop, or a parser bug is
+  // filed under the wrong failure class.
+  it('classifies why a model call or its reply could not be used', () => {
+    expect(inboxAssistantAIFailure(new InboxAssistantResponseError('too big', 'too_large'))).toEqual({ failure: 'too_large' });
+    expect(inboxAssistantAIFailure(new InboxAssistantResponseError('bad json', 'invalid_json'))).toEqual({ failure: 'invalid_json' });
+    expect(inboxAssistantAIFailure(new InboxAssistantResponseError('bad plan'))).toEqual({ failure: 'invalid_shape' });
+    expect(inboxAssistantAIFailure(new DOMException('Aborted', 'AbortError'))).toEqual({ failure: 'cancelled' });
+    expect(inboxAssistantAIFailure(Object.assign(new Error('nope'), { status: 403 }))).toEqual({ failure: 'auth', httpStatus: 403 });
+    expect(inboxAssistantAIFailure('a thrown string')).toEqual({ failure: 'unknown' });
+  });
+
+  // Breaks: replaying a recorded reply throws on the first malformed one and the
+  // rest are never checked; or a real bug in the verifier is swallowed and
+  // reported as a malformed reply.
+  it('reports what the verifier makes of one raw reply, treating a broken contract as malformed and a real error as an error', () => {
+    const source: InboxAssistantEvidence = { id: 'S1', kind: 'message', accountId: 'a', accountEmail: 'me@example.test', emailId: 'e', subject: 'Quote', from: 'x@example.test',
+      to: ['me@example.test'], date: 1_790_000_000, folder: 'INBOX', sent: false, excerpt: 'Total INR 500.', text: 'Total INR 500.' };
+    const reply = (facts: unknown[]) => JSON.stringify({ facts });
+    expect(inboxAssistantAnswerPass(reply([
+      { text: 'Total INR 500.', sourceIds: ['S1'], quotes: [{ sourceId: 'S1', text: 'Total INR 500.' }] },
+      { text: 'Total INR 900.', sourceIds: ['S1'], quotes: [{ sourceId: 'S1', text: 'Total INR 500.' }] },
+    ]), [source], [])).toEqual({ format: 'valid', factsReturned: 2, factsVerified: 1, rejected: { unsupported_number_or_currency: 1 } });
+    expect(inboxAssistantAnswerPass('Sure, here you go.', [source], [])).toEqual({ format: 'malformed', factsReturned: 0, factsVerified: 0, rejected: {} });
+    expect(inboxAssistantAnswerPass(reply([]), [source], [])).toEqual({ format: 'valid', factsReturned: 0, factsVerified: 0, rejected: {} });
+    expect(() => inboxAssistantAnswerPass(reply([]), null as unknown as InboxAssistantEvidence[], [])).toThrow(TypeError);
+  });
+
+  // Breaks: the app and the provider evaluation ask for different output sizes,
+  // so the evaluation measures truncation the app would not have.
+  it('defines the output limits once', () => {
+    expect(INBOX_ASSISTANT_OUTPUT_TOKENS).toEqual({ plan: 1_600, answer: 8_000 });
   });
 });

@@ -15,6 +15,7 @@ import {
 } from '@sarv-in/mailguard/verdict';
 import pRetry, { AbortError } from 'p-retry';
 
+import { AI_REQUEST_TIMEOUT_CODE } from '../utils/ai-error';
 import { aiApiKeyHeaders, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl } from '../utils/ai-provider-auth';
 import { MAX_MESSAGE_BYTES } from '../utils/json-size';
 import { logger } from '../utils/logger';
@@ -868,7 +869,7 @@ async function callOpenAICompatibleAPI(
   const LLM_REQUEST_TIMEOUT_MS = 60_000;
   const timeoutCtl = new AbortController();
   const timer = setTimeout(
-    () => { try { timeoutCtl.abort(new Error('AI request timed out')); } catch { /* ignore */ } },
+    () => { try { timeoutCtl.abort(Object.assign(new Error('AI request timed out'), { code: AI_REQUEST_TIMEOUT_CODE })); } catch { /* ignore */ } },
     LLM_REQUEST_TIMEOUT_MS,
   );
   const onOuterAbort = () => { try { timeoutCtl.abort((signal as any)?.reason); } catch { /* ignore */ } };
