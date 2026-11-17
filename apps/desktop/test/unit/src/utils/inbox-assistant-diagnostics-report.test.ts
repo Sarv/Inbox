@@ -106,6 +106,22 @@ describe('the diagnostics report a user copies', () => {
   });
 });
 
+describe('a search that was broadened', () => {
+  // Breaks: an answer built from the closest matches, rather than mail about
+  // everything the question named, is indistinguishable from a normal one in
+  // the panel and in a copied report.
+  it('is said in the panel and carried in the report', () => {
+    const broadened = { ...exchange, diagnostics: { ...diagnostics, searchBroadened: ['required_topics' as const, 'model_topics' as const] } };
+    expect(inboxAssistantDiagnosticsSummary(broadened).slice(1, 3)).toEqual([
+      'No email mentioned every topic in the question, so the closest matches were used.',
+      'No email matched the AI\'s search exactly, so emails mentioning its key names were used.']);
+    expect(JSON.parse(inboxAssistantDiagnosticsReport(broadened))).toMatchObject({ searchBroadened: ['required_topics', 'model_topics'] });
+    // A value from another build that is not a list is left out, not copied.
+    expect(JSON.parse(inboxAssistantDiagnosticsReport({ ...exchange, diagnostics: { ...diagnostics, searchBroadened: 'required_topics' as never } }))).not.toHaveProperty('searchBroadened');
+    expect(inboxAssistantDiagnosticsSummary(exchange).join(' ')).not.toContain('closest matches');
+  });
+});
+
 describe('the plain-language summary in the activity panel', () => {
   // Breaks: the panel shows reason codes, or says nothing about why an answer
   // was weak, so the user cannot tell a search problem from an AI problem.

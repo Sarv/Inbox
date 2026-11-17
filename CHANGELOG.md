@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tick the box.
 
 ### Fixed
+- **Inbox Agent finds mail that is worded differently from your question.** A
+  question such as "How much did we quote BHEL for the SCADA upgrade?" needed an
+  email containing the exact words "the SCADA upgrade", so a proposal titled
+  "BHEL Haridwar SCADA network upgrade" was not found and the agent said there
+  was no supporting mail. Each word you name now has to appear, in any order.
+  When no email mentions everything you named, the agent shows the closest
+  matches and says so.
 - **Typing to Inbox Agent can no longer trash or archive the email you are
   reading.** With the chat beside your inbox, the first keys of a follow-up
   question could run as mail shortcuts on the open email. The message box now

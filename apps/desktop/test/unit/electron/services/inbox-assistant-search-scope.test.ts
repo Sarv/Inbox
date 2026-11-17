@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import { INBOX_ASSISTANT_FOLLOWUP_SEPARATOR } from '../../../../electron/services/inbox-assistant-context';
-import { matchesInboxAssistantTerm, meaningfulInboxAssistantTerms, resolveInboxAssistantSearchScope } from '../../../../electron/services/inbox-assistant-search-scope';
+import {
+  inboxAssistantTermWords, matchesAllInboxAssistantWords, matchesInboxAssistantTerm, meaningfulInboxAssistantTerms, resolveInboxAssistantSearchScope,
+} from '../../../../electron/services/inbox-assistant-search-scope';
 
 describe('Inbox Agent host-derived search constraints', () => {
   it('interprets today in the selected local timezone even when UTC is the previous date', () => {
@@ -70,5 +72,38 @@ describe('Inbox Agent host-derived search constraints', () => {
     const scope = resolveInboxAssistantSearchScope(`meeting invitations last week${INBOX_ASSISTANT_FOLLOWUP_SEPARATOR}TCS quote today`, { today: '2026-10-23', timeZone: 'Asia/Kolkata' });
     expect(scope.filters).toEqual({ after: '2026-10-12', before: '2026-10-19' });
     expect(scope.topicTerms).toEqual(['meeting']);
+  });
+});
+
+describe('matching a topic against mail text', () => {
+  // Breaks: a phrase split by the line wrap of a stored plain-text body
+  // ("Mahindra\nLogistics") is not found, so the email is discarded.
+  it('matches a phrase across any whitespace, still as whole words and in order', () => {
+    expect(matchesInboxAssistantTerm('because Mahindra\nLogistics normally pays', 'Mahindra Logistics')).toBe(true);
+    expect(matchesInboxAssistantTerm('Mahindra \u00a0  Logistics', 'Mahindra Logistics')).toBe(true);
+    expect(matchesInboxAssistantTerm('Logistics by Mahindra', 'Mahindra Logistics')).toBe(false);
+    expect(matchesInboxAssistantTerm('Mahindras Logistics', 'Mahindra Logistics')).toBe(false);
+    expect(matchesInboxAssistantTerm('cost (INR) total', 'cost (INR)')).toBe(true);
+  });
+
+  // Breaks: "the", "did" or a date word is required in the mail, or a term made
+  // only of such words matches every email.
+  it('reduces a term to its meaningful words', () => {
+    expect(inboxAssistantTermWords('the SCADA upgrade')).toEqual(['SCADA', 'upgrade']);
+    expect(inboxAssistantTermWords("Karnataka's GCC policy")).toEqual(['Karnataka', 'GCC', 'policy']);
+    expect(inboxAssistantTermWords('Did HDFC Bank')).toEqual(['HDFC', 'Bank']);
+    expect(inboxAssistantTermWords('the of tomorrow')).toEqual([]);
+  });
+
+  // Breaks: mail that words a topic differently from the question ("Office lease
+  // renewal - Baner" for "Baner office lease") is thrown away although the
+  // search index, which matches words in any order, found it.
+  it('matches when every meaningful word is present, in any order, and nothing when one is missing', () => {
+    expect(matchesAllInboxAssistantWords('Office lease renewal - Baner', 'Baner office lease')).toBe(true);
+    expect(matchesAllInboxAssistantWords("Karnataka's new GCC policy offers", "Karnataka's GCC policy")).toBe(true);
+    expect(matchesAllInboxAssistantWords('Commercial proposal - BHEL Haridwar SCADA network upgrade', 'the SCADA upgrade')).toBe(true);
+    expect(matchesAllInboxAssistantWords('SCADA maintenance contract', 'the SCADA upgrade')).toBe(false);
+    expect(matchesAllInboxAssistantWords('upgraded SCADA', 'SCADA upgrade')).toBe(false);
+    expect(matchesAllInboxAssistantWords('anything at all', 'the of tomorrow')).toBe(false);
   });
 });

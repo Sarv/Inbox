@@ -45,12 +45,37 @@ export function meaningfulInboxAssistantTerms(values: string[]): string[] {
   })).slice(0, 12);
 }
 
+/**
+ * Whether `value` contains `term` as whole words, in order. Any run of
+ * whitespace between the words matches, because stored plain text is
+ * hard-wrapped and a phrase can straddle a line break.
+ */
 export function matchesInboxAssistantTerm(value: string, term: string): boolean {
   const alternatives = MEETING_WORDS.includes(term.toLowerCase()) ? MEETING_WORDS : [term];
   return alternatives.some(alternative => {
-    const escaped = alternative.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escaped = alternative.trim().split(/\s+/).map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
     return new RegExp(`(^|[^\\p{L}])${escaped}(?=$|[^\\p{L}])`, 'iu').test(value);
   });
+}
+
+/**
+ * The words of `term` that carry its meaning: articles, auxiliaries, question
+ * words and date words removed ("the SCADA upgrade" is SCADA, upgrade).
+ */
+export function inboxAssistantTermWords(term: string): string[] {
+  return (meaningfulInboxAssistantTerms([term])[0] ?? '').split(' ').filter(Boolean);
+}
+
+/**
+ * Whether every meaningful word of `term` is in `value`, in any order. Mail
+ * says "Office lease renewal - Baner" for "Baner office lease", and
+ * "Karnataka's new GCC policy" for "Karnataka's GCC policy". The search index
+ * already matches that way, so a stricter check here throws away mail the
+ * search found. A term with no meaningful word matches nothing.
+ */
+export function matchesAllInboxAssistantWords(value: string, term: string): boolean {
+  const words = inboxAssistantTermWords(term);
+  return words.length > 0 && words.every(word => matchesInboxAssistantTerm(value, word));
 }
 
 function relativeDates(question: string, today: string): { after: string; before: string } | undefined {

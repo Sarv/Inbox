@@ -84,6 +84,30 @@ describe('Inbox Agent read-only search planning', () => {
     expect(generic.requiredTopicGroups).toBeUndefined();
   });
 
+  // Breaks: an article, an auxiliary or a possessive from the question becomes
+  // part of a phrase every email must contain, so mail about the right thing is
+  // thrown away and the agent says it found nothing.
+  it.each([
+    ['How much did we quote BHEL for the SCADA upgrade?', [['BHEL'], ['SCADA upgrade']]],
+    ['What price did Redington quote for the Cisco switches?', [['Redington'], ['Cisco switches']]],
+    ["What did the NASSCOM newsletter say about Karnataka's GCC policy?", [['NASSCOM'], ['Karnataka GCC policy']]],
+    ['Has Wipro replied about the overdue invoice?', [['Wipro'], ['overdue invoice']]],
+    // "PO" is a thing the question names, so it stays required; "Did" does not.
+    ['Did HDFC Bank send the PO for the AMC renewal?', [['PO'], ['HDFC Bank'], ['AMC renewal']]],
+  ])('requires only the meaningful words of each named topic: %s', async (question, groups) => {
+    const fallback = await planInboxAssistantSearch(question, vi.fn().mockRejectedValue(new Error('unavailable')));
+    expect(fallback.requiredTopicGroups).toEqual(groups);
+  });
+
+  // Breaks: a model plan's clean topic ("SCADA upgrade") is displaced by the
+  // host's longer phrase from the question ("the SCADA upgrade").
+  it('keeps the model\'s own wording of a topic when the question adds only an article', async () => {
+    const result = await planInboxAssistantSearch('how much did we quote bhel for the scada upgrade', vi.fn().mockResolvedValue(plan({
+      entityTerms: ['BHEL'], topicTerms: ['BHEL', 'SCADA upgrade'],
+    })));
+    expect(result.requiredTopicGroups).toEqual([['BHEL'], ['SCADA upgrade']]);
+  });
+
   it('does not turn model-invented products or a requested team member into required literal topics', async () => {
     const result = await planInboxAssistantSearch('What did Prakash submit for EPFO?', vi.fn().mockResolvedValue(plan({
       topicTerms: ['EPFO', 'Server licensing'], entityTerms: ['EPFO', 'Prakash'], participantTerms: ['Prakash'],

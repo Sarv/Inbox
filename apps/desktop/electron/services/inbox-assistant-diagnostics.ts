@@ -59,6 +59,7 @@ export function inboxAssistantRunSummary(requestId: string, status: InboxAssista
   const plan = diagnostics.plan;
   if (plan) parts.push(`plan=${plan.source}${plan.failure ? `:${plan.failure}` : ''}${plan.httpStatus ? `/${plan.httpStatus}` : ''}`,
     `queries=${plan.queryCount}`, `followup=${plan.followUp ? 1 : 0}`);
+  if (diagnostics.searchBroadened?.length) parts.push(`broadened=${diagnostics.searchBroadened.join('+')}`);
   const accounts = diagnostics.accounts;
   if (accounts) parts.push(`accounts=${accounts.length}`, `unavailable=${accounts.filter(account => account.status === 'unavailable').length}`,
     `searches=${sum(accounts, account => account.searches)}`, `matched=${sum(accounts, account => account.matchedMessages)}`,
