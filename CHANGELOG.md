@@ -61,6 +61,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   few hundred messages behind could show no new mail for days. It now asks for
   smaller batches when the server is slow, keeps everything that arrived, and
   shows the newest mail first.
+- **Sending setup no longer guesses the wrong provider.** For a mail server whose
+  name merely contains a big provider's domain, such as `imap.acme.com` (which
+  contains "me.com"), the sending server is no longer filled in as that
+  provider's.
+- **Contact cards keep links that Outlook Safe Links wrapped,** even when the
+  link itself mentions the Safe Links domain.
+- **Closing an empty reply no longer offers to save a draft** when the reply holds
+  nothing but blank lines or spaces.
+- **A very long meeting request typed into the assistant no longer stalls the
+  app.**
+- **A folder with "star" in its name opens as itself.** Folders such as
+  Startups, Restart or Mustard opened showing your starred mail instead of the
+  mail filed in them, and a folder such as "Starred clients" showed only its
+  starred messages. Only your mail provider's Starred or Flagged mailbox shows
+  starred mail now, and only it has the star icon in the folder list. Starring
+  a message now updates that mailbox's count, not another folder's.
+- **Antivirus sign-in always shows you what happened.** On Windows, the page
+  saying an antivirus sign-in was declined or incomplete could show up as a
+  connection error in your browser instead.
+- After you change your Google or Microsoft password, Sarv Inbox stops
+  reconnecting with the old sign-in at once and asks you to sign in again.
+  Before, it could keep retrying the revoked sign-in in the background for up
+  to 45 minutes. A brief network drop still reconnects on its own.
+- With more than one account, a sign-in rejected on an account in the background
+  no longer marks the account you are looking at as disconnected, and no longer
+  makes the next launch forget that account's connection. The rejected account
+  asks you to sign in again when you open it.
+- **Extension panels now open.** The window's navigation guard refused every
+  extension panel, so a panel such as the ClamAV scanner's stayed blank. A
+  panel now loads where the app places it and can follow links between its own
+  pages. It still cannot replace the app window, move to another extension's
+  pages, or be opened by a link in an email.
 
 ### Security
 - **Extensions now run in a sandbox.** An installed extension can no longer read
@@ -179,44 +211,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   email as it is for you to deal with, without stalling over it, and a reply
   draft is refused with a message saying the email is too large. The same limit
   now protects the app from oversized extension manifests and AI requests.
-
-### Fixed
-- **Sending setup no longer guesses the wrong provider.** For a mail server whose
-  name merely contains a big provider's domain, such as `imap.acme.com` (which
-  contains "me.com"), the sending server is no longer filled in as that
-  provider's.
-- **Contact cards keep links that Outlook Safe Links wrapped,** even when the
-  link itself mentions the Safe Links domain.
-- **Closing an empty reply no longer offers to save a draft** when the reply holds
-  nothing but blank lines or spaces.
-- **A very long meeting request typed into the assistant no longer stalls the
-  app.**
-- **A folder with "star" in its name opens as itself.** Folders such as
-  Startups, Restart or Mustard opened showing your starred mail instead of the
-  mail filed in them, and a folder such as "Starred clients" showed only its
-  starred messages. Only your mail provider's Starred or Flagged mailbox shows
-  starred mail now, and only it has the star icon in the folder list. Starring
-  a message now updates that mailbox's count, not another folder's.
-- **Antivirus sign-in always shows you what happened.** On Windows, the page
-  saying an antivirus sign-in was declined or incomplete could show up as a
-  connection error in your browser instead.
-
-### Fixed
-- After you change your Google or Microsoft password, Sarv Inbox stops
-  reconnecting with the old sign-in at once and asks you to sign in again.
-  Before, it could keep retrying the revoked sign-in in the background for up
-  to 45 minutes. A brief network drop still reconnects on its own.
-- With more than one account, a sign-in rejected on an account in the background
-  no longer marks the account you are looking at as disconnected, and no longer
-  makes the next launch forget that account's connection. The rejected account
-  asks you to sign in again when you open it.
-
-### Fixed
-- **Extension panels now open.** The window's navigation guard refused every
-  extension panel, so a panel such as the ClamAV scanner's stayed blank. A
-  panel now loads where the app places it and can follow links between its own
-  pages. It still cannot replace the app window, move to another extension's
-  pages, or be opened by a link in an email.
 
 ## [1.4.10] - 2026-10-30
 
