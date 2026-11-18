@@ -88,6 +88,7 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
+            ulimit -c 0
             xvfb-run -a pnpm --filter @sarvinbox/desktop test:sandbox-escape
           else
             pnpm --filter @sarvinbox/desktop test:sandbox-escape
