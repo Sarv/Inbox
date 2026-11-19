@@ -1,4 +1,5 @@
 import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from './inbox-assistant-actions';
+import type { InboxAgentChangeSet, InboxAgentChangeSetRequest } from './inbox-assistant-changes';
 import type { InboxAssistantDashboard, InboxAssistantDashboardRequest } from './inbox-assistant-dashboard';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest } from './local-calendar';
 
@@ -234,6 +235,8 @@ export interface InboxAssistantAgentDiagnostics {
   /** Times the model replied in prose and was asked to use a tool. */
   nudges?: number;
   stop?: 'answered' | 'step_limit';
+  /** Change sets the run staged, the messages in them, and how many "Approve for me" applied without a card. */
+  changes?: { sets: number; messages: number; autoApplied: number };
 }
 
 export interface InboxAssistantRunDiagnostics {
@@ -302,6 +305,8 @@ export interface InboxAssistantExchange {
   activities?: InboxAssistantActivity[];
   review?: InboxAssistantReview;
   reviewResult?: InboxAssistantReviewApplyResult;
+  /** Mail changes the agent staged or applied in this exchange, one card each. */
+  changeSets?: InboxAgentChangeSet[];
   /** Compact receipt presentation for batches produced by one automatic run. */
   reviewBatch?: { runId: string; number: number };
   requestId?: string;
@@ -413,6 +418,8 @@ export interface InboxAssistantAPI {
   history(): Promise<InboxAssistantResult<InboxAssistantExchange[]>>;
   ask(request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
   applyReview(request: InboxAssistantReviewActionRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
+  /** Approve, cancel or undo one of the agent's change sets. */
+  changeSet(request: InboxAgentChangeSetRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
   cancel(requestId: string): Promise<InboxAssistantResult<InboxAssistantCancellation>>;
   clearHistory(): Promise<InboxAssistantResult<null>>;
   onActivity(listener: (activity: InboxAssistantActivity) => void): () => void;

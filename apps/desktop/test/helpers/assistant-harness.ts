@@ -7,6 +7,7 @@ import Database from 'better-sqlite3';
 import { vi } from 'vitest';
 
 import type { AssistantAttachmentResult } from '../../electron/services/assistant-attachment-types';
+import type { InboxAgentMailActions } from '../../electron/services/inbox-assistant-change-sets';
 import type { InboxAssistantHistoryStore } from '../../electron/services/inbox-assistant-history';
 import type { InboxAssistantService, InboxAssistantServiceDeps } from '../../electron/services/inbox-assistant-service';
 import type { InboxAssistantAccount, InboxAssistantAIPurpose, InboxAssistantChat, InboxAssistantExchange, InboxAssistantRequest } from '../../src/types/inbox-assistant';
@@ -70,6 +71,20 @@ export function lastToolResult(turn: AgentTurn): string {
   return '';
 }
 
+type QueueAnswer = 'success' | 'queued' | 'failed';
+
+/**
+ * The sync engine behind the agent's mail changes (`mailActions: true`). The
+ * local writes are the production ones (read flags, stars, moves, categories
+ * on the real account database); only the server queue is this recorder.
+ */
+export interface HarnessEngine {
+  /** Every queue call, in order. */
+  ops: Array<{ accountId: string; op: string; path: string; uids: number[]; destination?: string }>;
+  /** The queue's answer to each call. Default: 'success' (a move then gets a new UID at once, as a completed MOVE does). */
+  answer: (op: string, accountId: string) => QueueAnswer;
+}
+
 export interface AssistantHarness {
   accounts: InboxAssistantAccount[];
   service: InboxAssistantService;
@@ -89,6 +104,8 @@ export interface AssistantHarness {
   logs: string[];
   /** Every read or unread change the agent made to mail, in order. Nothing is written to the mailbox. */
   readChanges: Array<{ accountId: string; emailIds: string[]; read: boolean; source?: string }>;
+  /** The queue behind `mailActions: true`. */
+  engine: HarnessEngine;
   /** Start a fresh chat, so a question is not read as a follow-up to the last one. */
   newChat(): string;
   mailbox(accountId: string): TestAccount;
@@ -139,6 +156,8 @@ export async function createAssistantHarness(options: {
   readAttachment?: InboxAssistantServiceDeps['readAttachment'];
   now?: () => number;
   timeZone?: string;
+  /** Give the agent its write tools, over the real account databases and a recording queue. */
+  mailActions?: boolean;
 } = {}): Promise<AssistantHarness> {
   // The history store imports the Electron-bound core DB module for its default
   // database. Tests supply their own, so the import must never reach Electron.
@@ -146,6 +165,9 @@ export async function createAssistantHarness(options: {
   const { createInboxAssistantHistoryStore } = await import('../../electron/services/inbox-assistant-history');
   const { InboxAssistantService: Service } = await import('../../electron/services/inbox-assistant-service');
   const { callInboxAssistantAI, callInboxAssistantChat, INBOX_ASSISTANT_SYSTEM_PROMPT } = await import('../../electron/services/inbox-assistant-usage');
+  const { changeAssistantReadFlags, changeAssistantStarFlags } = await import('../../electron/services/assistant-mail-actions');
+  const { changeAssistantMailLocation } = await import('../../electron/services/assistant-mail-moves');
+  const { changeEmailCategory } = await import('../../electron/services/classification-actions');
 
   const accounts = options.accounts ?? HARNESS_ACCOUNTS;
   const dir = await mkdtemp(join(tmpdir(), 'assistant-harness-'));
@@ -166,8 +188,9 @@ export async function createAssistantHarness(options: {
   const readChanges: AssistantHarness['readChanges'] = [];
   let requests = 0;
   const agentTurns: AgentTurn[] = [];
+  const engine: HarnessEngine = { ops: [], answer: () => 'success' };
   const harness = {
-    accounts, history, chatId, calls, logs, readChanges, agentTurns, agent: options.agent,
+    accounts, history, chatId, calls, logs, readChanges, agentTurns, agent: options.agent, engine,
     // By default the planner is refused (a 400 is permanent, so nothing retries)
     // and the answer is empty: the host's own routing and retrieval, unaided.
     ai: options.ai ?? (prompt => scriptedPurpose(prompt) === 'plan' ? { status: 400 } : NO_FACTS),
@@ -211,6 +234,57 @@ export async function createAssistantHarness(options: {
     }) as unknown as typeof fetch,
   };
 
+  let nextUid = 90_000;
+  /** The production mail actions over one harness account, with `engine` as its server queue. */
+  const target = (accountId: string) => {
+    const mailbox = mailboxes.get(accountId);
+    if (!mailbox) throw new Error('Unknown harness account.');
+    const queue = (op: string, path: string, uids: number[], destination?: string): QueueAnswer => {
+      engine.ops.push({ accountId, op, path, uids: [...uids], ...(destination ? { destination } : {}) });
+      return engine.answer(op, accountId);
+    };
+    return {
+      storage: mailbox.storage,
+      engine: {
+        bulkMarkAsRead: async (path: string, uids: number[]) => queue('read', path, uids),
+        bulkMarkAsUnread: async (path: string, uids: number[]) => queue('unread', path, uids),
+        bulkStar: async (path: string, uids: number[]) => queue('star', path, uids),
+        bulkUnstar: async (path: string, uids: number[]) => queue('unstar', path, uids),
+        move: async (path: string, uid: number, destination: string, emailId?: string) => {
+          const answer = queue('move', path, [uid], destination);
+          // A completed MOVE maps the row to its new UID in the destination.
+          if (answer === 'success' && emailId) await mailbox.storage.updateEmail(emailId, { uid: ++nextUid });
+          return answer;
+        },
+        isConnected: () => false,
+        fetchUidByMessageId: async () => null,
+        assertManualCategorySync: () => {},
+        markImportant: async (path: string, uid: number, on: boolean) => queue(on ? 'important' : 'unimportant', path, [uid]),
+        setCategorySelection: async (path: string, uid: number) => queue('category', path, [uid]),
+      },
+      assertCurrent: async () => {},
+    };
+  };
+  const harnessMailActions = (): InboxAgentMailActions => ({
+    setRead: (accountId, ids, read) => changeAssistantReadFlags(target(accountId), ids, read),
+    setStarred: (accountId, ids, starred) => changeAssistantStarFlags(target(accountId), ids, starred),
+    move: (accountId, ids, to) => changeAssistantMailLocation(target(accountId), ids, to),
+    // Production restores through restoreEmailsFromTrash (email-handlers), which
+    // needs a live IMAP pool; here it is the same move back to Inbox.
+    restore: (accountId, ids) => changeAssistantMailLocation(target(accountId), ids, { folderId: 'f-inbox' }),
+    setCategory: async (accountId, ids, slug, on) => {
+      const receipt = { appliedIds: [] as string[], queuedIds: [] as string[], failedIds: [] as string[] };
+      const { storage, engine: queue } = target(accountId);
+      for (const id of ids) {
+        try {
+          const result = await changeEmailCategory(storage, queue, id, slug, on);
+          (result.syncStatus === 'queued' ? receipt.queuedIds : receipt.appliedIds).push(id);
+        } catch { receipt.failedIds.push(id); }
+      }
+      return receipt;
+    },
+  });
+
   const deps: InboxAssistantServiceDeps = {
     accounts: () => accounts,
     openMailbox: async accountId => {
@@ -231,6 +305,7 @@ export async function createAssistantHarness(options: {
     },
     ...(options.now ? { now: options.now } : {}),
     timeZone: () => options.timeZone ?? 'Asia/Kolkata',
+    ...(options.mailActions ? { mailActions: harnessMailActions() } : {}),
   };
   harness.deps = deps;
   harness.service = new Service(deps);

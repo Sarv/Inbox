@@ -486,4 +486,12 @@ describe('the app.log lines of an agent run', () => {
     expect(inboxAssistantDegradedStages({ version: 1, route: 'agent', agent: { mode: 'native', steps: 2, toolCalls: {}, toolErrors: {}, stop: 'answered' } })).toEqual([]);
     expect(inboxAssistantRunSummary('r', 'completed', { version: 1, route: 'agent', agent: { mode: 'native', reasoning: 'off', steps: 2, toolCalls: {}, toolErrors: {} } })).toContain('agent=native:reasoning_off steps=2');
   });
+
+  // Breaks: app.log cannot tell a run that changed mail from one that only read it.
+  it('counts the change sets a run staged and applied, and nothing else about them', () => {
+    const line = inboxAssistantRunSummary('r', 'completed', { version: 1, route: 'agent',
+      agent: { mode: 'native', steps: 3, toolCalls: { change_mail: 2 }, toolErrors: {}, stop: 'answered', changes: { sets: 2, messages: 35, autoApplied: 30 } } });
+    expect(line).toContain('stop=answered changes=sets:2,messages:35,auto:30');
+    expect(inboxAssistantRunSummary('r', 'completed', { version: 1, route: 'agent', agent: { mode: 'native', steps: 1, toolCalls: {}, toolErrors: {} } })).not.toContain('changes=');
+  });
 });

@@ -353,6 +353,12 @@ Established shared helpers (extend this list as you add more):
   working on. Use it at any `catch` whose record outlives the request (a saved
   diagnostics object, a log line) instead of keeping or logging `error.message`,
   which can quote query words, mail text or a provider's response body.
+- `stageChangeSet` / `applyChangeSet` / `undoChangeSet` —
+  `apps/desktop/electron/services/inbox-assistant-change-sets.ts`. The one way the
+  Inbox Agent changes mail: a frozen set of messages it was shown, applied on the
+  user's approval (or within the "Approve for me" cap), each row at most once,
+  protected rows only when ticked, Undo only for rows still as the set left them.
+  A new agent write tool stages through it; never call a mail action from a tool.
 - `createAssistantHarness()` — `apps/desktop/test/helpers/assistant-harness.ts`.
   The real Inbox Agent end to end for tests (real databases, history store and
   provider call path; scripted network). Use it instead of hand-wiring

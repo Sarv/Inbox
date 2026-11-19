@@ -7,6 +7,7 @@ import { InboxAssistant } from '../../../../../src/components/assistant/InboxAss
 import type { ConfirmOptions } from '../../../../../src/components/ConfirmDialog';
 import type { InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantRequest, InboxAssistantResult, InboxAssistantReviewActionRequest, InboxAssistantRewind } from '../../../../../src/types/inbox-assistant';
 import type { InboxAssistantReviewItem } from '../../../../../src/types/inbox-assistant-actions';
+import type { InboxAgentChangeSet, InboxAgentChangeSetRequest } from '../../../../../src/types/inbox-assistant-changes';
 import { act, cleanup, fire, render, settle, toggle, typeInto } from '../../../../helpers/render';
 
 const ok = <T,>(data: T): InboxAssistantResult<T> => ({ success: true, data });
@@ -28,6 +29,15 @@ function exchange(id = 'exchange-1'): InboxAssistantExchange {
       coverage: accounts.map(account => ({ accountId: account.id, email: account.email, status: 'searched' as const, matchedMessages: 3, reviewedMessages: 3, missingBodies: 0, attachmentsRead: 1, attachmentsSkipped: 0, truncated: false, warnings: [] })),
     },
   };
+}
+/** An agent answer with one change-set card, pending or applied. */
+function changeExchange(status: 'pending' | 'applied', action: InboxAgentChangeSet['action'] = 'mark_read'): InboxAssistantExchange {
+  const now = Date.now();
+  return { ...exchange('exchange-change'), changeSets: [{
+    id: 'set-1', label: 'C1', action, summary: action === 'trash' ? 'Move 1 email to Trash' : 'Mark 1 email read', createdAt: now,
+    approveBy: now + 60_000, undoBy: status === 'applied' ? now + 60_000 : 0, status,
+    items: [{ id: 'c1-1', accountId: 'work', accountEmail: 'rc@sarv.com', emailId: 'mail-1', threadId: 'thread-1', subject: 'Weekend sale', from: 'shop@example.test', date: 1720000000, status: status === 'pending' ? 'pending' : 'applied' }],
+  }] };
 }
 function chat(id = 'chat-1', exchanges: InboxAssistantExchange[] = []): InboxAssistantChat {
   return { id, title: id === 'chat-1' ? 'TCS quotations' : id === 'chat-2' ? 'Meeting follow-ups' : 'New conversation', createdAt: 1720000000000, updatedAt: 1720000000000, exchangeCount: exchanges.length, exchanges: exchanges.map(exchange => ({ ...exchange, chatId: id })) };
@@ -81,6 +91,7 @@ const api = {
   draftEmail: vi.fn(async (request: InboxAssistantDraftRequest): Promise<InboxAssistantResult<InboxAssistantDraft>> => ok({ chatId: request.chatId, accountId: request.accountId, to: ['buyer@tcs.example'], cc: [], subject: 'TCS quotation follow-up', body: 'Hello, please review our quotation.' })),
   ask: vi.fn(async (request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>> => ok({ ...exchange(), chatId: request.chatId })),
   applyReview: vi.fn(async (_request: InboxAssistantReviewActionRequest): Promise<InboxAssistantResult<InboxAssistantExchange>> => ok(reviewReceipt(reviewExchange()))),
+  changeSet: vi.fn(async (_request: InboxAgentChangeSetRequest): Promise<InboxAssistantResult<InboxAssistantExchange>> => ok(changeExchange('applied'))),
   cancel: vi.fn(async (requestId: string): Promise<InboxAssistantResult<InboxAssistantCancellation>> => ok({ requestId, cancelled: true })),
   clearHistory: vi.fn(async (): Promise<InboxAssistantResult<null>> => ok(null)),
   onActivity: vi.fn((listener: (activity: InboxAssistantActivity) => void) => {
@@ -108,6 +119,7 @@ beforeEach(() => {
   api.draftEmail.mockImplementation(async request => ok({ chatId: request.chatId, accountId: request.accountId, to: ['buyer@tcs.example'], cc: [], subject: 'TCS quotation follow-up', body: 'Hello, please review our quotation.' }));
   api.ask.mockImplementation(async request => ok({ ...exchange(), chatId: request.chatId }));
   api.applyReview.mockReset().mockImplementation(async () => ok(reviewReceipt(reviewExchange())));
+  api.changeSet.mockReset().mockImplementation(async () => ok(changeExchange('applied')));
   api.cancel.mockImplementation(async requestId => ok({ requestId, cancelled: true }));
   api.clearHistory.mockImplementation(async () => ok(null));
   Object.assign(window, { electronAPI: { inboxAssistant: api } });
@@ -1449,5 +1461,57 @@ describe('Inbox Agent', () => {
     view.unmount();
     expect(api.cancel).not.toHaveBeenCalled();
     expect(offActivity).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Inbox Agent change-set cards', () => {
+  // Breaks: approving a card never reaches the host, or the mail list keeps showing the old state.
+  it('sends the approval for the selected rows, shows the receipt and refreshes mail', async () => {
+    const onMailChanged = vi.fn();
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [changeExchange('pending')] : [])));
+    const view = await mount({ onMailChanged });
+    expect(view.container.textContent).toContain('Waiting for your approval. Nothing has changed yet.');
+    fire(button(view, 'Approve'), 'click'); await settle();
+    expect(api.changeSet).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: 'chat-1', exchangeId: 'exchange-change', changeSetId: 'set-1', decision: 'approve', itemIds: ['c1-1'] }));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    expect(view.container.textContent).toContain('Applied · 1 email changed');
+    fire(button(view, 'Undo 1 email'), 'click'); await settle();
+    expect(api.changeSet.mock.calls[1]![0]).toMatchObject({ decision: 'undo' });
+    expect(api.changeSet.mock.calls[1]![0].itemIds).toBeUndefined();
+  });
+
+  // Breaks: approving a Trash change skips the confirmation the mail view always asks for.
+  it('asks before moving approved emails to Trash, and changes nothing when declined', async () => {
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [changeExchange('pending', 'trash')] : [])));
+    confirm.mockResolvedValueOnce(false);
+    const view = await mount();
+    fire(button(view, 'Approve'), 'click'); await settle();
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: 'Move selected emails to Trash?', destructive: true }));
+    expect(api.changeSet).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a host refusal (an expired card) disappears silently.
+  it('shows the host\'s refusal and leaves mail alone', async () => {
+    const onMailChanged = vi.fn();
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [changeExchange('pending')] : [])));
+    api.changeSet.mockResolvedValueOnce({ success: false, error: 'These changes are no longer available. Ask again to prepare them fresh.' });
+    const view = await mount({ onMailChanged });
+    fire(button(view, 'Cancel'), 'click'); await settle();
+    expect(api.changeSet).toHaveBeenCalledWith(expect.objectContaining({ decision: 'cancel' }));
+    expect(view.container.textContent).toContain('These changes are no longer available.');
+    expect(onMailChanged).not.toHaveBeenCalled();
+  });
+
+  // Breaks: mail changed by "Approve for me" during an answer stays stale in the mail list.
+  it('refreshes mail after an answer that applied changes, and not after one that only staged them', async () => {
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    api.ask.mockImplementationOnce(async request => ok({ ...changeExchange('pending'), chatId: request.chatId }));
+    submit(view, 'Mark the sale read'); await settle();
+    expect(onMailChanged).not.toHaveBeenCalled();
+    api.ask.mockImplementationOnce(async request => ok({ ...changeExchange('applied'), id: 'exchange-applied', chatId: request.chatId }));
+    submit(view, 'Mark the sale read'); await settle();
+    expect(onMailChanged).toHaveBeenCalledOnce();
   });
 });

@@ -219,4 +219,17 @@ describe('a run of the agent loop', () => {
     ]);
     expect(JSON.parse(inboxAssistantDiagnosticsReport({ ...exchange, diagnostics: { version: 1, route: 'agent', agent: { mode: 'native', reasoning: 'off', steps: 2, toolCalls: {}, toolErrors: {} } } })).agent.reasoning).toBe('off');
   });
+
+  // Breaks: a report or the activity panel hides that the agent changed mail.
+  it('reports the changes the agent prepared and applied, as counts only', () => {
+    const changed: InboxAssistantRunDiagnostics = { version: 1, route: 'agent',
+      agent: { mode: 'native', steps: 3, toolCalls: { search_mail: 1, change_mail: 1 }, toolErrors: {}, changes: { sets: 1, messages: 35, autoApplied: 33 } } };
+    expect(JSON.parse(inboxAssistantDiagnosticsReport({ ...exchange, diagnostics: changed })).agent.changes).toEqual({ sets: 1, messages: 35, autoApplied: 33 });
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: changed })).toEqual([
+      'The AI worked in 3 steps and searched mail, prepared mail changes.',
+      'It prepared 1 change to 35 emails, and applied 33 of those emails for you.',
+    ]);
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: { ...changed, agent: { ...changed.agent!, changes: { sets: 2, messages: 4, autoApplied: 0 } } } })[1])
+      .toBe('It prepared 2 changes to 4 emails.');
+  });
 });

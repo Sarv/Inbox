@@ -111,6 +111,7 @@ export function inboxAssistantDiagnosticsReport(
     agent: agent ? compact({
       mode: word(agent.mode), fallback: word(agent.fallback), reasoning: word(agent.reasoning), steps: count(agent.steps), toolCalls: tallies(agent.toolCalls),
       toolErrors: tallies(agent.toolErrors), nudges: count(agent.nudges), stop: word(agent.stop),
+      changes: object(agent.changes) ? compact({ sets: count(object(agent.changes)!.sets), messages: count(object(agent.changes)!.messages), autoApplied: count(object(agent.changes)!.autoApplied) }) : undefined,
     }) : undefined,
     searchBroadened: Array.isArray(diagnostics.searchBroadened) ? words(diagnostics.searchBroadened) : undefined,
     accounts: accounts?.map((account, index) => compact({
@@ -159,6 +160,7 @@ const AGENT_TOOL_LABELS: Record<string, string> = {
   search_mail: 'searched mail', count_mail: 'counted mail', read_message: 'read emails', read_thread: 'read conversations',
   read_attachment: 'read attachments', deep_search: 'searched in depth', classify_messages: 'sorted emails',
   list_accounts: 'listed accounts', list_folders: 'listed folders', list_categories: 'listed categories',
+  change_mail: 'prepared mail changes', undo_change: 'undid a change',
 };
 
 /** A few plain sentences for the activity panel. The copied report holds the detail. */
@@ -182,6 +184,12 @@ export function inboxAssistantDiagnosticsSummary(exchange: Pick<InboxAssistantEx
     const errors = Object.values(tallies(agent.toolErrors)).reduce((sum, amount) => sum + amount, 0);
     if (errors) lines.push(`${errors} ${errors === 1 ? 'tool call was' : 'tool calls were'} refused or failed.`);
     if (agent.stop === 'step_limit') lines.push('It ran out of steps before it finished.');
+    const changes = object(agent.changes);
+    const sets = count(changes?.sets) ?? 0;
+    if (sets) {
+      const auto = count(changes?.autoApplied) ?? 0;
+      lines.push(`It prepared ${sets} ${sets === 1 ? 'change' : 'changes'} to ${count(changes?.messages) ?? 0} emails${auto ? `, and applied ${auto} of those emails for you` : ''}.`);
+    }
   }
   const broadened = Array.isArray(diagnostics.searchBroadened) ? diagnostics.searchBroadened : [];
   if (broadened.includes('required_topics')) lines.push('No email mentioned every topic in the question, so the closest matches were used.');

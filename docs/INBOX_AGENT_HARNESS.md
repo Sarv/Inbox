@@ -224,3 +224,56 @@ eval passes. Tests and the whole suite with every phase, as CLAUDE.md requires.
   activity panel. Content-free like the rest.
 - **Not yet**: write tools, change sets, Undo (Phase 2); a Settings toggle in
   place of the environment switch; the eval suite ported to agent tasks.
+
+## Phase 2 as built
+
+- **Same switch**: the write tools are offered whenever the loop runs with the
+  host's mail actions (`InboxAssistantServiceDeps.mailActions`, wired in
+  `ipc/inbox-assistant-handlers.ts`). Without them the agent stays read-only,
+  as in Phase 1.
+- **Tools** (`inbox-assistant-agent-write-tools.ts`): `change_mail` with one
+  `action` (`mark_read`, `mark_unread`, `star`, `unstar`, `archive`, `trash`,
+  `restore`, `move`, `add_category`, `remove_category`; `important` is the
+  category of that name), and `undo_change` for a set this request applied.
+  Emails are named by `S…` ids a tool showed in this run, or by a
+  `classify_messages` result and its labels (`from_result` + `labels`);
+  `unsure` is never changed. `include_conversation` adds each email's
+  conversation (same account). Mail already as asked is left out and counted.
+  A move covers one account, never to Trash (that is `trash`), Spam, Drafts or
+  Sent.
+- **Provenance**: an id the model was not shown (made up, or read in an email)
+  fails the whole call; ids exist only for the selected accounts.
+- **Change sets** (`inbox-assistant-change-sets.ts`): a staged set freezes each
+  message with its tags and folder. Applying runs only pending and failed rows,
+  so approving twice never applies a row twice and a retry repeats only what
+  failed. A row moved or deleted since staging is skipped. Each account's
+  action fails on its own. Approval is open 30 minutes; Undo 24 hours, in this
+  app session (memory only: after a restart the card shows as expired).
+- **Undo** puts each changed row back only if it is still as the set left it:
+  flags and categories by their inverse, archive and move back to where the
+  message was (its Inbox if it was in one), Trash back through the Trash
+  restore when it came from the Inbox, a restore back to Trash.
+- **Protections**: for `mark_read`, `archive`, `trash` and `move`, starred and
+  important mail and the unread review's content gates (security codes, bank
+  and card records, invoices, contracts, business reports, invitations) are
+  staged unticked with the reason. Only the user's tick applies them; the card
+  asks once more, as it does for Trash.
+- **Modes**: "Ask for approval" stages every set for a card under the answer.
+  "Approve for me" applies a set at once, up to 200 emails per request; a
+  larger set, or one made only of protected mail, waits for a card. A set
+  applied before the run fails keeps its card and Undo.
+- **Card and IPC**: `AssistantChangeSetCard` (Approve / Approve selected /
+  Cancel, Retry failed, Undo); `inboxAssistant:changeSet` with
+  `decision: approve | cancel | undo`, validated strictly and serialized with
+  every other mail action. The mail list refreshes after a change.
+- **Mail writes** reuse the review cards' durable, receipt-returning paths:
+  `changeAssistantReadFlags` and the new `changeAssistantStarFlags`,
+  `changeAssistantMailLocation` (now also to any folder by id),
+  `restoreEmailsFromTrash`, `changeEmailCategory`. Each is logged for learning
+  as `agent_approved`.
+- **Diagnostics**: `diagnostics.agent.changes` (sets, messages, how many
+  applied without a card), on the app.log line as `changes=…`, in the copied
+  report and the activity panel. Counts only.
+- **Not yet**: standing tools (filters, block, VIP, folders, labels, snooze),
+  spam, drafts (Phase 3); outward tools and permanent delete (Phase 4); Undo
+  across a restart; "undo that" in a later message (the card's Undo does it).

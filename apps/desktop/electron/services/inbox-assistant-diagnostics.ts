@@ -62,7 +62,8 @@ export function inboxAssistantRunSummary(requestId: string, status: InboxAssista
     + `${diagnostics.failure.error.code ? `/${diagnostics.failure.error.code}` : ''}${diagnostics.failure.error.status ? `/${diagnostics.failure.error.status}` : ''}`);
   const agent = diagnostics.agent;
   if (agent) parts.push(`agent=${agent.mode}${agent.fallback ? `:${agent.fallback}` : ''}${agent.reasoning ? `:reasoning_${agent.reasoning}` : ''}`, `steps=${agent.steps}`,
-    `tools=${counts(agent.toolCalls)}`, `tool_errors=${counts(agent.toolErrors)}`, `stop=${agent.stop ?? 'none'}`);
+    `tools=${counts(agent.toolCalls)}`, `tool_errors=${counts(agent.toolErrors)}`, `stop=${agent.stop ?? 'none'}`,
+    ...(agent.changes ? [`changes=sets:${agent.changes.sets},messages:${agent.changes.messages},auto:${agent.changes.autoApplied}`] : []));
   const plan = diagnostics.plan;
   if (plan) parts.push(`plan=${plan.source}${plan.failure ? `:${plan.failure}` : ''}${plan.failedField ? `/${plan.failedField}` : ''}${plan.httpStatus ? `/${plan.httpStatus}` : ''}`,
     `queries=${plan.queryCount}`, `followup=${plan.followUp ? 1 : 0}`);

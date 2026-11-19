@@ -1,15 +1,16 @@
 import { createHmac, randomBytes } from 'node:crypto';
 
-import { effectiveAIBaseUrl, parseAttachmentNames } from '@sarvinbox/core';
+import { effectiveAIBaseUrl, hasTag, parseAttachmentNames } from '@sarvinbox/core';
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
 
-import type { InboxAssistantAIUsage } from '../../src/types/inbox-assistant';
+import type { InboxAssistantActivity, InboxAssistantAIUsage } from '../../src/types/inbox-assistant';
 import { requireAccountStorage, resolveNamedOrActiveAccountTarget } from '../services/account-target';
 import { readRegistryAccounts, resolveAccountIdentity } from '../services/accounts-registry';
 import { readAssistantAttachment } from '../services/assistant-attachment-reader';
-import { changeAssistantReadFlags } from '../services/assistant-mail-actions';
+import { changeAssistantReadFlags, changeAssistantStarFlags } from '../services/assistant-mail-actions';
 import { changeAssistantMailLocation } from '../services/assistant-mail-moves';
 import { fetchAssistantMessageBody } from '../services/assistant-mailbox-download';
+import { changeEmailCategory } from '../services/classification-actions';
 import { buildInboxAssistantDashboard } from '../services/inbox-assistant-dashboard';
 import { inboxAssistantHistory } from '../services/inbox-assistant-history';
 import { createUnreadReviewBehaviorContext } from '../services/inbox-assistant-review-behavior';
@@ -20,6 +21,7 @@ import { getPipelineAIConfig } from '../services/unified-pipeline-service';
 import { getMainWindow } from '../shared';
 
 import { logUserAction } from './agent-handlers';
+import { restoreEmailsFromTrash } from './email-handlers';
 
 /**
  * Keys the review-cache identity below. Per process and never stored: the
@@ -27,6 +29,51 @@ import { logUserAction } from './agent-handlers';
  * stay stable for this run.
  */
 const REVIEW_IDENTITY_KEY = randomBytes(32);
+
+/**
+ * The named account's storage and queue for a mail action, checked again
+ * before every write: a removed or replaced account must not receive a change
+ * prepared for the one it replaced.
+ */
+async function namedAccountTarget(accountId: string) {
+  const assertRegistered = () => {
+    if (!readRegistryAccounts().some(account => account.id === accountId)) throw new Error('The review account is no longer connected.');
+  };
+  assertRegistered();
+  const storage = await requireAccountStorage(accountId);
+  const target = await resolveNamedOrActiveAccountTarget(accountId);
+  if (target.storage !== storage) throw new Error('The review account changed.');
+  return {
+    storage, engine: target.syncEngine,
+    assertCurrent: async () => {
+      assertRegistered();
+      if (await requireAccountStorage(accountId) !== storage) throw new Error('The review account changed.');
+    },
+  };
+}
+
+type ActionSource = 'user' | 'agent_approved' | undefined;
+type AccountStorage = Awaited<ReturnType<typeof requireAccountStorage>>;
+
+/** Record a flag change in the learning history, as the mail view does. */
+function flagLogger(storage: AccountStorage, source: ActionSource, [onAction, offAction]: ['read', 'unread'] | ['star', 'unstar']) {
+  return async (emailId: string, on: boolean) => {
+    const email = await storage.getEmail(emailId);
+    await logUserAction(emailId, on ? onAction : offAction, {
+      source: source === 'user' ? 'user' : 'agent_approved', threadId: email?.threadId, senderAddress: email?.fromAddress,
+    }, storage);
+  };
+}
+
+function moveLogger(storage: AccountStorage, source: ActionSource) {
+  return async (emailId: string, action: 'archive' | 'trash' | 'move', destination: string) => {
+    const email = await storage.getEmail(emailId);
+    await logUserAction(emailId, action === 'trash' ? 'delete' : action, {
+      source: source === 'user' ? 'user' : 'agent_approved', threadId: email?.threadId, senderAddress: email?.fromAddress,
+      actionValue: JSON.stringify({ destination }),
+    }, storage);
+  };
+}
 
 const service = new InboxAssistantService({
   accounts: () => readRegistryAccounts().map(({ id, email, name }) => ({ id, email, name })),
@@ -87,49 +134,55 @@ const service = new InboxAssistantService({
   },
   readAttachment: readAssistantAttachment,
   moveMail: async (accountId, emailIds, action, context) => {
-    const assertRegistered = () => {
-      if (!readRegistryAccounts().some(account => account.id === accountId)) throw new Error('The review account is no longer connected.');
-    };
-    assertRegistered();
-    const storage = await requireAccountStorage(accountId);
-    const target = await resolveNamedOrActiveAccountTarget(accountId);
-    if (target.storage !== storage) throw new Error('The review account changed.');
-    return changeAssistantMailLocation({
-      storage, engine: target.syncEngine,
-      assertCurrent: async () => {
-        assertRegistered();
-        if (await requireAccountStorage(accountId) !== storage) throw new Error('The review account changed.');
-      },
-      onChanged: async (emailId, appliedAction, destination) => {
-        const email = await storage.getEmail(emailId);
-        await logUserAction(emailId, appliedAction === 'trash' ? 'delete' : 'archive', {
-          source: context?.source === 'user' ? 'user' : 'agent_approved', threadId: email?.threadId, senderAddress: email?.fromAddress,
-          actionValue: JSON.stringify({ destination }),
-        }, storage);
-      },
-    }, emailIds, action);
+    const target = await namedAccountTarget(accountId);
+    return changeAssistantMailLocation({ ...target, onChanged: moveLogger(target.storage, context?.source) }, emailIds, action);
   },
   setRead: async (accountId, emailIds, read, context) => {
-    const assertRegistered = () => {
-      if (!readRegistryAccounts().some(account => account.id === accountId)) throw new Error('The review account is no longer connected.');
-    };
-    assertRegistered();
-    const storage = await requireAccountStorage(accountId);
-    const target = await resolveNamedOrActiveAccountTarget(accountId);
-    if (target.storage !== storage) throw new Error('The review account changed.');
-    return changeAssistantReadFlags({
-      storage, engine: target.syncEngine,
-      assertCurrent: async () => {
-        assertRegistered();
-        if (await requireAccountStorage(accountId) !== storage) throw new Error('The review account changed.');
-      },
-      onChanged: async (emailId, nowRead) => {
-        const email = await storage.getEmail(emailId);
-        await logUserAction(emailId, nowRead ? 'read' : 'unread', {
-          source: context?.source === 'user' ? 'user' : 'agent_approved', threadId: email?.threadId, senderAddress: email?.fromAddress,
-        }, storage);
-      },
-    }, emailIds, read);
+    const target = await namedAccountTarget(accountId);
+    return changeAssistantReadFlags({ ...target, onChanged: flagLogger(target.storage, context?.source, ['read', 'unread']) }, emailIds, read);
+  },
+  // The agent's approved change sets (inbox-assistant-change-sets.ts). Each
+  // is the same durable, receipt-returning path the review cards use.
+  mailActions: {
+    setRead: async (accountId, emailIds, read) => {
+      const target = await namedAccountTarget(accountId);
+      return changeAssistantReadFlags({ ...target, onChanged: flagLogger(target.storage, 'agent_approved', ['read', 'unread']) }, emailIds, read);
+    },
+    setStarred: async (accountId, emailIds, starred) => {
+      const target = await namedAccountTarget(accountId);
+      return changeAssistantStarFlags({ ...target, onChanged: flagLogger(target.storage, 'agent_approved', ['star', 'unstar']) }, emailIds, starred);
+    },
+    move: async (accountId, emailIds, to) => {
+      const target = await namedAccountTarget(accountId);
+      return changeAssistantMailLocation({ ...target, onChanged: moveLogger(target.storage, 'agent_approved') }, emailIds, to);
+    },
+    restore: async (accountId, emailIds) => {
+      const target = await namedAccountTarget(accountId);
+      await target.assertCurrent();
+      const { restoredIds, failedIds } = await restoreEmailsFromTrash(target.storage, target.engine, emailIds);
+      return { appliedIds: restoredIds, queuedIds: [], failedIds };
+    },
+    setCategory: async (accountId, emailIds, slug, on) => {
+      const target = await namedAccountTarget(accountId);
+      const receipt = { appliedIds: [] as string[], queuedIds: [] as string[], failedIds: [] as string[] };
+      for (const emailId of emailIds) {
+        try {
+          await target.assertCurrent();
+          const before = await target.storage.getEmail(emailId);
+          if (!before) { receipt.failedIds.push(emailId); continue; }
+          // Already as asked: in no list, as the other receipts report it.
+          if (hasTag(before.tags || '||', slug) === on) continue;
+          const result = await changeEmailCategory(target.storage, target.engine, emailId, slug, on);
+          (result.syncStatus === 'queued' ? receipt.queuedIds : receipt.appliedIds).push(emailId);
+          if (slug === 'important') {
+            try { await logUserAction(emailId, on ? 'important' : 'unimportant', { source: 'agent_approved', threadId: before.threadId, senderAddress: before.fromAddress }, target.storage); } catch { /* Learning only. */ }
+          }
+          const after = await target.storage.getEmail(emailId);
+          if (after) getMainWindow()?.webContents.send('emails:tags-updated', { emailId, tags: after.tags, accountId });
+        } catch { receipt.failedIds.push(emailId); }
+      }
+      return receipt;
+    },
   },
 });
 
@@ -144,6 +197,13 @@ export function registerInboxAssistantHandlers(): void {
       catch (error) { return { success: false, error: (error as Error).message || 'Inbox Agent could not complete the request.' }; }
     });
   };
+  // A run's activity goes to the requesting app frame only; never broadcast mailbox details.
+  const forward = (event: IpcMainInvokeEvent) => (activity: InboxAssistantActivity) => {
+    if (getMainWindow()?.webContents === event.sender && !event.sender.isDestroyed()
+      && event.senderFrame === event.sender.mainFrame) {
+      try { event.sender.send('inboxAssistant:activity', activity); } catch { /* Window closed during the request. */ }
+    }
+  };
   register('inboxAssistant:accounts', () => service.accounts());
   register('inboxAssistant:dashboard', value => buildInboxAssistantDashboard(value, {
     accounts: () => service.accounts(), storage: requireAccountStorage,
@@ -157,26 +217,11 @@ export function registerInboxAssistantHandlers(): void {
   register('inboxAssistant:deleteChat', value => service.deleteChat(value));
   register('inboxAssistant:rewindChat', value => service.rewindChat(value));
   register('inboxAssistant:restoreRewindChat', value => service.restoreRewindChat(value));
-  register('inboxAssistant:draftEmail', (value, event) => service.draftEmail(value, activity => {
-    if (getMainWindow()?.webContents === event.sender && !event.sender.isDestroyed()
-      && event.senderFrame === event.sender.mainFrame) {
-      try { event.sender.send('inboxAssistant:activity', activity); } catch { /* Window closed while drafting. */ }
-    }
-  }));
+  register('inboxAssistant:draftEmail', (value, event) => service.draftEmail(value, forward(event)));
   register('inboxAssistant:history', () => service.history());
-  register('inboxAssistant:applyReview', (value, event) => service.applyReview(value, activity => {
-    if (getMainWindow()?.webContents === event.sender && !event.sender.isDestroyed()
-      && event.senderFrame === event.sender.mainFrame) {
-      try { event.sender.send('inboxAssistant:activity', activity); } catch { /* Window closed during the mail action. */ }
-    }
-  }));
-  register('inboxAssistant:ask', (value, event) => service.ask(value, activity => {
-    // A run belongs to the requesting app frame; never broadcast mailbox details.
-    if (getMainWindow()?.webContents === event.sender && !event.sender.isDestroyed()
-      && event.senderFrame === event.sender.mainFrame) {
-      try { event.sender.send('inboxAssistant:activity', activity); } catch { /* Window closed during the request. */ }
-    }
-  }));
+  register('inboxAssistant:applyReview', (value, event) => service.applyReview(value, forward(event)));
+  register('inboxAssistant:changeSet', (value, event) => service.decideChangeSet(value, forward(event)));
+  register('inboxAssistant:ask', (value, event) => service.ask(value, forward(event)));
   register('inboxAssistant:cancel', value => service.cancel(value));
   register('inboxAssistant:clearHistory', () => { service.clearHistory(); return null; });
   register('inboxAssistant:source', async value => {

@@ -1,10 +1,11 @@
 import type { AIToolDefinition, EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
 import { parseAttachmentNames, parseTags, trimCharsStart } from '@sarvinbox/core';
 
-import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssistantEvidence, InboxAssistantProgress } from '../../src/types/inbox-assistant';
+import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssistantActionMode, InboxAssistantEvidence, InboxAssistantProgress } from '../../src/types/inbox-assistant';
 import { instantToWallClock, startOfLocalDate, validLocalDate } from '../../src/utils/local-calendar';
 
 import { inboxAssistantEvidenceText, jsonObject, normalizeExcerpt } from './inbox-assistant-answer';
+import type { HeldChangeSet } from './inbox-assistant-change-sets';
 import { addresses, bodyEvidence, fullBody, isSent, type AssistantResearchDeps, type AssistantResearchMailbox, type InboxAssistantResearch } from './inbox-assistant-retrieval';
 
 /**
@@ -127,6 +128,27 @@ export interface InboxAgentToolContext {
   remaining: { attachments: number; classified: number; deepSearches: number };
   /** Opened mailboxes and their folders, per account. */
   mailboxes: Map<string, Promise<{ mailbox: AssistantResearchMailbox; folders: FolderRecord[] }>>;
+  /** Each classify_messages result's verdicts by email id, under the result's T id. */
+  verdicts?: Map<string, InboxAgentVerdicts>;
+  /** Set by classify_messages for the result id the loop is about to assign. */
+  pendingVerdicts?: InboxAgentVerdicts;
+  /** Present when this run may change mail. */
+  changes?: InboxAgentChangeContext;
+}
+
+export type InboxAgentVerdicts = Map<string, { label: string; reason: string }>;
+
+/** How the write tools reach the host. The tools stage; the host decides whether a set applies now. */
+export interface InboxAgentChangeContext {
+  mode: InboxAssistantActionMode;
+  /** This run's change sets, in the order staged (C1, C2, …). */
+  sets: HeldChangeSet[];
+  /** Messages applied without a card in this run ("Approve for me"). */
+  autoApplied: number;
+  nowMs(): number;
+  /** Apply under "Approve for me", serialized with every other mail action. */
+  apply(held: HeldChangeSet): Promise<void>;
+  undo(held: HeldChangeSet): Promise<void>;
 }
 
 export interface InboxAgentTool {
@@ -139,13 +161,13 @@ export interface InboxAgentTool {
 // ── Argument reading. Null means "not given"; unknown keys are refused so a
 // misspelt filter is never silently dropped (which would widen the search).
 
-function readArgs(args: Record<string, unknown>, allowed: string[]): Record<string, unknown> {
+export function readArgs(args: Record<string, unknown>, allowed: string[]): Record<string, unknown> {
   const unknown = Object.keys(args).filter(key => !allowed.includes(key));
   if (unknown.length) throw new InboxAgentToolError(`Unknown argument ${unknown.map(key => `"${key.slice(0, 40)}"`).join(', ')}. Allowed: ${allowed.join(', ')}.`);
   return Object.fromEntries(Object.entries(args).filter(([, value]) => value !== null && value !== undefined));
 }
 
-function optionalText(args: Record<string, unknown>, key: string, max = 200): string | undefined {
+export function optionalText(args: Record<string, unknown>, key: string, max = 200): string | undefined {
   const value = args[key];
   if (value === undefined) return undefined;
   if (typeof value !== 'string') throw new InboxAgentToolError(`"${key}" must be a string.`);
@@ -154,7 +176,7 @@ function optionalText(args: Record<string, unknown>, key: string, max = 200): st
   return trimmed || undefined;
 }
 
-function optionalBoolean(args: Record<string, unknown>, key: string): boolean | undefined {
+export function optionalBoolean(args: Record<string, unknown>, key: string): boolean | undefined {
   const value = args[key];
   if (value === undefined) return undefined;
   if (typeof value !== 'boolean') throw new InboxAgentToolError(`"${key}" must be true or false.`);
@@ -184,7 +206,7 @@ function requiredSourceId(args: Record<string, unknown>, context: InboxAgentTool
 
 // ── Mailboxes, accounts and folders.
 
-async function openAccount(context: InboxAgentToolContext, account: InboxAssistantAccount): Promise<{ mailbox: AssistantResearchMailbox; folders: FolderRecord[] } | undefined> {
+export async function openAccount(context: InboxAgentToolContext, account: InboxAssistantAccount): Promise<{ mailbox: AssistantResearchMailbox; folders: FolderRecord[] } | undefined> {
   let opened = context.mailboxes.get(account.id);
   if (!opened) {
     opened = (async () => {
@@ -221,13 +243,13 @@ function selectedAccounts(args: Record<string, unknown>, context: InboxAgentTool
   return [match];
 }
 
-function accountOf(context: InboxAgentToolContext, accountId: string): InboxAssistantAccount {
+export function accountOf(context: InboxAgentToolContext, accountId: string): InboxAssistantAccount {
   const account = context.accounts.find(item => item.id === accountId);
   if (!account) throw new InboxAgentToolError('That email belongs to an account that is not selected.');
   return account;
 }
 
-function roleFolders(folders: FolderRecord[], role: string): FolderRecord[] {
+export function roleFolders(folders: FolderRecord[], role: string): FolderRecord[] {
   const special = (folder: FolderRecord) => (folder.specialUse ?? '').toLowerCase();
   switch (role) {
     case 'inbox': return folders.filter(folder => folder.path.toUpperCase() === 'INBOX' || special(folder) === '\\inbox');
@@ -256,7 +278,7 @@ function when(seconds: number, timeZone: string): string {
   catch { return 'unknown date'; }
 }
 
-function oneLine(value: string | null | undefined, max: number): string {
+export function oneLine(value: string | null | undefined, max: number): string {
   return (value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
@@ -783,6 +805,8 @@ const classifyMessages: InboxAgentTool = {
       counts.set(verdict.label, (counts.get(verdict.label) ?? 0) + 1);
       return `${id}: ${verdict.label}${verdict.reason ? ` (${verdict.reason})` : ''}`;
     });
+    // Kept so change_mail can select "the emails labelled X in this result".
+    context.pendingVerdicts = new Map(ids.map(id => [id, verdicts.get(id) ?? { label: UNSURE, reason: '' }]));
     context.progress({ stage: 'search', status: failedBatches ? 'warning' : 'done', message: `Sorted ${ids.length} ${ids.length === 1 ? 'email' : 'emails'}` });
     return [
       `Label counts: ${[...counts].map(([label, count]) => `${label} ${count}`).join(', ')}`,
