@@ -48,7 +48,7 @@ export interface InboxAssistantReviewApplyOptions {
   action?: InboxAssistantReviewAction;
 }
 
-const LIMIT = { threads: 200, page: 25, pages: 80, items: 1_000, members: 100, bodyChars: 12_000, scanChars: 1_000_000, promptChars: 64_000, calls: 40, responseChars: 40_000, duration: 240_000, expiry: 15 * 60_000 } as const;
+const LIMIT = { threads: 200, page: 25, pages: 80, items: 1_000, members: 100, bodyChars: 12_000, scanChars: 1_000_000, promptChars: 64_000, calls: 40, responseChars: 40_000, duration: 240_000, expiry: 60 * 60_000 } as const;
 // Bump when the classifier contract or recommendation policy changes.
 const REVIEW_POLICY_VERSION = 'unread-triage-v10-bounded-message-age';
 const PROTECTED = new Set(['important', 'starred', 'flagged', 'needs_response', 'needsresponse', 'invoice', 'invoices', 'finance', 'meeting', 'meetings', 'reminders']);
@@ -80,6 +80,27 @@ interface TrustedReview { id: string; expiresAt: number; items: Map<string, Snap
 interface ReviewRecipientContext { addresses: string[]; complete: boolean }
 interface ReviewContent { text: string; recipientContext: ReviewRecipientContext; behaviorContext?: string; reviewSignals: string[]; originalChars: number; submittedChars: number; reusedTurns: number }
 const reviews = new WeakMap<InboxAssistantReview, TrustedReview>();
+
+/**
+ * Hand a finished review over, and start its lifetime now.
+ *
+ * The limit exists so mail is not changed on the strength of an old review. It
+ * is how long the user has to act on a review they can see, so it runs from the
+ * moment the review is ready, not from the moment its preparation began: a
+ * large review takes minutes to prepare, and counting those minutes handed the
+ * user a card with part of its time already spent.
+ *
+ * It is an hour because a review of a few hundred conversations takes longer
+ * than a few minutes to read, and refreshing an expired one means preparing it
+ * again from nothing. The timer is not what keeps mail safe: before anything
+ * is changed, each conversation is re-read and left alone if it no longer
+ * matches what the review saw.
+ */
+function publishReview(review: InboxAssistantReview, trusted: TrustedReview): InboxAssistantReview {
+  review.expiresAt = trusted.expiresAt = Date.now() + LIMIT.expiry;
+  reviews.set(review, trusted);
+  return review;
+}
 
 function check(signal?: AbortSignal): void { signal?.throwIfAborted(); }
 function unique(values: string[]): string[] { return [...new Set(values)]; }
@@ -631,11 +652,10 @@ export async function prepareInboxAssistantReview(
     }
     review.truncated ||= review.coverage.some(coverage => coverage.truncated);
     review.status = review.truncated ? 'partial' : 'ready';
-    reviews.set(review, trusted);
     const unverified = review.items.filter(item => item.needsRetry).length;
     progress({ stage: 'complete', status: unverified ? 'warning' : 'done', message: unverified ? 'Unread review needs another attempt' : `Reviewed ${review.items.length} conversations`,
       detail: unverified ? `${unverified} conversations stay unread because their AI review did not finish. Verified recommendations are saved.` : 'Choose any suggested conversations before applying mark as read.' });
-    return review;
+    return publishReview(review, trusted);
   } finally { clearTimeout(timer); contexts.clear(); cacheKeys.clear(); }
 }
 
@@ -785,9 +805,8 @@ async function prepareScopedReview(
     check(effective);
     review.truncated = review.coverage.some(value => value.truncated);
     review.status = review.truncated ? 'partial' : 'ready';
-    reviews.set(review, trusted);
     progress({ stage: 'complete', status: 'done', message: `Matched ${review.items.length} conversations`, detail: 'Only explicitly matching messages are included in this read-flag review.' });
-    return review;
+    return publishReview(review, trusted);
   } finally { clearTimeout(timer); }
 }
 

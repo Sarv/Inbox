@@ -492,6 +492,45 @@ describe('Assistant unread review card', () => {
     expect(props.onOpen).toHaveBeenCalledOnce();
   });
 
+  // Breaks: an expired card that has already been refreshed keeps offering its
+  // dead buttons and another "Refresh review" (reported 2026-11-18: the buttons
+  // "always remain disabled"), instead of sending the user to the review that works.
+  it('points an expired review at the newer one instead of offering its dead controls or another refresh', () => {
+    const onShowNewer = vi.fn();
+    const { view, props } = mount(review({ status: 'expired', expiresAt: NOW - 1 }), { onShowNewer, onStartAutoReview: vi.fn() });
+    const actions = view.byLabel('Review actions')!;
+    expect(actions.textContent).toContain('A newer review of this mail is below. This one can no longer change mail.');
+    expect(view.container.textContent).not.toContain('This review has expired.');
+    for (const label of ['Refresh review', 'Mark selected as read', 'Mark recommended & continue', 'Archive', 'Delete']) expect(button(view, label), label).toBeNull();
+    expect(view.byLabel('Continue automatically')).toBeNull();
+    expect(view.byLabel('Archive selected conversations')).toBeNull();
+    expect(view.container.textContent).not.toContain('Archive and Delete affect whole conversations');
+    // What it recommended stays readable, and nothing in it can be selected.
+    expect(checkbox(view, 'safe-a').disabled).toBe(true);
+    fire(view.all('button').find(value => value.textContent?.startsWith('Keep unread'))!, 'click');
+    expect(view.container.textContent).toContain('Use the newer review below to select conversations.');
+    fire(button(view, 'Go to newer review'), 'click');
+    expect(onShowNewer).toHaveBeenCalledExactlyOnceWith();
+    expect(props.onRefresh).not.toHaveBeenCalled();
+    expect(props.onApply).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a review that is still within its lifetime loses its buttons the
+  // moment the same question is asked again further down the conversation.
+  it('keeps a live review fully usable when a newer one exists, and hands over only once it expires', () => {
+    const onShowNewer = vi.fn();
+    const { view, props } = mount(review({ expiresAt: NOW + 500 }), { onShowNewer });
+    expect(button(view, 'Go to newer review')).toBeNull();
+    expect((button(view, 'Refresh review') as HTMLButtonElement).disabled).toBe(false);
+    fire(button(view, 'Mark selected as read'), 'click');
+    expect(props.onApply).toHaveBeenCalledExactlyOnceWith(['safe-a', 'safe-b']);
+    act(() => { vi.advanceTimersByTime(500); });
+    expect(button(view, 'Mark selected as read')).toBeNull();
+    expect(button(view, 'Refresh review')).toBeNull();
+    expect(button(view, 'Go to newer review')).not.toBeNull();
+    expect(onShowNewer).not.toHaveBeenCalled();
+  });
+
   it('reschedules an expiry timer that fires just before the trusted deadline', () => {
     const { view } = mount(review({ expiresAt: NOW + 500 }));
     vi.setSystemTime(NOW - 1);

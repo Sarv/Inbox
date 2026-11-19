@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A refreshed Inbox Agent review replaces the expired one.** A review of
+  unread mail can change mail for a limited time, so that nothing is marked as
+  read on the strength of an old review. When that time ran out, **Refresh
+  review** added a new review further down the conversation, but the expired
+  card kept its disabled buttons and its own **Refresh review**, so it looked
+  as if refreshing had done nothing. An expired review that has been refreshed
+  now says a newer review is below and takes you to it with **Go to newer
+  review**.
+- **Inbox Agent reviews stay usable for an hour.** A review could change mail
+  for 15 minutes, counted from the moment it started being prepared. A large
+  review takes a few minutes to prepare, so it could reach you with as little
+  as 11 minutes left, and its buttons could switch off while you were still
+  reading it. A review can now be used for 60 minutes, counted from when
+  it is ready. Before anything is changed, each conversation is still checked
+  again and left alone if it has changed since the review.
+
 ## [1.4.11] - 2026-11-18
 
 ### Added
