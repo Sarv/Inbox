@@ -11,7 +11,8 @@ import { inboxAssistantTermWords, matchesInboxAssistantTerm, meaningfulInboxAssi
 
 export type AssistantResearchStorage = Pick<SQLiteStorage,
   'getFolders' | 'searchEmails' | 'getEmail' | 'getContacts' | 'getAttachments'>
-  & Partial<Pick<SQLiteStorage, 'getEmailsByThread'>>;
+  & Partial<Pick<SQLiteStorage, 'getEmailsByThread' | 'searchEmailsCount'>>
+  & { getCategoryDefinitions?(): Array<{ slug: string; name?: string }> };
 
 export interface AssistantResearchMailbox {
   storage: AssistantResearchStorage;
@@ -60,7 +61,7 @@ function unique(values: string[], limit: number): string[] {
 }
 
 /** Full records can still contain a legacy list preview in cleanBody. */
-function fullBody(email: EmailRecord): string {
+export function fullBody(email: EmailRecord): string {
   const clean = email.cleanBody?.trim() || '';
   const raw = email.rawBody?.slice(0, MAX_RAW_BODY_CHARS).trim() || '';
   const plain = raw && email.contentType !== 'text' ? htmlToPlainText(raw).trim() : raw;
@@ -99,7 +100,7 @@ function invitationEvidence(email: EmailRecord, body = fullBody(email)): boolean
 }
 
 /** Read the complete body, then retain bounded, explicitly separated excerpts. */
-function bodyEvidence(body: string, allowance: number, terms: string[], leadingShare = 0.25): string {
+export function bodyEvidence(body: string, allowance: number, terms: string[], leadingShare = 0.25): string {
   if (body.length <= allowance) return body;
   if (allowance < 300) return body.slice(0, Math.max(0, allowance));
   const separator = '\n[… additional email content …]\n';
@@ -138,17 +139,17 @@ function bodyEvidence(body: string, allowance: number, terms: string[], leadingS
   return merged.map(([start, end]) => body.slice(start, end)).join(separator).slice(0, allowance);
 }
 
-function addresses(value: string | null): string[] {
+export function addresses(value: string | null): string[] {
   return parseAddresses(value ?? '').map(address => address.toLowerCase());
 }
 
-function isExcluded(email: EmailRecord, folders: FolderRecord[]): boolean {
+export function isExcluded(email: EmailRecord, folders: FolderRecord[]): boolean {
   if (/\|(?:draft|deleted|outbox|queued|Trash|Spam|Drafts|Junk|Junk Email|Deleted Items)\|/i.test(email.tags)) return true;
   return folders.some(folder => EXCLUDED_ROLES.has((folder.specialUse ?? '').toLowerCase())
     && (folder.id === email.folderId || email.tags.includes(`|${folder.path}|`)));
 }
 
-function isSent(email: EmailRecord, folders: FolderRecord[], aliases: string[]): boolean {
+export function isSent(email: EmailRecord, folders: FolderRecord[], aliases: string[]): boolean {
   return aliases.includes(email.fromAddress.toLowerCase()) || folders.some(folder =>
     ((folder.specialUse ?? '').toLowerCase() === '\\sent' || SENT_NAMES.has(folder.path.toLowerCase()))
       && (folder.id === email.folderId || email.tags.includes(`|${folder.path}|`)));

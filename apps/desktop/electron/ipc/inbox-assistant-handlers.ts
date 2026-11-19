@@ -14,7 +14,7 @@ import { buildInboxAssistantDashboard } from '../services/inbox-assistant-dashbo
 import { inboxAssistantHistory } from '../services/inbox-assistant-history';
 import { createUnreadReviewBehaviorContext } from '../services/inbox-assistant-review-behavior';
 import { InboxAssistantService } from '../services/inbox-assistant-service';
-import { callInboxAssistantAI, INBOX_ASSISTANT_SYSTEM_PROMPT } from '../services/inbox-assistant-usage';
+import { callInboxAssistantAI, callInboxAssistantChat, INBOX_ASSISTANT_SYSTEM_PROMPT } from '../services/inbox-assistant-usage';
 import { getLocalCalendarService } from '../services/local-calendar-service';
 import { getPipelineAIConfig } from '../services/unified-pipeline-service';
 import { getMainWindow } from '../shared';
@@ -57,6 +57,16 @@ const service = new InboxAssistantService({
     const callConfig = options?.maxOutputTokens === undefined ? config : { ...config, maxOutputTokens: options.maxOutputTokens };
     return callInboxAssistantAI(callConfig, INBOX_ASSISTANT_SYSTEM_PROMPT, prompt, signal, onUsage);
   },
+  callAIChat: async (request, signal, onUsage) => {
+    signal.throwIfAborted();
+    const config = getPipelineAIConfig();
+    if (!config) throw new Error('Choose an AI provider in AI → Providers before asking the Inbox Agent.');
+    return callInboxAssistantChat(config, request, signal, onUsage);
+  },
+  // Preview switch for the tool-using agent (docs/INBOX_AGENT_HARNESS.md).
+  // Until its evaluation passes, typed questions keep the fixed paths unless
+  // the app was started with SARVINBOX_AGENT_HARNESS=1.
+  agentHarness: () => process.env.SARVINBOX_AGENT_HARNESS === '1',
   openMailbox: async accountId => {
     const storage = await requireAccountStorage(accountId);
     return {

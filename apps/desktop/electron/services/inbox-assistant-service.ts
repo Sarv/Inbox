@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { createLogger, errorDiagnostic, waitForAbortableOperation } from '@sarvinbox/core';
+import { createLogger, errorDiagnostic, waitForAbortableOperation, type AIChatRequest, type AIChatResult } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantAIWorkload, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord, InboxAssistantAIPurpose, InboxAssistantRunDiagnostics } from '../../src/types/inbox-assistant';
 import type { InboxAssistantReview, InboxAssistantReviewAutomation, InboxAssistantReviewDateFilter, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
@@ -9,6 +9,7 @@ import { readInboxAssistantAIWorkload } from '../../src/utils/inbox-assistant-wo
 
 import { isMeetingDraft, meetingAvailabilityRequests, recheckMeetingAvailability } from './assistant-calendar';
 import { applyInboxAssistantReview, inboxAssistantHeaderMatchedItems, inboxAssistantReadCommandReference, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps } from './inbox-assistant-actions';
+import { runInboxAgent, type InboxAgentProtocol } from './inbox-assistant-agent';
 import { answerInboxAssistant, INBOX_ASSISTANT_OUTPUT_TOKENS, planInboxAssistantSearch } from './inbox-assistant-answer';
 import { inboxAssistantCapabilityReply } from './inbox-assistant-capabilities';
 import { buildInboxAssistantContext } from './inbox-assistant-context';
@@ -18,11 +19,15 @@ import type { InboxAssistantHistoryStore } from './inbox-assistant-history';
 import { InboxAssistantRecommendationCache } from './inbox-assistant-recommendation-cache';
 import { researchInboxAssistant, type AssistantResearchDeps } from './inbox-assistant-retrieval';
 import { inboxAssistantReviewDateLabel, parseInboxAssistantReviewDate } from './inbox-assistant-review-date';
-import { aggregateInboxAssistantUsage } from './inbox-assistant-usage';
+import { aggregateInboxAssistantUsage, INBOX_ASSISTANT_SYSTEM_PROMPT } from './inbox-assistant-usage';
 
 export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
   accounts(): InboxAssistantAccount[];
   callAI(prompt: string, signal: AbortSignal, onUsage?: (usage: InboxAssistantAIUsage) => void, options?: { maxOutputTokens?: number }): Promise<string>;
+  /** A multi-turn tool call, for the agent loop. */
+  callAIChat?(request: AIChatRequest, signal: AbortSignal, onUsage?: (usage: InboxAssistantAIUsage) => void): Promise<AIChatResult>;
+  /** Whether typed questions run through the agent loop instead of the fixed paths (preview switch). */
+  agentHarness?(): boolean;
   reviewCacheIdentity?(): string;
   now?(): number;
   timeZone?(): string;
@@ -199,6 +204,8 @@ export class InboxAssistantService {
   private generations = new Map<string, number>();
   private actionReviews = new Map<string, HeldReview>();
   private recommendationCache = new InboxAssistantRecommendationCache();
+  /** How the agent last succeeded in calling each provider identity, so a refusal is paid for once. */
+  private agentProtocols = new Map<string, InboxAgentProtocol>();
 
   constructor(private deps: InboxAssistantServiceDeps) {}
 
@@ -303,8 +310,15 @@ export class InboxAssistantService {
       budget.calls++;
       budget.inputChars += prompt.length;
     }
+    const onUsage = this.usageRecorder(run, workload, purpose);
+    return waitForAbortableOperation(maxOutputTokens === undefined ? this.deps.callAI(prompt, signal, onUsage)
+      : this.deps.callAI(prompt, signal, onUsage, { maxOutputTokens }), signal);
+  }
+
+  /** Records one provider call's usage on its run, as the host describes it. */
+  private usageRecorder(run: ActiveRun, workload?: InboxAssistantAIWorkload, purpose?: InboxAssistantAIPurpose): (usage: InboxAssistantAIUsage) => void {
     const trustedWorkload = readInboxAssistantAIWorkload(workload);
-    const onUsage = (usage: InboxAssistantAIUsage) => {
+    return (usage: InboxAssistantAIUsage) => {
       // Only the host's actual prepared batch describes workload. Provider
       // accounting remains unchanged and cannot supply these diagnostic counts.
       // The step name is the host's too: which of a run's calls this was.
@@ -315,9 +329,14 @@ export class InboxAssistantService {
       if (run.generation === (this.generations.get(run.chatId) ?? 0)) this.persistRun(run);
       else this.persistStaleUsage(run);
     };
-    return waitForAbortableOperation(maxOutputTokens === undefined ? this.deps.callAI(prompt, signal, onUsage)
-      : this.deps.callAI(prompt, signal, onUsage, { maxOutputTokens }), signal);
   }
+
+  private callRunChat(run: ActiveRun, request: AIChatRequest, signal: AbortSignal, purpose: InboxAssistantAIPurpose = 'agent'): Promise<AIChatResult> {
+    signal.throwIfAborted();
+    if (!this.deps.callAIChat) throw new Error('The Inbox Agent is unavailable. Restart the app after updating.');
+    return waitForAbortableOperation(this.deps.callAIChat(request, signal, this.usageRecorder(run, undefined, purpose)), signal);
+  }
+
 
   private persistStaleUsage(run: ActiveRun): void {
     // The caller may have rewound/cleared the request before the aborted
@@ -815,6 +834,54 @@ export class InboxAssistantService {
       diagnostics.durationMs = Math.max(0, Date.now() - run.record.startedAt);
     };
     try {
+      if (this.deps.agentHarness?.() && this.deps.callAIChat && !request.reviewKind && !request.continueReviewId) {
+        diagnostics.route = 'agent';
+        stage = 'agent';
+        const timeZone = researchTimeZone(this.deps);
+        const nowMs = this.deps.now?.() ?? Date.now();
+        const identity = this.deps.reviewCacheIdentity?.() ?? 'default';
+        if (historyContext) report({ stage: 'context', status: 'done', message: 'Loaded conversation context', detail: 'Earlier questions supply context; original emails and attachments are checked again for facts.' });
+        report({ stage: 'search', status: 'running', message: 'Working on your request', detail: `Using ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}.` });
+        const result = await runInboxAgent({
+          question: request.question, ...(historyContext ? { historyContext } : {}), accounts: selected, timeZone, nowMs,
+          signal: controller.signal, protocol: this.agentProtocols.get(identity), diagnostics,
+          deps: {
+            research: this.deps,
+            progress: report,
+            chat: chatRequest => { assertCurrent(); return this.callRunChat(run, chatRequest, controller.signal); },
+            // Through the chat call, whose retry gives a reasoning model that
+            // spent its whole budget thinking a second, larger budget.
+            classify: async prompt => {
+              assertCurrent();
+              const reply = await this.callRunChat(run, { messages: [{ role: 'system', content: INBOX_ASSISTANT_SYSTEM_PROMPT }, { role: 'user', content: prompt }],
+                maxOutputTokens: 4_000 }, controller.signal, 'classify');
+              return reply.text;
+            },
+            deepSearch: async question => {
+              assertCurrent();
+              const plan = await planInboxAssistantSearch(question, prompt => {
+                assertCurrent();
+                return this.callRunAI(run, prompt, controller.signal, INBOX_ASSISTANT_OUTPUT_TOKENS.plan, undefined, 'plan');
+              }, { nowMs, timeZone });
+              assertCurrent();
+              return waitForAbortableOperation(researchInboxAssistant(selected, plan, this.deps, controller.signal, { onProgress: report }), controller.signal);
+            },
+          },
+        });
+        this.agentProtocols.set(identity, result.protocol);
+        assertCurrent();
+        const exchange: InboxAssistantExchange = {
+          id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt,
+          answer: result.answer,
+        };
+        const verified = result.outcome === 'verified' || result.outcome === 'answered';
+        report({ stage: 'complete', status: verified ? 'done' : 'warning',
+          message: result.outcome === 'verified' ? 'Answer verified against sources' : result.outcome === 'answered' ? 'Answer ready'
+            : result.outcome === 'related' ? 'Related emails found; answer not verified' : 'No supporting email found',
+          detail: `${result.answer.sources.length} cited ${result.answer.sources.length === 1 ? 'source' : 'sources'}.` });
+        conclude(result.outcome);
+        return this.settleRun(run, undefined, exchange)!;
+      }
       const capabilityReply = !request.reviewKind && !request.continueReviewId ? inboxAssistantCapabilityReply(request.question) : undefined;
       if (capabilityReply) {
         diagnostics.route = 'capability';

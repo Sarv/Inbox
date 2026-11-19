@@ -76,7 +76,7 @@ const MAX_PLAN_RESPONSE = 12_000;
 const MAX_ANSWER_RESPONSE = 48_000;
 const MAX_SOURCE_TEXT = 24_000;
 const MAX_EVIDENCE_TEXT = 120_000;
-const MAX_FACTS = 16;
+export const MAX_FACTS = 16;
 const MAX_QUOTE = 1_200;
 const MAX_FACT_SOURCES = 6;
 /** Two per source: a receipt's amount and its date or reference are usually on separate lines. */
@@ -84,8 +84,8 @@ const MAX_FACT_QUOTES = 12;
 const MAX_REPAIR_DRAFT = 8_000;
 const MAX_REPAIR_SOURCES = 6;
 const MAX_REPAIR_SOURCE_TEXT = 2_800;
-const OMITTED_WARNING = 'Some AI statements were omitted because their source references or excerpts could not be verified.';
-type FactRejection = { index: number; reason: InboxAssistantFactRejectionReason };
+export const OMITTED_WARNING = 'Some AI statements were omitted because their source references or excerpts could not be verified.';
+export type FactRejection = { index: number; reason: InboxAssistantFactRejectionReason };
 const STOP_WORDS = new Set('a an all am and are as at be been by can could did do does email emails find for from get had has have how i in is it me my of on or our please sent show tell that the their them there these they this to us was we were what when where which who why will with would you your'.split(' '));
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -102,7 +102,7 @@ function text(value: unknown, max: number): string | null {
   return result && result.length <= max && !hasControl ? result : null;
 }
 
-function jsonObject(raw: string, max: number): Record<string, unknown> {
+export function jsonObject(raw: string, max: number): Record<string, unknown> {
   if (typeof raw !== 'string' || raw.length > max) throw new InboxAssistantResponseError('The AI response was too large.', 'too_large');
   // Some providers return private reasoning before the JSON even when JSON-only
   // was requested. Remove only leading/trailing envelopes, never quoted source
@@ -426,7 +426,7 @@ export function buildInboxAssistantAnswerPrompt(
   ].join('\n');
 }
 
-function normalizeExcerpt(value: string): string {
+export function normalizeExcerpt(value: string): string {
   return value.normalize('NFKC').replace(/\s+/g, ' ').trim();
 }
 
@@ -683,19 +683,18 @@ function equivalentTimestampSpans(fact: string, evidence: string): Array<{ start
   return claims.map(match => ({ start: match.index!, end: match.index! + match[0].length }));
 }
 
-function parseInboxAssistantAnswerResult(
-  raw: string,
-  sources: InboxAssistantEvidence[],
-  coverage: InboxAssistantAccountCoverage[],
-): { grounded: InboxAssistantGroundedAnswer; rejectedFacts: FactRejection[]; draft: string; returned: number } {
-  const response = jsonObject(raw, MAX_ANSWER_RESPONSE);
-  if (!onlyKeys(response, ['facts']) || !Array.isArray(response.facts) || response.facts.length > MAX_FACTS) {
-    throw new InboxAssistantResponseError('The AI answer was not in the expected grounded format.');
-  }
-  const context = new Map(evidenceContext(sources).map(({ source, text: value }) => [source.id, normalizeExcerpt(value)]));
+/**
+ * Check grounded facts against what was actually shown: every cited id must be
+ * in `context` (id → normalized text), every cited id needs an exact quote from
+ * that text, and every number and currency must come from those quotes.
+ * Shared by the one-shot answer below and the Inbox Agent loop.
+ */
+export function verifyInboxAssistantFacts(
+  items: unknown[], context: Map<string, string>, sources: InboxAssistantEvidence[],
+): { facts: InboxAssistantGroundedFact[]; rejectedFacts: FactRejection[] } {
   const facts: InboxAssistantGroundedFact[] = [];
   const rejectedFacts: FactRejection[] = [];
-  for (const [index, item] of response.facts.entries()) {
+  for (const [index, item] of items.entries()) {
     const fact = record(item);
     const factText = fact && safeFactText(fact.text);
     if (!fact || !factText || !onlyKeys(fact, ['text', 'sourceIds', 'quotes']) || !Array.isArray(fact.sourceIds)
@@ -731,6 +730,20 @@ function parseInboxAssistantAnswerResult(
     }
     facts.push({ text: monetaryDisplay(factText), sourceIds, quotes });
   }
+  return { facts, rejectedFacts };
+}
+
+function parseInboxAssistantAnswerResult(
+  raw: string,
+  sources: InboxAssistantEvidence[],
+  coverage: InboxAssistantAccountCoverage[],
+): { grounded: InboxAssistantGroundedAnswer; rejectedFacts: FactRejection[]; draft: string; returned: number } {
+  const response = jsonObject(raw, MAX_ANSWER_RESPONSE);
+  if (!onlyKeys(response, ['facts']) || !Array.isArray(response.facts) || response.facts.length > MAX_FACTS) {
+    throw new InboxAssistantResponseError('The AI answer was not in the expected grounded format.');
+  }
+  const context = new Map(evidenceContext(sources).map(({ source, text: value }) => [source.id, normalizeExcerpt(value)]));
+  const { facts, rejectedFacts } = verifyInboxAssistantFacts(response.facts, context, sources);
   const warnings = inboxAssistantCoverageWarnings(coverage);
   if (sources.some((source) => source.text.length > MAX_SOURCE_TEXT) || context.size < sources.length) {
     warnings.push('The answer used bounded excerpts of the matching sources. Open the originals to review their full content.');
