@@ -802,6 +802,126 @@ describe('Inbox Agent', () => {
     expect(api.applyReview).not.toHaveBeenCalled();
   });
 
+  // The state reported on 2026-11-18: an "Uncategorized mail review" card whose
+  // buttons stay disabled behind "This review has expired", with the same
+  // question asked again right below it.
+  const expiredReview = (): InboxAssistantExchange => {
+    const saved = reviewExchange({ question: 'Review my uncategorized unread emails.' });
+    return { ...saved, review: { ...saved.review!, kind: 'uncategorized', status: 'expired', expiresAt: Date.now() - 1 } };
+  };
+  const refreshedReview = (saved: InboxAssistantExchange, id = 'refreshed-exchange'): InboxAssistantExchange => ({
+    ...saved, id, createdAt: saved.createdAt + 60_000, requestId: 'refresh-request', status: 'completed',
+    review: { ...saved.review!, id: `${id}-review`, status: 'ready', createdAt: Date.now(), expiresAt: Date.now() + 60 * 60_000,
+      items: saved.review!.items.map(item => ({ ...item, id: `${id}-${item.id}` })) },
+  });
+  const refreshButtons = (view: ReturnType<typeof render>) => view.all('button').filter(element => element.textContent?.trim() === 'Refresh review') as HTMLButtonElement[];
+
+  // Breaks: after "Refresh review" the dead card still shows its disabled buttons
+  // and its own refresh, so the user never finds the one review that works.
+  it('leaves exactly one usable review after refreshing an expired one, and takes the user to it', async () => {
+    const saved = expiredReview();
+    const fresh = refreshedReview(saved);
+    let stored = [saved];
+    api.chat.mockImplementation(async id => ok(chat(id, stored)));
+    api.ask.mockImplementation(async request => { stored = [saved, fresh]; return ok({ ...fresh, chatId: request.chatId }); });
+    const view = await mount();
+    expect(view.container.textContent).toContain('This review has expired. Refresh it before changing mail.');
+    expect((button(view, 'Mark selected as read') as HTMLButtonElement).disabled).toBe(true);
+    expect(refreshButtons(view)).toHaveLength(2);
+    fire(refreshButtons(view)[1]!, 'click');
+    await settle();
+    expect(api.ask).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', question: saved.question, accountIds: ['work', 'other'], previousExchangeId: saved.id, reviewKind: 'uncategorized', reviewOnly: true });
+    // One card can change mail, and it is the new one.
+    const apply = view.all('button').filter(element => element.textContent?.trim() === 'Mark selected as read') as HTMLButtonElement[];
+    expect(apply).toHaveLength(1);
+    expect(apply[0]!.disabled).toBe(false);
+    expect(apply[0]!.closest('[data-exchange-id]')?.getAttribute('data-exchange-id')).toBe(fresh.id);
+    // The expired card no longer asks to be refreshed: it points at the new one.
+    expect(view.container.textContent).not.toContain('This review has expired.');
+    expect(refreshButtons(view)).toHaveLength(1);
+    expect(refreshButtons(view)[0]!.closest('[data-exchange-id]')?.getAttribute('data-exchange-id')).toBe(fresh.id);
+    const pointer = button(view, 'Go to newer review')!;
+    expect(pointer.closest('[data-exchange-id]')?.getAttribute('data-exchange-id')).toBe(saved.id);
+    const target = view.find(`[data-exchange-id="${fresh.id}"]`) as HTMLElement;
+    const scrolled = vi.fn();
+    target.scrollIntoView = scrolled;
+    fire(pointer, 'click');
+    expect(scrolled).toHaveBeenCalledExactlyOnceWith({ block: 'start' });
+    expect(document.activeElement).toBe(target);
+    // The new card's tokens are the ones sent, never the expired card's.
+    fire(apply[0]!, 'click');
+    await settle();
+    expect(api.applyReview).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ exchangeId: fresh.id, reviewId: fresh.review!.id, itemIds: [`${fresh.id}-item-a`, `${fresh.id}-item-b`] }));
+  });
+
+  // Breaks: a refresh that fails (provider or network down) leaves the card with
+  // no way to try again, or hides why nothing happened.
+  it('says why a refresh failed, keeps the expired card refreshable, and succeeds on the next press', async () => {
+    const saved = expiredReview();
+    const fresh = refreshedReview(saved);
+    const failed: InboxAssistantExchange = { ...exchange('failed-refresh'), question: saved.question, createdAt: saved.createdAt + 30_000, requestId: 'failed-request', status: 'failed',
+      error: 'Could not reach the AI provider. Check your connection and try again.', answer: { text: '', sources: [], coverage: [], warnings: [] } };
+    let stored = [saved];
+    api.chat.mockImplementation(async id => ok(chat(id, stored)));
+    api.ask.mockImplementationOnce(async () => { stored = [saved, failed]; return { success: false, error: failed.error! }; });
+    const view = await mount();
+    fire(refreshButtons(view)[0]!, 'click');
+    await settle();
+    expect(view.all('[role="alert"]').some(element => element.textContent?.includes('Could not reach the AI provider.'))).toBe(true);
+    // Still the expired card, still refreshable: a failed answer is not a newer review.
+    expect(view.container.textContent).toContain('This review has expired. Refresh it before changing mail.');
+    expect(button(view, 'Go to newer review')).toBeNull();
+    expect(refreshButtons(view).every(element => !element.disabled)).toBe(true);
+    expect(api.applyReview).not.toHaveBeenCalled();
+    api.ask.mockImplementationOnce(async request => { stored = [saved, failed, fresh]; return ok({ ...fresh, chatId: request.chatId }); });
+    fire(refreshButtons(view)[0]!, 'click');
+    await settle();
+    expect(api.ask).toHaveBeenCalledTimes(2);
+    const apply = view.all('button').filter(element => element.textContent?.trim() === 'Mark selected as read') as HTMLButtonElement[];
+    expect(apply.map(element => element.disabled)).toEqual([false]);
+    expect(button(view, 'Go to newer review')).not.toBeNull();
+  });
+
+  // Breaks: a second press of "Refresh review" (the card has two such buttons)
+  // while the first is still running starts a second review of the same mail.
+  it('starts one refresh however often Refresh review is pressed while it runs', async () => {
+    const saved = expiredReview();
+    const fresh = refreshedReview(saved);
+    let stored = [saved];
+    api.chat.mockImplementation(async id => ok(chat(id, stored)));
+    let finish!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.ask.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const view = await mount();
+    const [header, footer] = refreshButtons(view);
+    fire(header!, 'click');
+    fire(footer!, 'click');
+    await settle();
+    expect(refreshButtons(view).every(element => element.disabled)).toBe(true);
+    for (const element of refreshButtons(view)) fire(element, 'click');
+    await settle();
+    expect(api.ask).toHaveBeenCalledTimes(1);
+    stored = [saved, fresh];
+    await act(async () => { finish(ok({ ...fresh, chatId: 'chat-1' })); });
+    await settle();
+    expect(api.ask).toHaveBeenCalledTimes(1);
+    expect((view.all('button').filter(element => element.textContent?.trim() === 'Mark selected as read') as HTMLButtonElement[]).map(element => element.disabled)).toEqual([false]);
+  });
+
+  // Breaks: an expired review of one account is marked "replaced" by a review of
+  // a different account, and loses the refresh that is its only way forward.
+  it('does not treat a review of another account as the refreshed one', async () => {
+    const saved = expiredReview();
+    const elsewhere = refreshedReview(saved, 'other-account-review');
+    elsewhere.review = { ...elsewhere.review!, accounts: [accounts[1]!] };
+    api.chat.mockImplementation(async id => ok(chat(id, [saved, elsewhere])));
+    const view = await mount();
+    expect(button(view, 'Go to newer review')).toBeNull();
+    expect(view.container.textContent).toContain('This review has expired. Refresh it before changing mail.');
+    fire(refreshButtons(view)[0]!, 'click');
+    await settle();
+    expect(api.ask).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ accountIds: ['work', 'other'], reviewKind: 'uncategorized', reviewOnly: true }));
+  });
+
   it('requests the next review batch using the saved host review instead of applying its selected tokens', async () => {
     const saved = reviewExchange();
     saved.review = { ...saved.review!, accounts: [accounts[0]!], items: saved.review!.items.filter(item => item.accountId === 'work'), kind: 'uncategorized', truncated: true,

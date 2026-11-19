@@ -1,4 +1,4 @@
-import { Archive, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clock3, Loader2, Play, RefreshCw, Trash2, Undo2 } from 'lucide-react';
+import { Archive, ArrowDown, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clock3, Loader2, Play, RefreshCw, Trash2, Undo2 } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 
 import type { InboxAssistantSource } from '../../types/inbox-assistant';
@@ -16,6 +16,12 @@ export interface AssistantReviewCardProps {
   onContinue?: () => void;
   automation?: InboxAssistantReviewAutomation;
   onStartAutoReview?: () => void;
+  /**
+   * Set when a later review in the conversation covers the same mail. Once this
+   * review has expired it then points there instead of offering its own dead
+   * controls and another refresh.
+   */
+  onShowNewer?: () => void;
 }
 
 const filters: Array<{ value: InboxAssistantReviewRecommendation; label: string }> = [
@@ -89,7 +95,7 @@ function initialGroup(review: InboxAssistantReview): InboxAssistantReviewRecomme
   return groups.find(group => review.items.some(item => item.recommendation === group)) ?? primary;
 }
 
-export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onRefresh, onContinue, automation, onStartAutoReview }: AssistantReviewCardProps) {
+export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onRefresh, onContinue, automation, onStartAutoReview, onShowNewer }: AssistantReviewCardProps) {
   const headingId = useId();
   const continuousHelpId = useId();
   const markUnread = review.kind === 'mark_unread';
@@ -116,6 +122,8 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
   const canMarkRead = selected.length > 0 && selected.every(item => selectable(item, review) || manuallySelectable(item, review));
   const canMove = selected.length > 0 && selected.every(movable);
   const expired = review.status === 'expired' || !Number.isFinite(review.expiresAt) || review.expiresAt <= now;
+  // An expired review that was refreshed is history: the newer review is the one to act on.
+  const replaced = expired && !!onShowNewer;
   const currentAutomation = automation ?? review.automation;
   const automationRunning = currentAutomation?.status === 'running';
   const automationCompleted = currentAutomation?.status === 'completed';
@@ -219,9 +227,9 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
             <p className="assistant-review-subtitle">{count(review.items.length, 'conversation')} · {count(review.items.reduce((sum, item) => sum + (scoped ? item.targetEmailIds?.length ?? 0 : item.unreadCount), 0), scoped ? 'matching email' : 'unread email')}</p>
             {review.scope && <p className="mt-1 break-words text-xs text-muted-foreground">{review.scope.field === 'any' ? 'Matching' : `${review.scope.field.charAt(0).toUpperCase()}${review.scope.field.slice(1)} matches`}: {review.scope.query}</p>}
           </div>
-          <button type="button" onClick={() => { if (!busy && !automationRunning) onRefresh(); }} disabled={busy || automationRunning} className="assistant-review-button assistant-review-quiet">
+          {!replaced && <button type="button" onClick={() => { if (!busy && !automationRunning) onRefresh(); }} disabled={busy || automationRunning} className="assistant-review-button assistant-review-quiet">
             <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />Refresh review
-          </button>
+          </button>}
         </div>
 
         {automaticReviewSupported && currentAutomation && <div aria-label="Automatic unread review" className="assistant-review-workflow">
@@ -255,7 +263,7 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
             {value.label} <span className="ml-1 tabular-nums text-muted-foreground">{review.items.filter(item => item.recommendation === value.value).length}</span>
           </button>)}
         </div>
-        {filter !== primaryFilter && !scoped && <p className="assistant-review-group-description">{expired ? 'Refresh this review to select conversations.' : `${filter === 'keep_unread' ? 'These conversations stay unread.' : 'These conversations need your attention and stay unread.'} You can select mail to mark as read, archive or delete. Read changes against the agent’s recommendation require confirmation.`}</p>}
+        {filter !== primaryFilter && !scoped && <p className="assistant-review-group-description">{replaced ? 'Use the newer review below to select conversations.' : expired ? 'Refresh this review to select conversations.' : `${filter === 'keep_unread' ? 'These conversations stay unread.' : 'These conversations need your attention and stay unread.'} You can select mail to mark as read, archive or delete. Read changes against the agent’s recommendation require confirmation.`}</p>}
         <div aria-label="Select reviewed conversations" className="assistant-review-selection-tools">
           <button type="button" onClick={() => setSelected(eligible.map(item => item.id))} disabled={locked || eligible.length === 0} className="assistant-review-text-button">Select recommended</button>
           <button type="button" onClick={selectGroup} disabled={locked || !shown.some(item => canSelectItem(item, review))} className="assistant-review-text-button">Select this group</button>
@@ -317,11 +325,12 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
             {!continuous && review.coverage.some(account => account.hasMore) && <button type="button" disabled={locked || !onContinue} onClick={() => { if (canAct()) onContinue?.(); }} className="assistant-review-text-button">Review next batch<ChevronRight aria-hidden="true" className="h-3.5 w-3.5" /></button>}
           {undoable.length > 1 && <button type="button" disabled={locked} onClick={() => { if (canAct()) onUndo(undoable.map(item => item.id)); }} className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:text-muted-foreground disabled:no-underline"><Undo2 aria-hidden="true" className="h-3 w-3" />Undo {count(undoable.length, 'conversation')}</button>}
         </div>
-        {expired && <div role="status" className="assistant-review-notice"><p className="text-xs leading-5">This review has expired. Refresh it before changing mail.</p><button type="button" disabled={busy || automationRunning} onClick={() => { if (!busy && !automationRunning) onRefresh(); }} className="assistant-review-button"><RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />Refresh review</button></div>}
-        {canMove && <details className="text-xs leading-5 text-muted-foreground"><summary className="cursor-pointer">Archive and Delete affect whole conversations</summary><p className="pt-1">Archive and Delete apply to all {count(selectedMessageCount, 'email')} in these conversations. Delete moves them to Trash.</p></details>}
-        {canMarkRead && overrides.length > 0 && <p className="text-xs leading-5 text-muted-foreground">{count(overrides.length, 'selection')} {overrides.length === 1 ? 'overrides' : 'override'} the agent’s recommendation. Confirmation required to mark as {actionLabel}.</p>}
+        {replaced && <div role="status" className="assistant-review-notice"><p className="text-xs leading-5">A newer review of this mail is below. This one can no longer change mail.</p><button type="button" onClick={() => onShowNewer?.()} className="assistant-review-button"><ArrowDown aria-hidden="true" className="h-3.5 w-3.5" />Go to newer review</button></div>}
+        {expired && !replaced && <div role="status" className="assistant-review-notice"><p className="text-xs leading-5">This review has expired. Refresh it before changing mail.</p><button type="button" disabled={busy || automationRunning} onClick={() => { if (!busy && !automationRunning) onRefresh(); }} className="assistant-review-button"><RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />Refresh review</button></div>}
+        {canMove && !replaced && <details className="text-xs leading-5 text-muted-foreground"><summary className="cursor-pointer">Archive and Delete affect whole conversations</summary><p className="pt-1">Archive and Delete apply to all {count(selectedMessageCount, 'email')} in these conversations. Delete moves them to Trash.</p></details>}
+        {canMarkRead && overrides.length > 0 && !replaced && <p className="text-xs leading-5 text-muted-foreground">{count(overrides.length, 'selection')} {overrides.length === 1 ? 'overrides' : 'override'} the agent’s recommendation. Confirmation required to mark as {actionLabel}.</p>}
 
-        <div className="assistant-review-action-row">
+        {!replaced && <div className="assistant-review-action-row">
           <div className="assistant-review-primary-group">
             {automaticReviewSupported && onStartAutoReview && !automationCompleted && <label className="assistant-review-continuous" title={continuousHelp}><input type="checkbox" aria-label="Continue automatically" aria-describedby={continuousHelpId} checked={continuous} disabled={busy} onChange={event => { if (busy) return; setNow(Date.now()); setContinueAutomatically(event.target.checked); if (event.target.checked) setSelection({ reviewId: review.id, ids: new Set(eligible.map(item => item.id)), manualIds: new Set() }); }} className="assistant-review-checkbox h-4 w-4 accent-primary" /><span className="text-xs font-medium">Continue automatically</span><span id={continuousHelpId} className="sr-only">{continuousHelp}</span></label>}
 
@@ -332,7 +341,7 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
             <button type="button" aria-label="Archive selected conversations" disabled={locked || !canMove} onClick={() => { if (canAct() && canMove) onApply(selected.map(item => item.id), true, 'archive'); }} className="assistant-review-button"><Archive aria-hidden="true" className="h-3.5 w-3.5" />Archive</button>
             <button type="button" aria-label="Move selected conversations to Trash" disabled={locked || !canMove} onClick={() => { if (canAct() && canMove) onApply(selected.map(item => item.id), true, 'trash'); }} className="assistant-review-button text-destructive dark:text-red-300"><Trash2 aria-hidden="true" className="h-3.5 w-3.5" />Delete</button>
           </div>
-        </div>
+        </div>}
       </div>}
     </section>
   );
