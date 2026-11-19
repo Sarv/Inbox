@@ -51,6 +51,14 @@ describe('Inbox Agent change set card', () => {
     expect(view.container.textContent).toContain('2 emails selected');
   });
 
+  // Breaks: the user approves a spam verdict without seeing that it also sends the senders' future mail to Spam.
+  it('says what else approving does', () => {
+    const { view } = mount(set({ action: 'spam', summary: 'Report 3 emails as spam', standing: true, note: 'Also sends these senders\' future mail to Spam.' }));
+    expect(view.container.textContent).toContain('Also sends these senders\' future mail to Spam.');
+    cleanup();
+    expect(mount().view.container.textContent).not.toContain('Also');
+  });
+
   // Breaks: Approve sends rows the user unticked, or misses one they ticked.
   it('approves exactly the rows the user selected', () => {
     const { view, props } = mount();

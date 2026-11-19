@@ -277,3 +277,61 @@ eval passes. Tests and the whole suite with every phase, as CLAUDE.md requires.
 - **Not yet**: standing tools (filters, block, VIP, folders, labels, snooze),
   spam, drafts (Phase 3); outward tools and permanent delete (Phase 4); Undo
   across a restart; "undo that" in a later message (the card's Undo does it).
+
+## Phase 3 as built
+
+Decisions (2026-11-19): a filter's "also apply to existing mail" is offered
+unticked with the match count; blocking a sender offers "move their existing
+mail to Spam" as a separate box, unticked; the automatic unread review keeps
+its own path until the agent passes the same evaluation (Phase 3b, with
+removing the regex router).
+
+- **Switch**: the "Tools · Preview" switch in the Inbox Agent header (one
+  managed app setting, `sarvinbox-inbox-agent`, mirrored to the core database
+  and read by main on every request; `inbox-agent-switch.ts`).
+  `SARVINBOX_AGENT_HARNESS=1` still forces it on. An unreadable setting means
+  the earlier paths. Inbox Agent stays out of the AI settings tabs.
+- **More `change_mail` actions**: `add_label` / `remove_label` (`label_name`;
+  a label the account lacks is created when the set is applied, and deleted
+  again by Undo if nothing else uses it), `snooze` (`until`, local wall time in
+  the user's zone, read with `@date-fns/tz`) / `unsnooze`, and `spam` /
+  `not_spam` through the mail view's verdict path. A spam verdict, and a set
+  that creates a label, are **standing**: they always wait for a card, even
+  under "Approve for me". Spam's Undo puts back the tag, folder, stored verdict
+  and the sender's spammer and trusted listing (`revertUserSpamVerdict`); it
+  refuses while sync has not reported the moved message's new UID, rather
+  than move only the local copy.
+- **Setting changes** (`inbox-assistant-setting-changes.ts`, tools in
+  `inbox-assistant-agent-setting-tools.ts`, card `AssistantSettingChangeCard`):
+  `create_filter`, `update_filter`, `delete_filter` (ids F1… from
+  `list_filters`) and `change_sender` (block, unblock, vip, unvip, trust,
+  untrust). Each is one card (R1, R2…) that always waits for approval. Existing
+  mail a change can act on is staged as linked change sets (one per filter
+  action; Sent, Drafts, Trash and Spam left out; protected mail stays) and is
+  applied only when the user ticks it. Undo reverts only what is still as the
+  change left it: a filter edited since, or a flag the user changed, is kept.
+  "Block" adds the sender to the spammer list (what files new mail in Spam)
+  and, for a sender with history, the blocked flag; it ends any trust.
+  `change_sender` acts only on an address the user wrote or the sender of an
+  email a tool showed: an address inside an email's text is refused.
+- **Read tools**: `list_filters`, `list_labels`, `list_snoozed`,
+  `find_contact` (the shared address book, read once), `sender_profile`, and a
+  `label` filter on `search_mail` / `count_mail`.
+- **Change journal** (`inbox-assistant-change-journal.ts`): open change sets
+  and setting changes are saved in one core-database blob
+  (`inbox-agent-change-journal`), so a card keeps Approve and Undo across a
+  restart while its windows last. An unreadable journal is never written over;
+  a save larger than 16 MB is skipped and logged.
+- **"Undo that"**: labels run on through a chat (C1, C2… and R1, R2…); the
+  prompt lists earlier changes that can still be undone, and `undo_change`
+  takes C or R ids from earlier messages, checked against the accounts each was
+  prepared for. A card always shows its held state, and an earlier card the
+  agent undid is saved that way.
+- **Enrichment fix**: an empty reply at the token limit (a reasoning model that
+  spent its budget thinking) is retried once with twice the budget in the
+  renderer's provider call; the empty-reply log no longer writes the model's
+  text.
+- **Not yet**: the evaluation ported to agent tasks and the regex router and
+  review paths removed (Phase 3b); drafts (`create_draft` and friends) move to
+  Phase 4 with sending; the reasoning-off protocol is still learned once per
+  launch.

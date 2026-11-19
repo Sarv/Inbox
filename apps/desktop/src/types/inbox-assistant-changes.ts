@@ -9,7 +9,11 @@
 export type InboxAgentChangeAction =
   | 'mark_read' | 'mark_unread' | 'star' | 'unstar'
   | 'archive' | 'trash' | 'restore' | 'move'
-  | 'add_category' | 'remove_category';
+  | 'add_category' | 'remove_category'
+  | 'add_label' | 'remove_label'
+  | 'snooze' | 'unsnooze'
+  /** The user's spam verdict: these also teach the spam filter, so they always ask. */
+  | 'spam' | 'not_spam';
 
 export type InboxAgentChangeItemStatus =
   /** Waiting for the user's approval. */
@@ -59,6 +63,20 @@ export interface InboxAgentChangeSet {
   folder?: string;
   /** Category slug, for `add_category` / `remove_category`. */
   category?: string;
+  /** Label name, for `add_label` / `remove_label`. */
+  labelName?: string;
+  /** Accounts where applying this set first creates the label (it does not exist there yet). */
+  createsLabelIn?: string[];
+  /** When snoozed mail comes back (unix seconds), for `snooze`. */
+  snoozeUntil?: number;
+  /**
+   * The set changes more than these emails (a spam verdict also teaches the
+   * filter; a new label stays). It always waits for the user's approval, even
+   * when the chat may apply changes without asking.
+   */
+  standing?: boolean;
+  /** One line under the title saying what else approving does. */
+  note?: string;
   /** One line for the card title, e.g. "Mark 35 emails read". */
   summary: string;
   createdAt: number;
@@ -80,4 +98,51 @@ export interface InboxAgentChangeSetRequest {
   decision: 'approve' | 'cancel' | 'undo';
   /** Rows to approve or undo. Approve: default every row not protected. Undo: default every changed row. */
   itemIds?: string[];
+  /** For a standing change: also apply it to the existing mail it offers (approve only). */
+  includeExisting?: boolean;
+}
+
+/**
+ * Standing changes: settings the Inbox Agent asks to change, which keep acting
+ * after the chat (a filter, a sender block). They always wait for the user's
+ * approval, in every mode, and can be undone like a change set.
+ */
+export type InboxAgentSettingKind =
+  | 'create_filter' | 'update_filter' | 'delete_filter'
+  | 'block_sender' | 'unblock_sender' | 'add_vip' | 'remove_vip' | 'trust_sender' | 'untrust_sender';
+
+export type InboxAgentSettingStatus = 'pending' | 'applied' | 'cancelled' | 'expired' | 'undone';
+
+export interface InboxAgentSettingChange {
+  id: string;
+  /** The id the agent used for it in this chat (R1, R2…). */
+  label: string;
+  kind: InboxAgentSettingKind;
+  accountId: string;
+  accountEmail: string;
+  /** One line for the card title, e.g. 'Create filter "Newsletters"'. */
+  summary: string;
+  /** What it does, in plain words (the filter's conditions and actions, what blocking means). */
+  details: string[];
+  /**
+   * Existing mail it can also change now, offered unticked: a filter's
+   * actions on the mail it matches, or a blocked sender's mail moved to Spam.
+   */
+  existing?: {
+    /** "Also apply it to the 37 emails it matches now". */
+    text: string;
+    count: number;
+    /** Protected emails among them, left as they are even when ticked. */
+    protectedCount: number;
+    /** What happened to them, once applied. */
+    result?: string;
+  };
+  createdAt: number;
+  approveBy: number;
+  undoBy: number;
+  status: InboxAgentSettingStatus;
+  /** The user ticked "also apply to existing mail" when approving. */
+  existingApplied?: boolean;
+  /** Why the last decision did not go through, or what Undo left. */
+  detail?: string;
 }

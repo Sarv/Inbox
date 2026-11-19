@@ -1,4 +1,4 @@
-import type { AIToolDefinition, EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
+import type { AIToolDefinition, EmailRecord, FilterRule, FolderRecord, SearchQuery } from '@sarvinbox/core';
 import { parseAttachmentNames, parseTags, trimCharsStart } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssistantActionMode, InboxAssistantEvidence, InboxAssistantProgress } from '../../src/types/inbox-assistant';
@@ -7,6 +7,7 @@ import { instantToWallClock, startOfLocalDate, validLocalDate } from '../../src/
 import { inboxAssistantEvidenceText, jsonObject, normalizeExcerpt } from './inbox-assistant-answer';
 import type { HeldChangeSet } from './inbox-assistant-change-sets';
 import { addresses, bodyEvidence, fullBody, isSent, type AssistantResearchDeps, type AssistantResearchMailbox, type InboxAssistantResearch } from './inbox-assistant-retrieval';
+import type { HeldSettingChange, InboxAgentSettingActions } from './inbox-assistant-setting-changes';
 
 /**
  * The tools the Inbox Agent loop may call, and the record of what it saw.
@@ -114,6 +115,10 @@ export class InboxAgentRegistry {
 
 export interface InboxAgentToolContext {
   accounts: InboxAssistantAccount[];
+  /** The user's request, as typed: an address written there may be acted on (change_sender). */
+  question: string;
+  /** Filters list_filters showed in this run, by id (F1…). */
+  filterRefs?: Map<string, { accountId: string; rule: FilterRule }>;
   deps: AssistantResearchDeps;
   signal: AbortSignal;
   timeZone: string;
@@ -149,6 +154,15 @@ export interface InboxAgentChangeContext {
   /** Apply under "Approve for me", serialized with every other mail action. */
   apply(held: HeldChangeSet): Promise<void>;
   undo(held: HeldChangeSet): Promise<void>;
+  /** The host's settings (filters, senders). Absent: the setting tools are not offered. */
+  settings?: InboxAgentSettingActions;
+  /** This run's standing changes, in the order asked (R1, R2, …). They are never applied by the run. */
+  settingChanges: HeldSettingChange[];
+  /** Earlier changes in this chat that can still be undone ("undo that"). */
+  earlier: { sets: HeldChangeSet[]; settings: HeldSettingChange[] };
+  /** How many change sets and setting changes the chat had before this run, so labels stay unique in it. */
+  labelOffset: { sets: number; settings: number };
+  undoSetting(held: HeldSettingChange): Promise<void>;
 }
 
 export interface InboxAgentTool {
@@ -235,7 +249,7 @@ export function coverageFor(context: Pick<InboxAgentToolContext, 'coverage'>, ac
   return coverage;
 }
 
-function selectedAccounts(args: Record<string, unknown>, context: InboxAgentToolContext): InboxAssistantAccount[] {
+export function selectedAccounts(args: Record<string, unknown>, context: InboxAgentToolContext): InboxAssistantAccount[] {
   const wanted = optionalText(args, 'account', 320);
   if (!wanted) return context.accounts;
   const match = context.accounts.find(account => account.id === wanted || account.email.toLowerCase() === wanted.toLowerCase());
@@ -333,8 +347,19 @@ const FILTER_PROPERTIES = {
   starred: { type: 'boolean', description: 'true: only starred. false: only not starred.' },
   has_attachment: { type: 'boolean' },
   category: { type: 'string', description: 'An AI category slug from list_categories, or "none" for mail with no category.' },
+  label: { type: 'string', description: 'A label name from list_labels: only mail with that label.' },
 } as const;
 const FILTER_KEYS = Object.keys(FILTER_PROPERTIES);
+
+/** Optional storage reads the research interface does not declare; each answers what the store has, or nothing. */
+interface OptionalStorage {
+  getLabels?(): Promise<Array<{ name: string }>>;
+  countEmailsWithFolderTag?(tag: string): Promise<number>;
+  getSnoozedEmailRecords?(options: { limit?: number }): Promise<EmailRecord[]>;
+  getContacts?(options: { limit: number; offset: number; search?: string }): Promise<Array<{ email: string; name: string | null; displayName: string | null; organization: string | null; title: string | null; phone: string | null; lastSeen: number; emailCount: number; receivedCount: number; sentCount: number }>>;
+}
+
+const optional = (mailbox: AssistantResearchMailbox) => mailbox.storage as unknown as OptionalStorage;
 
 interface PreparedSearch {
   account: InboxAssistantAccount;
@@ -355,6 +380,7 @@ async function prepareSearch(args: Record<string, unknown>, context: InboxAgentT
   const starred = optionalBoolean(args, 'starred');
   const hasAttachment = optionalBoolean(args, 'has_attachment');
   const category = optionalText(args, 'category', 80)?.toLowerCase();
+  const label = optionalText(args, 'label', 60)?.trim();
   if (after && before && after >= before) throw new InboxAgentToolError('"after" must be earlier than "before".');
   const accounts = selectedAccounts(args, context);
   const prepared: PreparedSearch[] = [];
@@ -376,6 +402,15 @@ async function prepareSearch(args: Record<string, unknown>, context: InboxAgentT
       const slugs = categorySlugs(opened.mailbox);
       if (slugs.size && !slugs.has(category)) throw new InboxAgentToolError(`"${category}" is not a category in ${account.email}. Known: ${[...slugs].join(', ')}, or "none".`);
       base.aiCategory = category;
+    }
+    if (label) {
+      // Labels are tags; the account's own spelling is the tag.
+      let names: string[] = [];
+      try { names = (await optional(opened.mailbox).getLabels?.() ?? []).map(item => item.name); }
+      catch { notes.push(`${account.email}: labels could not be read, so it was not searched.`); continue; }
+      const known = names.find(name => name.toLowerCase() === label.toLowerCase());
+      if (!known) { notes.push(`${account.email} has no label "${label}".`); continue; }
+      base.tags = [known];
     }
     if (!folder) { prepared.push({ account, ...opened, query: { ...base, scope: 'mailbox' } }); continue; }
     if (folder === 'everywhere') {
@@ -816,6 +851,92 @@ const classifyMessages: InboxAgentTool = {
   },
 };
 
+
+const listLabels: InboxAgentTool = {
+  activity: 'Listing labels',
+  definition: {
+    name: 'list_labels',
+    description: 'The labels in each selected account, with how many emails carry each. Search one with search_mail\'s "label" filter.',
+    parameters: { type: 'object', additionalProperties: false, properties: { account: FILTER_PROPERTIES.account } },
+  },
+  async run(raw, context) {
+    const args = readArgs(raw, ['account']);
+    const lines: string[] = [];
+    for (const account of selectedAccounts(args, context)) {
+      const opened = await openAccount(context, account);
+      const storage = opened && optional(opened.mailbox);
+      let labels: Array<{ name: string }>;
+      try { labels = await storage?.getLabels?.() ?? []; }
+      catch { lines.push(`${account.email}: labels could not be read.`); continue; }
+      const counted = await Promise.all(labels.slice(0, 200).map(async label => {
+        let count: number | undefined;
+        try { count = await storage!.countEmailsWithFolderTag?.(label.name); } catch { /* Shown without a count. */ }
+        return `${oneLine(label.name, 60)}${count === undefined ? '' : ` (${count})`}`;
+      }));
+      lines.push(`${account.email}: ${counted.length ? counted.join(', ') : 'no labels'}`);
+    }
+    return lines.join('\n');
+  },
+};
+
+const listSnoozed: InboxAgentTool = {
+  activity: 'Listing snoozed mail',
+  definition: {
+    name: 'list_snoozed',
+    description: 'Snoozed emails in each selected account, soonest first, with when each comes back. Ids work with change_mail (unsnooze, or snooze again).',
+    parameters: { type: 'object', additionalProperties: false, properties: { account: FILTER_PROPERTIES.account } },
+  },
+  async run(raw, context) {
+    const args = readArgs(raw, ['account']);
+    const lines: string[] = [];
+    for (const account of selectedAccounts(args, context)) {
+      const opened = await openAccount(context, account);
+      if (!opened) { lines.push(`${account.email}: could not be opened.`); continue; }
+      let emails: EmailRecord[];
+      try { emails = await optional(opened.mailbox).getSnoozedEmailRecords?.({ limit: INBOX_AGENT_LIMITS.searchMax }) ?? []; }
+      catch { lines.push(`${account.email}: snoozed mail could not be read.`); continue; }
+      lines.push(`${account.email}: ${emails.length ? `${emails.length} snoozed${emails.length >= INBOX_AGENT_LIMITS.searchMax ? ' (the first ones)' : ''}` : 'nothing snoozed'}`);
+      const aliases = opened.mailbox.aliases.map(alias => alias.toLowerCase());
+      const slugs = categorySlugs(opened.mailbox);
+      for (const email of [...emails].sort((a, b) => (a.snoozeUntil ?? 0) - (b.snoozeUntil ?? 0))) {
+        const row = messageRow(context, account, opened.folders, aliases, slugs, email);
+        if (row) lines.push(`${row}\n   Snoozed until: ${email.snoozeUntil ? when(email.snoozeUntil, context.timeZone) : 'unknown'}`);
+      }
+    }
+    return lines.join('\n');
+  },
+};
+
+const findContact: InboxAgentTool = {
+  activity: 'Looking up contacts',
+  definition: {
+    name: 'find_contact',
+    description: 'People in the address book (one for all accounts) whose name, address or organisation matches: their address, organisation, title, phone, and how much mail you exchanged.',
+    parameters: { type: 'object', additionalProperties: false, required: ['query'], properties: { query: { type: 'string' } } },
+  },
+  async run(raw, context) {
+    const args = readArgs(raw, ['query']);
+    const query = optionalText(args, 'query', 120)?.trim();
+    if (!query) throw new InboxAgentToolError('"query" is required: a name, address or organisation.');
+    // The address book is shared by every account: read it once, through the first that opens.
+    for (const account of context.accounts) {
+      const opened = await openAccount(context, account);
+      const storage = opened && optional(opened.mailbox);
+      if (!storage?.getContacts) continue;
+      let contacts;
+      try { contacts = await storage.getContacts({ limit: 10, offset: 0, search: query }); }
+      catch { return 'The address book could not be read.'; }
+      if (!contacts.length) return `No contacts match "${oneLine(query, 60)}".`;
+      return [`${contacts.length} ${contacts.length === 1 ? 'contact matches' : 'contacts match'}${contacts.length >= 10 ? ' (the first 10)' : ''}:`, ...contacts.map(contact => {
+        const name = contact.displayName || contact.name;
+        return `  ${name ? `${oneLine(name, 80)} <${contact.email}>` : contact.email}${contact.organization ? ` | ${oneLine(contact.organization, 80)}` : ''}${contact.title ? ` | ${oneLine(contact.title, 80)}` : ''}${contact.phone ? ` | phone ${oneLine(contact.phone, 40)}` : ''} | ${contact.receivedCount} received, ${contact.sentCount} sent | last ${when(contact.lastSeen, context.timeZone).slice(0, 10)}`;
+      })].join('\n');
+    }
+    return 'The address book is not available.';
+  },
+};
+
 export const INBOX_AGENT_TOOLS: readonly InboxAgentTool[] = [
   searchMail, countMail, readMessage, readThread, readAttachment, deepSearch, classifyMessages, listAccounts, listFolders, listCategories,
+  listLabels, listSnoozed, findContact,
 ];

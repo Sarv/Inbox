@@ -11,6 +11,11 @@ import { changeAssistantReadFlags, changeAssistantStarFlags } from '../services/
 import { changeAssistantMailLocation } from '../services/assistant-mail-moves';
 import { fetchAssistantMessageBody } from '../services/assistant-mailbox-download';
 import { changeEmailCategory } from '../services/classification-actions';
+import { readAppSetting, readBlob, setBlob } from '../services/core-db';
+import { agentSpamVerdicts, createAgentLabel, dropAgentLabel, labelAgentEmails, revertAgentSpamVerdicts, snoozeAgentEmails } from '../services/inbox-agent-mail-actions';
+import { createAgentSettingActions } from '../services/inbox-agent-setting-host';
+import { inboxAgentToolsEnabled } from '../services/inbox-agent-switch';
+import { createInboxAgentChangeJournal } from '../services/inbox-assistant-change-journal';
 import { buildInboxAssistantDashboard } from '../services/inbox-assistant-dashboard';
 import { inboxAssistantHistory } from '../services/inbox-assistant-history';
 import { createUnreadReviewBehaviorContext } from '../services/inbox-assistant-review-behavior';
@@ -22,6 +27,10 @@ import { getMainWindow } from '../shared';
 
 import { logUserAction } from './agent-handlers';
 import { restoreEmailsFromTrash } from './email-handlers';
+import { verdictDepsOf } from './spam-handlers';
+
+/** The core-DB blob that holds the Inbox Agent's open change cards. */
+const CHANGE_JOURNAL_KEY = 'inbox-agent-change-journal';
 
 /**
  * Keys the review-cache identity below. Per process and never stored: the
@@ -110,10 +119,10 @@ const service = new InboxAssistantService({
     if (!config) throw new Error('Choose an AI provider in AI → Providers before asking the Inbox Agent.');
     return callInboxAssistantChat(config, request, signal, onUsage);
   },
-  // Preview switch for the tool-using agent (docs/INBOX_AGENT_HARNESS.md).
-  // Until its evaluation passes, typed questions keep the fixed paths unless
-  // the app was started with SARVINBOX_AGENT_HARNESS=1.
-  agentHarness: () => process.env.SARVINBOX_AGENT_HARNESS === '1',
+  // Preview switch for the tool-using agent (docs/INBOX_AGENT_HARNESS.md):
+  // Settings > AI > Inbox Agent, or SARVINBOX_AGENT_HARNESS=1. Until its
+  // evaluation passes, typed questions keep the fixed paths by default.
+  agentHarness: () => inboxAgentToolsEnabled(readAppSetting),
   openMailbox: async accountId => {
     const storage = await requireAccountStorage(accountId);
     return {
@@ -141,6 +150,15 @@ const service = new InboxAssistantService({
     const target = await namedAccountTarget(accountId);
     return changeAssistantReadFlags({ ...target, onChanged: flagLogger(target.storage, context?.source, ['read', 'unread']) }, emailIds, read);
   },
+  // Open cards survive a restart: one blob in the encrypted core database. A
+  // read that fails throws (readBlob), so the journal is then left alone.
+  changeJournal: createInboxAgentChangeJournal({
+    read: () => readBlob(CHANGE_JOURNAL_KEY)?.toString('utf8') ?? null,
+    write: value => setBlob(CHANGE_JOURNAL_KEY, Buffer.from(value, 'utf8')),
+  }),
+  // The agent's approved setting changes (inbox-assistant-setting-changes.ts):
+  // the Filters page's records and the spam filter's own sender lists.
+  settingActions: createAgentSettingActions(namedAccountTarget),
   // The agent's approved change sets (inbox-assistant-change-sets.ts). Each
   // is the same durable, receipt-returning path the review cards use.
   mailActions: {
@@ -183,8 +201,28 @@ const service = new InboxAssistantService({
       }
       return receipt;
     },
+    setLabel: async (accountId, emailIds, name, on) => labelAgentEmails(await agentTarget(accountId), emailIds, name, on),
+    createLabel: async (accountId, name) => createAgentLabel(await agentTarget(accountId), name),
+    dropLabel: async (accountId, name) => dropAgentLabel(await agentTarget(accountId), name),
+    setSnooze: async (accountId, emailIds, until) => snoozeAgentEmails(await agentTarget(accountId), emailIds, until),
+    spamVerdict: async (accountId, emailIds, verdict) => {
+      const target = await agentTarget(accountId);
+      return agentSpamVerdicts(target, verdictDepsOf(target.storage, target.engine), emailIds, verdict, async email => {
+        if (verdict === 'spam') await logUserAction(email.id, 'spam', { source: 'agent_approved', threadId: email.threadId, senderAddress: email.fromAddress }, target.storage);
+      });
+    },
+    revertSpamVerdict: async (accountId, rows) => {
+      const target = await agentTarget(accountId);
+      return revertAgentSpamVerdicts(target, verdictDepsOf(target.storage, target.engine), rows);
+    },
   },
 });
+
+/** The named account as an agent mail target: checked before every write, and the mail list told of each change. */
+async function agentTarget(accountId: string) {
+  const target = await namedAccountTarget(accountId);
+  return { ...target, onWritten: (emailId: string, tags: string) => getMainWindow()?.webContents.send('emails:tags-updated', { emailId, tags, accountId }) };
+}
 
 export function registerInboxAssistantHandlers(): void {
   const register = (channel: string, run: (value: unknown, event: IpcMainInvokeEvent) => unknown) => {

@@ -15,7 +15,7 @@ const folder = (id: string, path: string, specialUse: string | null): FolderReco
   id, name: path, path, parentId: null, uidValidity: 1, lastSyncUid: null, lastSyncTime: null,
   totalCount: 0, unreadCount: 0, specialUse, subscribed: true, createdAt: 0, updatedAt: 0,
 });
-const FOLDERS = [folder('f-inbox', 'INBOX', '\\Inbox'), folder('f-trash', 'Trash', '\\Trash'), folder('f-work', 'Work', null), folder('f-archive', 'Archive', '\\Archive')];
+const FOLDERS = [folder('f-inbox', 'INBOX', '\\Inbox'), folder('f-trash', 'Trash', '\\Trash'), folder('f-work', 'Work', null), folder('f-archive', 'Archive', '\\Archive'), folder('f-spam', 'Spam', '\\Junk')];
 
 /**
  * A fake mailbox behind the change actions: each action changes `rows` the
@@ -50,7 +50,7 @@ function mailbox(initial: Array<Partial<EmailRecord> & { id: string; account?: s
     row.folderId = id;
     return true;
   };
-  const actions: InboxAgentMailActions = {
+  const actions = {
     setRead: async (accountId, ids, read) => change(read ? 'read' : 'unread', accountId, ids, undefined, row => tag(row, 'read', read)),
     setStarred: async (accountId, ids, starred) => change(starred ? 'star' : 'unstar', accountId, ids, undefined, row => tag(row, 'starred', starred)),
     setCategory: async (accountId, ids, slug, on) => change(on ? 'category+' : 'category-', accountId, ids, slug, row => tag(row, slug, on)),
@@ -59,18 +59,56 @@ function mailbox(initial: Array<Partial<EmailRecord> & { id: string; account?: s
       const id = to === 'trash' ? 'f-trash' : to === 'archive' ? 'f-archive' : to.folderId;
       return row.folderId === id ? true : place(row, id);
     }),
-  };
+  } as InboxAgentMailActions;
+  const labels = new Map<string, Set<string>>();
+  const labelFailing = new Set<string>();
+  Object.assign(actions, {
+    setLabel: async (accountId, ids, name, on) => change(on ? 'label+' : 'label-', accountId, ids, name, row => tag(row, name, on)),
+    createLabel: async (accountId, name) => {
+      calls.push({ op: 'createLabel', accountId, ids: [], arg: name });
+      if (labelFailing.has(accountId)) throw new Error('no label');
+      const known = labels.get(accountId) ?? new Set();
+      labels.set(accountId, known);
+      if (known.has(name)) return false;
+      known.add(name);
+      return true;
+    },
+    dropLabel: async (accountId, name) => { calls.push({ op: 'dropLabel', accountId, ids: [], arg: name }); labels.get(accountId)?.delete(name); },
+    setSnooze: async (accountId, ids, until) => change(until === null ? 'unsnooze' : 'snooze', accountId, ids, until ?? undefined, row => {
+      if (until === null) { row.snoozeUntil = null; return tag(row, 'snoozed', false); }
+      if (row.snoozeUntil === until) return false;
+      row.snoozeUntil = until;
+      tag(row, 'snoozed', true);
+      return true;
+    }),
+    spamVerdict: async (accountId, ids, verdict) => change(verdict, accountId, ids, undefined, row => {
+      row.spamUserVerdict = verdict;
+      tag(row, 'spam', verdict === 'spam');
+      return verdict === 'spam' ? place(row, 'f-spam') : row.folderId === 'f-spam' ? place(row, 'f-inbox') : true;
+    }),
+    revertSpamVerdict: async (accountId, revert) => change('revert', accountId, revert.map(item => item.emailId), revert, row => {
+      const before = revert.find(item => item.emailId === row.id)!;
+      row.spamUserVerdict = before.verdict;
+      tag(row, 'spam', before.tags.includes('|spam|'));
+      return row.folderId === before.folderId ? true : place(row, before.folderId);
+    }),
+  } satisfies Partial<InboxAgentMailActions>);
   const readEmail = vi.fn(async (accountId: string, emailId: string) => rows.get(`${accountId}:${emailId}`) ?? null);
-  return { rows, calls, actions, readEmail, failing, thrown, row: (id: string, account = 'a1') => rows.get(`${account}:${id}`)! };
+  return { rows, calls, actions, readEmail, failing, thrown, labels, labelFailing, row: (id: string, account = 'a1') => rows.get(`${account}:${id}`)! };
 }
 
-function stage(box: ReturnType<typeof mailbox>, action: InboxAgentChangeAction, ids: Array<string | [string, string]>, extra: { protect?: string[]; category?: string; folder?: FolderRecord } = {}): HeldChangeSet {
+type StageExtra = { protect?: string[]; category?: string; folder?: FolderRecord; labelName?: string; createsLabelIn?: string[]; snooze?: { until: number; text: string };
+  sender?: { address: string; spammer: boolean; trusted: boolean } };
+
+function stage(box: ReturnType<typeof mailbox>, action: InboxAgentChangeAction, ids: Array<string | [string, string]>, extra: StageExtra = {}): HeldChangeSet {
   return stageChangeSet({
     label: 'C1', action, nowMs: T0, ...(extra.category ? { category: extra.category } : {}), ...(extra.folder ? { folder: extra.folder } : {}),
+    ...(extra.labelName ? { labelName: extra.labelName } : {}), ...(extra.createsLabelIn ? { createsLabelIn: extra.createsLabelIn } : {}),
+    ...(extra.snooze ? { snooze: extra.snooze } : {}),
     targets: ids.map(entry => {
       const [account, id] = Array.isArray(entry) ? entry : ['a1', entry];
       return { accountId: account, accountEmail: `${account}@example.test`, email: { ...box.row(id, account) }, folders: FOLDERS,
-        ...(extra.protect?.includes(id) ? { protectedReason: 'Starred' } : {}) };
+        ...(extra.protect?.includes(id) ? { protectedReason: 'Starred' } : {}), ...(extra.sender ? { sender: extra.sender } : {}) };
     }),
   });
 }
@@ -381,5 +419,156 @@ describe('undo', () => {
     const held = stage(box, 'mark_read', ['m1', 'm2']);
     await applyChangeSet(held, options(box));
     expect(changeCounts(held.set)).toEqual({ pending: 0, applied: 1, queued: 0, unchanged: 1, failed: 0, skipped: 0, undone: 0 });
+  });
+});
+
+describe('labels, snooze and spam', () => {
+  const SOON = 1_800_100_000;
+
+  // Breaks: the card title says something other than what will happen.
+  it.each([
+    ['add_label', 2, 'Clients', 'Label 2 emails "Clients"'], ['remove_label', 1, 'Clients', 'Remove label "Clients" from 1 email'],
+    ['snooze', 3, 'Fri, Nov 21, 2026, 9:00 AM', 'Snooze 3 emails until Fri, Nov 21, 2026, 9:00 AM'], ['unsnooze', 1, undefined, 'Unsnooze 1 email'],
+    ['spam', 2, undefined, 'Report 2 emails as spam'], ['not_spam', 1, undefined, 'Mark 1 email as not spam'],
+  ] as const)('summarises %s', (action, count, target, expected) => {
+    expect(changeSummary(action, count, target)).toBe(expected);
+  });
+
+  // Breaks: a spam verdict (which also teaches the filter) or a new label applies under "Approve for me" without asking.
+  it('marks spam verdicts and label-creating sets as standing, and plain labels and snoozes as not', () => {
+    const box = mailbox([{ id: 'm1' }]);
+    expect(stage(box, 'spam', ['m1']).set.standing).toBe(true);
+    expect(stage(box, 'not_spam', ['m1']).set.standing).toBe(true);
+    expect(stage(box, 'add_label', ['m1'], { labelName: 'Clients', createsLabelIn: ['a1'] }).set).toMatchObject({ standing: true, createsLabelIn: ['a1'], labelName: 'Clients' });
+    expect(stage(box, 'add_label', ['m1'], { labelName: 'Clients' }).set.standing).toBeUndefined();
+    expect(stage(box, 'snooze', ['m1'], { snooze: { until: SOON, text: 'soon' } }).set).toMatchObject({ snoozeUntil: SOON, summary: 'Snooze 1 email until soon' });
+  });
+
+  // Breaks: reporting a security code or a bank alert as spam goes ahead with the rest.
+  it('protects sensitive mail from a spam verdict, but not from a label or a snooze', () => {
+    const plain = { subject: 'Hi', fromAddress: 'a@example.test', tags: '|INBOX|starred|' };
+    expect(changeProtection('spam', plain, '')).toBe('Starred');
+    for (const action of ['add_label', 'snooze', 'not_spam'] as const) expect(changeProtection(action, plain, '')).toBeUndefined();
+  });
+
+  // Breaks: a new label is not created before its first email gets it, or Undo leaves the label behind.
+  it('creates a new label once per account before labelling, and drops it again on Undo', async () => {
+    const box = mailbox([{ id: 'm1' }, { id: 'm2' }]);
+    const held = stage(box, 'add_label', ['m1', 'm2'], { labelName: 'Clients', createsLabelIn: ['a1'] });
+    await applyChangeSet(held, options(box));
+    expect(box.calls.map(call => call.op)).toEqual(['createLabel', 'label+']);
+    expect(box.row('m1').tags).toContain('|Clients|');
+    expect(held.createdLabelIn).toEqual(['a1']);
+    await undoChangeSet(held, options(box));
+    expect(box.calls.map(call => call.op)).toEqual(['createLabel', 'label+', 'label-', 'dropLabel']);
+    expect(box.row('m1').tags).not.toContain('|Clients|');
+    expect(held.createdLabelIn).toEqual([]);
+    expect(held.set.status).toBe('undone');
+  });
+
+  // Breaks: Undo deletes a label that existed before the agent (the user's own label) or one still on an email.
+  it('never drops a label the set did not create, nor while one of its emails keeps it', async () => {
+    const box = mailbox([{ id: 'm1' }, { id: 'm2' }]);
+    box.labels.set('a1', new Set(['Clients']));
+    const existing = stage(box, 'add_label', ['m1'], { labelName: 'Clients', createsLabelIn: ['a1'] });
+    await applyChangeSet(existing, options(box));
+    expect(existing.createdLabelIn).toBeUndefined();
+    await undoChangeSet(existing, options(box));
+    expect(box.calls.some(call => call.op === 'dropLabel')).toBe(false);
+
+    const fresh = stage(box, 'add_label', ['m2'], { labelName: 'Leads', createsLabelIn: ['a1'] });
+    await applyChangeSet(fresh, options(box));
+    box.failing.add('m2');
+    await undoChangeSet(fresh, options(box));
+    expect(box.calls.some(call => call.op === 'dropLabel')).toBe(false);
+    expect(fresh.createdLabelIn).toEqual(['a1']);
+  });
+
+  // Breaks: a label that could not be created is reported as applied, or a retry creates it twice.
+  it('fails the account\'s rows when its label cannot be created, and retries cleanly', async () => {
+    const box = mailbox([{ id: 'm1' }, { id: 'm9', account: 'a2' }]);
+    box.labelFailing.add('a1');
+    const held = stage(box, 'add_label', ['m1', ['a2', 'm9']], { labelName: 'Clients', createsLabelIn: ['a1', 'a2'] });
+    await applyChangeSet(held, options(box));
+    expect(held.set.items.map(item => [item.status, item.detail])).toEqual([['failed', 'The label could not be created. Approve again to retry.'], ['applied', undefined]]);
+    expect(box.row('m1').tags).not.toContain('|Clients|');
+    box.labelFailing.clear();
+    await applyChangeSet(held, options(box));
+    expect(statuses(held)).toEqual(['applied', 'applied']);
+    expect(box.calls.filter(call => call.op === 'createLabel').map(call => call.accountId)).toEqual(['a1', 'a2', 'a1']);
+  });
+
+  // Breaks: Undo of a snooze leaves mail hidden, or wakes mail the user had snoozed for another time.
+  it('undoes a snooze by waking the mail, or by putting back the earlier snooze time', async () => {
+    const box = mailbox([{ id: 'm1' }, { id: 'm2', tags: '|INBOX|snoozed|', snoozeUntil: SOON - 500 }]);
+    const held = stage(box, 'snooze', ['m1', 'm2'], { snooze: { until: SOON, text: 'soon' } });
+    await applyChangeSet(held, options(box));
+    expect([box.row('m1').snoozeUntil, box.row('m2').snoozeUntil]).toEqual([SOON, SOON]);
+    await undoChangeSet(held, options(box));
+    expect(box.row('m1')).toMatchObject({ snoozeUntil: null });
+    expect(box.row('m1').tags).not.toContain('|snoozed|');
+    expect(box.row('m2')).toMatchObject({ snoozeUntil: SOON - 500 });
+    expect(box.calls.slice(-2).map(call => [call.op, call.arg])).toEqual([['unsnooze', undefined], ['snooze', SOON - 500]]);
+  });
+
+  // Breaks: Undo overrides a snooze the user changed themselves after the agent's.
+  it('leaves a snooze the user changed since', async () => {
+    const box = mailbox([{ id: 'm1' }]);
+    const held = stage(box, 'snooze', ['m1'], { snooze: { until: SOON, text: 'soon' } });
+    await applyChangeSet(held, options(box));
+    box.row('m1').snoozeUntil = SOON + 3_600;
+    await undoChangeSet(held, options(box));
+    expect(held.set.items[0]).toMatchObject({ status: 'applied', detail: 'Changed since; left as it is now.' });
+  });
+
+  // Breaks: Undo of an unsnooze cannot put the mail back to sleep until its old time.
+  it('undoes an unsnooze by snoozing again until the old time', async () => {
+    const box = mailbox([{ id: 'm1', tags: '|INBOX|snoozed|', snoozeUntil: SOON }]);
+    const held = stage(box, 'unsnooze', ['m1']);
+    await applyChangeSet(held, options(box));
+    expect(box.row('m1').tags).not.toContain('|snoozed|');
+    await undoChangeSet(held, options(box));
+    expect(box.row('m1')).toMatchObject({ snoozeUntil: SOON });
+  });
+
+  // Breaks: Undo of "report spam" leaves mail in Spam, loses its earlier verdict, or forgets the sender's listing.
+  it('undoes a spam verdict from what each row was before, sender lists included', async () => {
+    const box = mailbox([{ id: 'm1', folderId: 'f-work', tags: '|Work|', spamUserVerdict: 'ham' }]);
+    const sender = { address: 'shop@example.test', spammer: false, trusted: true };
+    const held = stage(box, 'spam', ['m1'], { sender });
+    await applyChangeSet(held, options(box));
+    expect(box.row('m1')).toMatchObject({ folderId: 'f-spam', spamUserVerdict: 'spam' });
+    await undoChangeSet(held, options(box));
+    const revert = box.calls.at(-1)!;
+    expect(revert).toMatchObject({ op: 'revert', ids: ['m1'] });
+    expect(revert.arg).toEqual([{ emailId: 'm1', tags: '|Work|', folderId: 'f-work', verdict: 'ham', sender }]);
+    expect(box.row('m1')).toMatchObject({ folderId: 'f-work', spamUserVerdict: 'ham' });
+    expect(held.set.status).toBe('undone');
+  });
+
+  // Breaks: a message the user moved out of Spam again is dragged back by Undo of "not spam", or a spam verdict on moved mail is forced.
+  it('skips a moved row when applying a verdict, and leaves a row moved since when undoing it', async () => {
+    const box = mailbox([{ id: 'm1', folderId: 'f-spam', tags: '|Spam|spam|' }, { id: 'm2' }]);
+    const held = stage(box, 'not_spam', ['m1']);
+    await applyChangeSet(held, options(box));
+    expect(box.row('m1').folderId).toBe('f-inbox');
+    box.row('m1').folderId = 'f-archive';
+    await undoChangeSet(held, options(box));
+    expect(held.set.items[0]!.detail).toBe('Changed since; left as it is now.');
+
+    const stale = stage(box, 'spam', ['m2']);
+    box.row('m2').folderId = 'f-work';
+    await applyChangeSet(stale, options(box));
+    expect(stale.set.items[0]).toMatchObject({ status: 'skipped', detail: 'It was moved after the change was prepared.' });
+  });
+
+  // Breaks: Undo of a label removal does not put the label back.
+  it('undoes a label removal by labelling again', async () => {
+    const box = mailbox([{ id: 'm1', tags: '|INBOX|Clients|' }]);
+    const held = stage(box, 'remove_label', ['m1'], { labelName: 'Clients' });
+    await applyChangeSet(held, options(box));
+    expect(box.row('m1').tags).not.toContain('|Clients|');
+    await undoChangeSet(held, options(box));
+    expect(box.row('m1').tags).toContain('|Clients|');
   });
 });

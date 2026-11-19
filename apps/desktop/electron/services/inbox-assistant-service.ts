@@ -14,6 +14,7 @@ import { runInboxAgent, type InboxAgentProtocol } from './inbox-assistant-agent'
 import type { InboxAgentChangeContext } from './inbox-assistant-agent-tools';
 import { answerInboxAssistant, INBOX_ASSISTANT_OUTPUT_TOKENS, planInboxAssistantSearch } from './inbox-assistant-answer';
 import { inboxAssistantCapabilityReply } from './inbox-assistant-capabilities';
+import type { InboxAgentChangeJournal } from './inbox-assistant-change-journal';
 import { applyChangeSet, cancelChangeSet, changeCounts, INBOX_AGENT_CHANGE_LIMITS, undoChangeSet, type HeldChangeSet, type InboxAgentEmailReader, type InboxAgentMailActions } from './inbox-assistant-change-sets';
 import { buildInboxAssistantContext } from './inbox-assistant-context';
 import { inboxAssistantDegradedStages, inboxAssistantRunSummary } from './inbox-assistant-diagnostics';
@@ -22,6 +23,7 @@ import type { InboxAssistantHistoryStore } from './inbox-assistant-history';
 import { InboxAssistantRecommendationCache } from './inbox-assistant-recommendation-cache';
 import { researchInboxAssistant, type AssistantResearchDeps } from './inbox-assistant-retrieval';
 import { inboxAssistantReviewDateLabel, parseInboxAssistantReviewDate } from './inbox-assistant-review-date';
+import { applySettingChange, cancelSettingChange, undoSettingChange, type HeldSettingChange, type InboxAgentSettingActions } from './inbox-assistant-setting-changes';
 import { aggregateInboxAssistantUsage, INBOX_ASSISTANT_SYSTEM_PROMPT } from './inbox-assistant-usage';
 
 export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
@@ -39,6 +41,10 @@ export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
   moveMail?: InboxAssistantActionDeps['moveMail'];
   /** How the agent's approved change sets reach the mailbox. Absent: the agent can only read. */
   mailActions?: InboxAgentMailActions;
+  /** How the agent's approved setting changes (filters, senders) are saved. Absent: the setting tools are not offered. */
+  settingActions?: InboxAgentSettingActions;
+  /** Where open cards are kept across a restart. Absent: they expire when the app quits. */
+  changeJournal?: InboxAgentChangeJournal;
   calendar?: {
     preferences(): LocalCalendarPreferences;
     availability(request: LocalCalendarAvailabilityRequest): LocalCalendarAvailability | Promise<LocalCalendarAvailability>;
@@ -210,11 +216,35 @@ export class InboxAssistantService {
   private actionReviews = new Map<string, HeldReview>();
   /** The agent's change sets, by id: what a card's Approve, Cancel and Undo act on. Memory only. */
   private changeSets = new Map<string, { chatId: string; exchangeId: string; accounts: InboxAssistantAccount[]; held: HeldChangeSet }>();
+  /** The agent's setting changes, by id, likewise. Memory only. */
+  private settingChanges = new Map<string, { chatId: string; exchangeId: string; accounts: InboxAssistantAccount[]; held: HeldSettingChange }>();
   private recommendationCache = new InboxAssistantRecommendationCache();
   /** How the agent last succeeded in calling each provider identity, so a refusal is paid for once. */
   private agentProtocols = new Map<string, InboxAgentProtocol>();
 
-  constructor(private deps: InboxAssistantServiceDeps) {}
+  constructor(private deps: InboxAssistantServiceDeps) {
+    // Cards from before a restart keep their buttons while their windows last.
+    const saved = deps.changeJournal?.load(deps.now?.() ?? Date.now());
+    for (const entry of saved?.sets ?? []) this.changeSets.set(entry.held.set.id, entry);
+    for (const entry of saved?.settings ?? []) this.settingChanges.set(entry.held.change.id, entry);
+  }
+
+  /** Save what the cards can still do, so it survives a restart. */
+  private saveJournal(): void {
+    this.deps.changeJournal?.save({ sets: [...this.changeSets.values()], settings: [...this.settingChanges.values()] }, this.deps.now?.() ?? Date.now());
+  }
+
+  /** An exchange's cards as their held state says now (an Undo from a later message changes an earlier card). */
+  private withHeldCards(exchange: InboxAssistantExchange): InboxAssistantExchange {
+    const sets = exchange.changeSets?.some(set => this.changeSets.has(set.id));
+    const settings = exchange.settingChanges?.some(change => this.settingChanges.has(change.id));
+    if (!sets && !settings) return exchange;
+    return {
+      ...exchange,
+      ...(sets ? { changeSets: exchange.changeSets!.map(set => { const held = this.changeSets.get(set.id)?.held; return held ? structuredClone(held.set) : set; }) } : {}),
+      ...(settings ? { settingChanges: exchange.settingChanges!.map(change => { const held = this.settingChanges.get(change.id)?.held; return held ? structuredClone(held.change) : change; }) } : {}),
+    };
+  }
 
   private assertIdle(chatId: string, requestId: string): void {
     if (this.running.has(chatId)) throw new Error('Another Inbox Agent request is still running in this conversation. Stop it before starting another.');
@@ -256,6 +286,8 @@ export class InboxAssistantService {
     if (index < 0) runs.push(record); else runs[index] = record;
     let exchanges = exchange ? current.exchanges.some(value => value.id === exchange.id)
       ? current.exchanges.map(value => value.id === exchange.id ? exchange : value) : [...current.exchanges, exchange] : current.exchanges;
+    // Earlier cards a run changed (the agent undid one) are saved as they are now.
+    exchanges = exchanges.map(value => this.withHeldCards(value));
     if (run.record.kind === 'question' && run.record.exchangeId && !exchange) {
       const previous = exchanges.find(value => value.id === run.record.exchangeId);
       const question: InboxAssistantExchange = { ...(previous ?? { id: run.record.exchangeId, chatId: run.chatId, question: run.record.question,
@@ -359,12 +391,17 @@ export class InboxAssistantService {
 
   private visibleExchanges(exchanges: InboxAssistantExchange[]): InboxAssistantExchange[] {
     const registered = new Set(this.accounts().map(account => account.id));
-    return exchanges.filter(exchange => exchange.accountIds.every(id => registered.has(id))).map(exchange => {
+    return exchanges.filter(exchange => exchange.accountIds.every(id => registered.has(id))).map(stored => {
+      let exchange = this.withHeldCards(stored);
       // A card whose change set is no longer held (the app restarted) can no
       // longer be approved or undone: say so rather than offer the buttons.
       if (exchange.changeSets?.some(set => !this.changeSets.has(set.id))) {
         exchange = { ...exchange, changeSets: exchange.changeSets.map(set => this.changeSets.has(set.id) ? set
           : { ...set, approveBy: 0, undoBy: 0, ...(set.status === 'pending' ? { status: 'expired' as const } : {}) }) };
+      }
+      if (exchange.settingChanges?.some(change => !this.settingChanges.has(change.id))) {
+        exchange = { ...exchange, settingChanges: exchange.settingChanges.map(change => this.settingChanges.has(change.id) ? change
+          : { ...change, approveBy: 0, undoBy: 0, ...(change.status === 'pending' ? { status: 'expired' as const } : {}) }) };
       }
       if (!exchange.review || (this.actionReviews.has(exchange.review.id) && exchange.review.expiresAt > Date.now())) return exchange;
       return { ...exchange, review: { ...exchange.review, status: 'expired' } };
@@ -484,13 +521,51 @@ export class InboxAssistantService {
 
   private forgetChangeSets(chatId: string): void {
     for (const [id, entry] of this.changeSets) if (entry.chatId === chatId) this.changeSets.delete(id);
+    for (const [id, entry] of this.settingChanges) if (entry.chatId === chatId) this.settingChanges.delete(id);
+    this.saveJournal();
   }
 
-  private rememberChangeSets(chatId: string, exchangeId: string, accounts: InboxAssistantAccount[], sets: HeldChangeSet[]): void {
+  private rememberChangeSets(chatId: string, exchangeId: string, accounts: InboxAssistantAccount[], sets: HeldChangeSet[], settings: HeldSettingChange[] = []): void {
     const now = this.deps.now?.() ?? Date.now();
     for (const [id, entry] of this.changeSets) if (Math.max(entry.held.set.approveBy, entry.held.set.undoBy) < now) this.changeSets.delete(id);
+    for (const [id, entry] of this.settingChanges) if (Math.max(entry.held.change.approveBy, entry.held.change.undoBy) < now) this.settingChanges.delete(id);
     for (const held of sets) this.changeSets.set(held.set.id, { chatId, exchangeId, accounts, held });
+    for (const held of settings) this.settingChanges.set(held.change.id, { chatId, exchangeId, accounts, held });
     while (this.changeSets.size > 200) this.changeSets.delete(this.changeSets.keys().next().value!);
+    while (this.settingChanges.size > 100) this.settingChanges.delete(this.settingChanges.keys().next().value!);
+    this.saveJournal();
+  }
+
+  /** A chat's earlier changes the agent can still undo, and how many cards it had, so new labels stay unique. */
+  private earlierChanges(chatId: string): Pick<InboxAgentChangeContext, 'earlier' | 'labelOffset'> {
+    const exchanges = this.deps.history.load(chatId, { select: false }).exchanges;
+    return {
+      earlier: {
+        sets: [...this.changeSets.values()].filter(entry => entry.chatId === chatId).map(entry => entry.held),
+        settings: [...this.settingChanges.values()].filter(entry => entry.chatId === chatId).map(entry => entry.held),
+      },
+      labelOffset: {
+        sets: exchanges.reduce((sum, exchange) => sum + (exchange.changeSets?.length ?? 0), 0),
+        settings: exchanges.reduce((sum, exchange) => sum + (exchange.settingChanges?.length ?? 0), 0),
+      },
+    };
+  }
+
+  /** The host's settings, refused once an account is no longer the one the change was prepared for. */
+  private agentSettings(signal: AbortSignal, expected: InboxAssistantAccount[]): InboxAgentSettingActions {
+    const settings = this.deps.settingActions;
+    if (!settings) throw new Error('Settings are unavailable. Restart the app after updating.');
+    const checked = <A extends unknown[], R>(call: (accountId: string, ...args: A) => Promise<R>) => (accountId: string, ...args: A): Promise<R> => {
+      signal.throwIfAborted();
+      const account = this.accounts().find(item => item.id === accountId);
+      if (!account || !expected.some(item => item.id === account.id && item.email === account.email)) return Promise.reject(new Error('The account changed or is no longer connected.'));
+      return call(accountId, ...args);
+    };
+    return {
+      listFilters: checked(settings.listFilters.bind(settings)), createFilter: checked(settings.createFilter.bind(settings)), updateFilter: checked(settings.updateFilter.bind(settings)),
+      deleteFilter: checked(settings.deleteFilter.bind(settings)), matchFilter: checked(settings.matchFilter.bind(settings)), senderEmails: checked(settings.senderEmails.bind(settings)),
+      sender: checked(settings.sender.bind(settings)), setSender: checked(settings.setSender.bind(settings)),
+    };
   }
 
   /** The agent's mail actions, refused once an account is no longer the one the change was prepared for. */
@@ -509,6 +584,12 @@ export class InboxAssistantService {
         move: (accountId, ids, to) => { assertAccount(accountId); return mail.move(accountId, ids, to); },
         restore: (accountId, ids) => { assertAccount(accountId); return mail.restore(accountId, ids); },
         setCategory: (accountId, ids, slug, on) => { assertAccount(accountId); return mail.setCategory(accountId, ids, slug, on); },
+        setLabel: (accountId, ids, name, on) => { assertAccount(accountId); return mail.setLabel(accountId, ids, name, on); },
+        createLabel: (accountId, name) => { assertAccount(accountId); return mail.createLabel(accountId, name); },
+        dropLabel: (accountId, name) => { assertAccount(accountId); return mail.dropLabel(accountId, name); },
+        setSnooze: (accountId, ids, until) => { assertAccount(accountId); return mail.setSnooze(accountId, ids, until); },
+        spamVerdict: (accountId, ids, verdict) => { assertAccount(accountId); return mail.spamVerdict(accountId, ids, verdict); },
+        revertSpamVerdict: (accountId, rows) => { assertAccount(accountId); return mail.revertSpamVerdict(accountId, rows); },
       },
       readEmail: async (accountId, emailId) => {
         assertAccount(accountId);
@@ -766,12 +847,18 @@ export class InboxAssistantService {
     const request = value as InboxAgentChangeSetRequest;
     const id = /^[a-zA-Z0-9_-]{1,100}$/;
     if (!request || typeof request !== 'object' || Array.isArray(request)
-      || !Object.keys(request).every(key => ['requestId', 'chatId', 'exchangeId', 'changeSetId', 'decision', 'itemIds'].includes(key))
+      || !Object.keys(request).every(key => ['requestId', 'chatId', 'exchangeId', 'changeSetId', 'decision', 'itemIds', 'includeExisting'].includes(key))
+      || (request.includeExisting !== undefined && (request.decision !== 'approve' || typeof request.includeExisting !== 'boolean'))
       || ![request.requestId, request.chatId, request.exchangeId, request.changeSetId].every(value => typeof value === 'string' && id.test(value))
       || !['approve', 'cancel', 'undo'].includes(request.decision)
       || (request.itemIds !== undefined && (request.decision === 'cancel' || !Array.isArray(request.itemIds) || request.itemIds.length > INBOX_AGENT_CHANGE_LIMITS.perSet
         || request.itemIds.some(item => typeof item !== 'string' || !/^c\d{1,2}-\d{1,5}$/.test(item))))) throw new Error('Choose valid changes.');
     this.assertIdle(request.chatId, request.requestId);
+    if (this.settingChanges.has(request.changeSetId)) {
+      if (request.itemIds) throw new Error('Choose valid changes.');
+      return this.decideSettingChange(request, onActivity);
+    }
+    if (request.includeExisting !== undefined) throw new Error('Choose valid changes.');
     const entry = this.changeSets.get(request.changeSetId);
     const chat = this.deps.history.load(request.chatId, { select: false });
     const exchange = chat.exchanges.find(item => item.id === request.exchangeId && item.changeSets?.some(set => set.id === request.changeSetId));
@@ -808,6 +895,50 @@ export class InboxAssistantService {
     } finally {
       clearTimeout(timeout);
       this.finishRequest(controller);
+      this.saveJournal();
+    }
+  }
+
+  /** The user's decision on a setting-change card: approve (optionally with its existing mail), cancel, or undo. */
+  private async decideSettingChange(request: InboxAgentChangeSetRequest, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantExchange> {
+    const entry = this.settingChanges.get(request.changeSetId)!;
+    const chat = this.deps.history.load(request.chatId, { select: false });
+    const exchange = chat.exchanges.find(item => item.id === request.exchangeId && item.settingChanges?.some(change => change.id === request.changeSetId));
+    if (entry.chatId !== request.chatId || entry.exchangeId !== request.exchangeId || !exchange) {
+      throw new Error('These changes are no longer available. Ask again to prepare them fresh.');
+    }
+    if (exchange.accountIds.some(accountId => !this.accounts().some(account => account.id === accountId))) throw new Error('An account in this change is no longer connected.');
+    const { held } = entry;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error('Mail action took too long.')), 300_000);
+    timeout.unref?.();
+    const label = request.decision === 'approve' ? held.change.summary : request.decision === 'undo' ? `Undo: ${held.change.summary}` : `Cancel: ${held.change.summary}`;
+    const run = this.beginRequest(request.requestId, request.chatId, controller, 'action', label, [...exchange.accountIds], exchange.id);
+    const saved = (): InboxAssistantExchange => ({ ...exchange, settingChanges: exchange.settingChanges!.map(change => change.id === held.change.id ? structuredClone(held.change) : change) });
+    try {
+      this.reportRun(run, { stage: 'action', status: 'running', message: label }, onActivity);
+      const nowMs = this.deps.now?.() ?? Date.now();
+      if (request.decision === 'cancel') cancelSettingChange(held);
+      else {
+        const { actions: mail, readEmail } = this.agentMail(controller.signal, entry.accounts);
+        const options = { settings: this.agentSettings(controller.signal, entry.accounts), mail, readEmail, nowMs, signal: controller.signal };
+        await this.withMailActions(run, () => request.decision === 'approve'
+          ? applySettingChange(held, { ...options, ...(request.includeExisting ? { includeExisting: true } : {}) })
+          : undoSettingChange(held, options));
+      }
+      const { change } = held;
+      const failed = !!change.detail && change.status === 'pending';
+      this.reportRun(run, { stage: 'action', status: failed || /failed/.test(change.existing?.result ?? '') ? 'warning' : 'done',
+        message: request.decision === 'cancel' ? 'Change cancelled' : failed ? 'Not saved' : request.decision === 'undo' ? 'Change undone' : 'Change saved',
+        ...(change.existing?.result && change.existingApplied ? { detail: change.existing.result } : change.detail ? { detail: change.detail } : {}) }, onActivity);
+      return this.settleRun(run, undefined, saved())!;
+    } catch (error) {
+      this.settleRun(run, error, saved());
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      this.finishRequest(controller);
+      this.saveJournal();
     }
   }
 
@@ -933,6 +1064,7 @@ export class InboxAssistantService {
     // The agent's change sets, kept even if the run fails afterwards: one it
     // already applied must keep its Undo.
     const agentChangeSets: HeldChangeSet[] = [];
+    const agentSettingChanges: HeldSettingChange[] = [];
     const conclude = (outcome: NonNullable<InboxAssistantRunDiagnostics['outcome']>) => {
       diagnostics.outcome = outcome;
       diagnostics.durationMs = Math.max(0, Date.now() - run.record.startedAt);
@@ -949,9 +1081,17 @@ export class InboxAssistantService {
         const now = () => this.deps.now?.() ?? Date.now();
         const changes: InboxAgentChangeContext | undefined = this.deps.mailActions ? {
           mode: this.deps.history.load(request.chatId, { select: false }).actionMode ?? 'review',
-          sets: agentChangeSets, autoApplied: 0, nowMs: now,
+          sets: agentChangeSets, autoApplied: 0, nowMs: now, settingChanges: agentSettingChanges,
+          ...this.earlierChanges(request.chatId),
+          ...(this.deps.settingActions ? { settings: this.agentSettings(controller.signal, selected) } : {}),
+          undoSetting: held => {
+            const accounts = this.settingChanges.get(held.change.id)?.accounts ?? selected;
+            const { actions: mail, readEmail } = this.agentMail(controller.signal, accounts);
+            return this.withMailActions(run, () => undoSettingChange(held, { settings: this.agentSettings(controller.signal, accounts), mail, readEmail, nowMs: now(), signal: controller.signal }));
+          },
           apply: held => this.withMailActions(run, () => applyChangeSet(held, { ...this.agentMail(controller.signal, selected), nowMs: now(), auto: true, signal: controller.signal })),
-          undo: held => this.withMailActions(run, () => undoChangeSet(held, { ...this.agentMail(controller.signal, selected), nowMs: now(), signal: controller.signal })),
+          // An earlier set is checked against the accounts it was prepared for, not this request's.
+          undo: held => this.withMailActions(run, () => undoChangeSet(held, { ...this.agentMail(controller.signal, this.changeSets.get(held.set.id)?.accounts ?? selected), nowMs: now(), signal: controller.signal })),
         } : undefined;
         const result = await runInboxAgent({
           question: request.question, ...(historyContext ? { historyContext } : {}), accounts: selected, timeZone, nowMs,
@@ -984,8 +1124,9 @@ export class InboxAssistantService {
         const exchange: InboxAssistantExchange = {
           id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt,
           answer: result.answer, ...(agentChangeSets.length ? { changeSets: agentChangeSets.map(held => structuredClone(held.set)) } : {}),
+          ...(agentSettingChanges.length ? { settingChanges: agentSettingChanges.map(held => structuredClone(held.change)) } : {}),
         };
-        this.rememberChangeSets(request.chatId, exchange.id, selected, agentChangeSets);
+        this.rememberChangeSets(request.chatId, exchange.id, selected, agentChangeSets, agentSettingChanges);
         const verified = result.outcome === 'verified' || result.outcome === 'answered';
         report({ stage: 'complete', status: verified ? 'done' : 'warning',
           message: result.outcome === 'verified' ? 'Answer verified against sources' : result.outcome === 'answered' ? 'Answer ready'
@@ -1156,13 +1297,14 @@ export class InboxAssistantService {
       if (run.cancelled) conclude('stopped');
       else if (!diagnostics.route) { diagnostics.route = 'refused'; conclude('refused'); }
       else { diagnostics.failure = { stage, error: errorDiagnostic(error) }; conclude('failed'); }
-      if (agentChangeSets.length) {
+      if (agentChangeSets.length || agentSettingChanges.length) {
         // Cards for what was staged or applied before the run stopped.
         const exchangeId = run.record.exchangeId!;
-        this.rememberChangeSets(request.chatId, exchangeId, selected, agentChangeSets);
+        this.rememberChangeSets(request.chatId, exchangeId, selected, agentChangeSets, agentSettingChanges);
         this.settleRun(run, error, { id: exchangeId, chatId: request.chatId, question: request.question, accountIds: request.accountIds,
           createdAt: run.record.startedAt, answer: { text: '', sources: [], coverage: [], warnings: [] },
-          changeSets: agentChangeSets.map(held => structuredClone(held.set)) });
+          ...(agentChangeSets.length ? { changeSets: agentChangeSets.map(held => structuredClone(held.set)) } : {}),
+          ...(agentSettingChanges.length ? { settingChanges: agentSettingChanges.map(held => structuredClone(held.change)) } : {}) });
       } else this.settleRun(run, error);
       throw error;
     } finally {

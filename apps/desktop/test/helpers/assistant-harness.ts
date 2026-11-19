@@ -7,9 +7,11 @@ import Database from 'better-sqlite3';
 import { vi } from 'vitest';
 
 import type { AssistantAttachmentResult } from '../../electron/services/assistant-attachment-types';
+import type { AgentSettingStorage } from '../../electron/services/inbox-agent-setting-host';
 import type { InboxAgentMailActions } from '../../electron/services/inbox-assistant-change-sets';
 import type { InboxAssistantHistoryStore } from '../../electron/services/inbox-assistant-history';
 import type { InboxAssistantService, InboxAssistantServiceDeps } from '../../electron/services/inbox-assistant-service';
+import type { VerdictDeps } from '../../electron/services/spam-verdict-actions';
 import type { InboxAssistantAccount, InboxAssistantAIPurpose, InboxAssistantChat, InboxAssistantExchange, InboxAssistantRequest } from '../../src/types/inbox-assistant';
 
 import { openTestAccount, type TestAccount } from './account-storage';
@@ -83,7 +85,12 @@ export interface HarnessEngine {
   ops: Array<{ accountId: string; op: string; path: string; uids: number[]; destination?: string }>;
   /** The queue's answer to each call. Default: 'success' (a move then gets a new UID at once, as a completed MOVE does). */
   answer: (op: string, accountId: string) => QueueAnswer;
+  /** Spam verdicts that would go to the reputation service (when the user allows reports). Never sent. */
+  reports: Array<{ accountId: string; verdict: 'spam' | 'ham' }>;
 }
+
+/** The in-memory change journal (see AssistantHarness.journal). */
+export interface HarnessJournal { text: string | null; unreadable: boolean; read(): string | null; write(value: string): void }
 
 export interface AssistantHarness {
   accounts: InboxAssistantAccount[];
@@ -106,6 +113,12 @@ export interface AssistantHarness {
   readChanges: Array<{ accountId: string; emailIds: string[]; read: boolean; source?: string }>;
   /** The queue behind `mailActions: true`. */
   engine: HarnessEngine;
+  /**
+   * The change journal behind `mailActions: true` (the app keeps it in the core
+   * database). `new InboxAssistantService(harness.deps)` reads it as the app
+   * does after a restart; `unreadable` makes that read fail.
+   */
+  journal: HarnessJournal;
   /** Start a fresh chat, so a question is not read as a follow-up to the last one. */
   newChat(): string;
   mailbox(accountId: string): TestAccount;
@@ -168,6 +181,9 @@ export async function createAssistantHarness(options: {
   const { changeAssistantReadFlags, changeAssistantStarFlags } = await import('../../electron/services/assistant-mail-actions');
   const { changeAssistantMailLocation } = await import('../../electron/services/assistant-mail-moves');
   const { changeEmailCategory } = await import('../../electron/services/classification-actions');
+  const { createAgentSettingActions } = await import('../../electron/services/inbox-agent-setting-host');
+  const { createInboxAgentChangeJournal } = await import('../../electron/services/inbox-assistant-change-journal');
+  const { agentSpamVerdicts, createAgentLabel, dropAgentLabel, labelAgentEmails, revertAgentSpamVerdicts, snoozeAgentEmails } = await import('../../electron/services/inbox-agent-mail-actions');
 
   const accounts = options.accounts ?? HARNESS_ACCOUNTS;
   const dir = await mkdtemp(join(tmpdir(), 'assistant-harness-'));
@@ -188,9 +204,14 @@ export async function createAssistantHarness(options: {
   const readChanges: AssistantHarness['readChanges'] = [];
   let requests = 0;
   const agentTurns: AgentTurn[] = [];
-  const engine: HarnessEngine = { ops: [], answer: () => 'success' };
+  const engine: HarnessEngine = { ops: [], answer: () => 'success', reports: [] };
+  // The change journal the app keeps in the core database, here in memory: a
+  // service built again from these deps is the app after a restart.
+  const journal: HarnessJournal = { text: null, unreadable: false,
+    read() { if (this.unreadable) throw new Error('locked'); return this.text; }, write(value: string) { this.text = value; } };
+
   const harness = {
-    accounts, history, chatId, calls, logs, readChanges, agentTurns, agent: options.agent, engine,
+    accounts, history, chatId, calls, logs, readChanges, agentTurns, agent: options.agent, engine, journal,
     // By default the planner is refused (a 400 is permanent, so nothing retries)
     // and the answer is empty: the host's own routing and retrieval, unaided.
     ai: options.ai ?? (prompt => scriptedPurpose(prompt) === 'plan' ? { status: 400 } : NO_FACTS),
@@ -259,6 +280,7 @@ export async function createAssistantHarness(options: {
         isConnected: () => false,
         fetchUidByMessageId: async () => null,
         assertManualCategorySync: () => {},
+        moveToSpam: async (path: string, uid: number) => queue('spam', path, [uid]),
         markImportant: async (path: string, uid: number, on: boolean) => queue(on ? 'important' : 'unimportant', path, [uid]),
         setCategorySelection: async (path: string, uid: number) => queue('category', path, [uid]),
       },
@@ -283,6 +305,25 @@ export async function createAssistantHarness(options: {
       }
       return receipt;
     },
+    // The app's own label, snooze and spam writes (inbox-agent-mail-actions.ts).
+    setLabel: (accountId, ids, name, on) => labelAgentEmails(target(accountId), ids, name, on),
+    createLabel: (accountId, name) => createAgentLabel(target(accountId), name),
+    dropLabel: (accountId, name) => dropAgentLabel(target(accountId), name),
+    setSnooze: (accountId, ids, until) => snoozeAgentEmails(target(accountId), ids, until),
+    spamVerdict: (accountId, ids, verdict) => agentSpamVerdicts(target(accountId), verdictDeps(accountId), ids, verdict),
+    revertSpamVerdict: (accountId, rows) => revertAgentSpamVerdicts(target(accountId), verdictDeps(accountId), rows),
+  });
+  /** A verdict's server queue is the recording engine; reports to the reputation service are recorded, never sent. */
+  const verdictDeps = (accountId: string): VerdictDeps => {
+    const { storage, engine: queue } = target(accountId);
+    return { storage: storage as unknown as VerdictDeps['storage'], queue: { moveToSpam: queue.moveToSpam, move: (path, uid, destination) => queue.move(path, uid, destination) },
+      report: report => engine.reports.push({ accountId, verdict: report.verdict }) };
+  };
+
+  // The app's own settings writes over the real account databases (inbox-agent-setting-host.ts).
+  const harnessSettingActions = () => createAgentSettingActions(async accountId => {
+    const { storage, assertCurrent } = target(accountId);
+    return { storage: storage as unknown as AgentSettingStorage, assertCurrent };
   });
 
   const deps: InboxAssistantServiceDeps = {
@@ -305,7 +346,7 @@ export async function createAssistantHarness(options: {
     },
     ...(options.now ? { now: options.now } : {}),
     timeZone: () => options.timeZone ?? 'Asia/Kolkata',
-    ...(options.mailActions ? { mailActions: harnessMailActions() } : {}),
+    ...(options.mailActions ? { mailActions: harnessMailActions(), settingActions: harnessSettingActions(), changeJournal: createInboxAgentChangeJournal(journal) } : {}),
   };
   harness.deps = deps;
   harness.service = new Service(deps);

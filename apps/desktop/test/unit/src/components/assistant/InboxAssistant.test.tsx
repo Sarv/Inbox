@@ -7,7 +7,7 @@ import { InboxAssistant } from '../../../../../src/components/assistant/InboxAss
 import type { ConfirmOptions } from '../../../../../src/components/ConfirmDialog';
 import type { InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantRequest, InboxAssistantResult, InboxAssistantReviewActionRequest, InboxAssistantRewind } from '../../../../../src/types/inbox-assistant';
 import type { InboxAssistantReviewItem } from '../../../../../src/types/inbox-assistant-actions';
-import type { InboxAgentChangeSet, InboxAgentChangeSetRequest } from '../../../../../src/types/inbox-assistant-changes';
+import type { InboxAgentChangeSet, InboxAgentChangeSetRequest, InboxAgentSettingChange } from '../../../../../src/types/inbox-assistant-changes';
 import { act, cleanup, fire, render, settle, toggle, typeInto } from '../../../../helpers/render';
 
 const ok = <T,>(data: T): InboxAssistantResult<T> => ({ success: true, data });
@@ -1461,6 +1461,76 @@ describe('Inbox Agent', () => {
     view.unmount();
     expect(api.cancel).not.toHaveBeenCalled();
     expect(offActivity).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Inbox Agent tools switch', () => {
+  // Breaks: the header switch does not reach the setting main reads, or shows a state other than the stored one.
+  it('shows the stored switch and saves a change for the next request', async () => {
+    localStorage.setItem('sarvinbox-inbox-agent', '{"toolAgent":true}');
+    const view = await mount();
+    const toggle = view.byLabel('Work with tools (preview)') as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    fire(toggle, 'click');
+    expect(localStorage.getItem('sarvinbox-inbox-agent')).toBe('{"toolAgent":false}');
+    expect((view.byLabel('Work with tools (preview)') as HTMLInputElement).checked).toBe(false);
+    localStorage.removeItem('sarvinbox-inbox-agent');
+  });
+
+  // Breaks: a storage failure is silent, so the user believes the switch changed.
+  it('keeps the switch and says so when the setting cannot be saved', async () => {
+    const view = await mount();
+    const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('quota'); });
+    try {
+      fire(view.byLabel('Work with tools (preview)'), 'click');
+      // Nothing was saved, and the user is told. (The browser puts the controlled box back; this DOM does not.)
+      expect(localStorage.getItem('sarvinbox-inbox-agent')).toBeNull();
+      expect(view.container.textContent).toContain('Could not save the setting. Try again.');
+    } finally { setItem.mockRestore(); localStorage.removeItem('sarvinbox-inbox-agent'); }
+  });
+});
+
+/** An agent answer with one setting-change card. */
+function settingExchange(status: InboxAgentSettingChange['status']): InboxAssistantExchange {
+  const now = Date.now();
+  return { ...exchange('exchange-setting'), settingChanges: [{
+    id: 'setting-1', label: 'R1', kind: 'block_sender', accountId: 'work', accountEmail: 'rc@sarv.com', summary: 'Block news@shop.test',
+    details: ['Their new mail goes to Spam.'], createdAt: now, approveBy: now + 60_000, undoBy: status === 'applied' ? now + 60_000 : 0, status,
+    existing: { text: 'Also move their emails here to Spam', count: 3, protectedCount: 0, ...(status === 'applied' ? { result: '3 emails changed' } : {}) },
+    ...(status === 'applied' ? { existingApplied: true } : {}),
+  }] };
+}
+
+describe('Inbox Agent setting-change cards', () => {
+  // Breaks: a setting card's approval never reaches the host, loses the user's existing-mail choice, or its Undo is not offered.
+  it('sends the approval with the existing-mail choice, shows the receipt, and undoes', async () => {
+    const onMailChanged = vi.fn();
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [settingExchange('pending')] : [])));
+    api.changeSet.mockImplementation(async () => ok(settingExchange('applied')));
+    const view = await mount({ onMailChanged });
+    expect(view.container.textContent).toContain('Block news@shop.test');
+    const box = view.all('input').find(input => (input as HTMLInputElement).type === 'checkbox' && input.getAttribute('role') !== 'switch') as HTMLInputElement;
+    toggle(box);
+    fire(button(view, 'Approve'), 'click'); await settle();
+    expect(api.changeSet).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: 'chat-1', exchangeId: 'exchange-setting', changeSetId: 'setting-1', decision: 'approve', includeExisting: true }));
+    expect(api.changeSet.mock.calls[0]![0].itemIds).toBeUndefined();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    expect(view.container.textContent).toContain('Saved · 3 emails changed');
+    fire(button(view, 'Undo'), 'click'); await settle();
+    expect(api.changeSet.mock.calls[1]![0]).toMatchObject({ decision: 'undo' });
+    expect(api.changeSet.mock.calls[1]![0].includeExisting).toBeUndefined();
+  });
+
+  // Breaks: approving without the tick sends "include existing" anyway.
+  it('approves without existing mail unless ticked, and cancels', async () => {
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [settingExchange('pending')] : [])));
+    api.changeSet.mockImplementation(async () => ok(settingExchange('pending')));
+    const view = await mount();
+    fire(button(view, 'Approve'), 'click'); await settle();
+    expect(api.changeSet.mock.calls[0]![0].includeExisting).toBeUndefined();
+    fire(button(view, 'Cancel'), 'click'); await settle();
+    expect(api.changeSet.mock.calls[1]![0]).toMatchObject({ decision: 'cancel', changeSetId: 'setting-1' });
   });
 });
 

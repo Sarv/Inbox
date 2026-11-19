@@ -25,7 +25,7 @@ function tool(name: string) {
 
 function context(over: Partial<InboxAgentToolContext> = {}): InboxAgentToolContext {
   return {
-    accounts: harness.accounts, deps: harness.deps, signal: new AbortController().signal, timeZone: 'Asia/Kolkata',
+    accounts: harness.accounts, question: '', deps: harness.deps, signal: new AbortController().signal, timeZone: 'Asia/Kolkata',
     registry: new InboxAgentRegistry(), coverage: new Map(), progress: vi.fn(),
     classify: vi.fn(async () => '{"results":[]}'), deepSearch: vi.fn(async () => ({ evidence: [], coverage: [] })),
     remaining: { attachments: 8, classified: 400, deepSearches: 3 }, mailboxes: new Map(), ...over,
@@ -441,5 +441,61 @@ describe('sorting emails', () => {
     await tool('search_mail').run({}, ctx);
     ctx.classify = vi.fn(async () => { controller.abort(new Error('Request cancelled.')); throw new Error('aborted'); });
     await expect(tool('classify_messages').run({ ids: list, question: 'q', labels: ['yes', 'no'] }, ctx)).rejects.toThrow('Request cancelled.');
+  });
+});
+
+// Phase 3 read tools. A regression here is labelled or snoozed mail the agent
+// cannot find (so it cannot unsnooze or relabel it), or a contact lookup that
+// errors on a store that has no address book.
+describe('labels, snoozed mail and contacts', () => {
+  const storage = () => harness.mailbox('primary').storage;
+
+  // Breaks: the agent cannot see which labels exist, or how many emails carry one.
+  it('lists each account\'s labels with how many emails carry them', async () => {
+    await storage().createLabel({ name: 'Clients' });
+    await mail('a', { tags: '|INBOX|Clients|' });
+    const output = await tool('list_labels').run({}, context());
+    expect(output).toBe('rc@sarv.example: Clients (1)\nsales@sarv.example: no labels');
+    const failing = context({ deps: patched(() => ({ getLabels: async () => { throw new Error('locked'); } }) as never) });
+    expect(await tool('list_labels').run({ account: 'rc@sarv.example' }, failing)).toBe('rc@sarv.example: labels could not be read.');
+  });
+
+  // Breaks: "show my Clients mail" cannot be answered, or a misspelt label silently searches everything.
+  it('searches by label in the account\'s own spelling, and notes accounts without it', async () => {
+    await storage().createLabel({ name: 'Clients' });
+    await mail('a', { tags: '|INBOX|Clients|' });
+    await mail('b');
+    const output = await tool('search_mail').run({ label: 'clients' }, context());
+    expect(output).toContain('Subject a');
+    expect(output).not.toContain('Subject b');
+    expect(output).toContain('sales@sarv.example has no label "clients".');
+  });
+
+  // Breaks: snoozed mail is invisible to the agent, so "unsnooze my mail from Ana" cannot work.
+  it('lists snoozed mail soonest first with when it comes back, as ids change_mail accepts', async () => {
+    await mail('later');
+    await mail('sooner');
+    await storage().snoozeEmail('later', T0 + 7_200);
+    await storage().snoozeEmail('sooner', T0 + 3_600);
+    const ctx = context();
+    const output = await tool('list_snoozed').run({ account: 'rc@sarv.example' }, ctx);
+    expect(output.split('\n')[0]).toBe('rc@sarv.example: 2 snoozed');
+    expect(output.indexOf('Subject sooner')).toBeLessThan(output.indexOf('Subject later'));
+    expect(output).toMatch(/Snoozed until: \d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(ctx.registry.get('S1')).toMatchObject({ emailId: 'sooner' });
+    expect(await tool('list_snoozed').run({ account: 'sales@sarv.example' }, context())).toBe('sales@sarv.example: nothing snoozed');
+  });
+
+  // Breaks: a contact question fails, or the shared address book lists each person once per account.
+  it('finds contacts by name, address or organisation, once, from the shared address book', async () => {
+    await storage().upsertContact({ email: 'ana@acme.test', name: 'Ana Silva', organization: 'Acme', title: 'Buyer', phone: '+1 555 0100', lastSeen: T0, receivedCount: 4, sentCount: 2 });
+    const output = await tool('find_contact').run({ query: 'acme' }, context());
+    expect(output).toMatch(/^1 contact matches:\n {2}Ana Silva <ana@acme\.test> \| Acme \| Buyer \| phone \+1 555 0100 \| 4 received, 2 sent \| last \d{4}-\d{2}-\d{2}$/);
+    expect(await tool('find_contact').run({ query: 'nobody' }, context())).toBe('No contacts match "nobody".');
+    await expect(tool('find_contact').run({}, context())).rejects.toThrow('"query" is required');
+    const failing = context({ deps: patched(() => ({ getContacts: async () => { throw new Error('locked'); } }) as never) });
+    expect(await tool('find_contact').run({ query: 'acme' }, failing)).toBe('The address book could not be read.');
+    const none = context({ deps: patched(() => ({ getContacts: undefined }) as never) });
+    expect(await tool('find_contact').run({ query: 'acme' }, none)).toBe('The address book is not available.');
   });
 });

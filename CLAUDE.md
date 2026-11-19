@@ -343,6 +343,16 @@ Established shared helpers (extend this list as you add more):
 - `hostIsOrUnder(host, domain)` — `packages/core/src/utils/host-match.ts` (renderer:
   `@sarvinbox/core/host-match`). Whether a host is a domain or a subdomain of it,
   never a substring match.
+- `setEmailLabel(storage, emailId, name, on)` — `apps/desktop/electron/services/email-labels.ts`.
+  The one way a label (a tag) goes on or off an email; answers `changed`,
+  `unchanged` or `missing`. Used by `emails:setLabel` and the Inbox Agent.
+- `emailsMatchingRule(storage, rule)` / `emailsFromSender(storage, address)` —
+  `apps/desktop/electron/services/filter-matching.ts`. Which stored emails a
+  filter rule matches (the Filters page's count and "apply to existing"), and
+  a sender's mail by exact address. Use them instead of another scan.
+- `revertUserSpamVerdict(deps, row)` — `apps/desktop/electron/services/spam-verdict-actions.ts`.
+  Undo of Report spam / Not spam: tag, folder, stored verdict and the sender's
+  lists back as they were; refuses while the moved message has no server UID.
 - `isAllowedArchiveEntry(path, entry)` —
   `apps/desktop/electron/services/extension-archive-rules.mjs`. What may come out of
   an extension archive (allowlisted paths, plain files and the expected folders,

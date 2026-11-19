@@ -99,6 +99,7 @@ export function AssistantChangeSetCard({ changeSet, busy, onDecision, onOpen }: 
           <div className="min-w-0">
             <h3 id={headingId} className="assistant-review-title">{changeSet.summary}</h3>
             <p role="status" className="assistant-review-subtitle">{statusLine(changeSet, now)}</p>
+            {changeSet.note && <p className="mt-1 text-xs leading-5 text-muted-foreground">{changeSet.note}</p>}
             {protectedCount > 0 && canApprove && <p className="mt-1 flex items-start gap-1.5 text-xs leading-5 text-muted-foreground"><ShieldAlert aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />{count(protectedCount, 'email')} {protectedCount === 1 ? 'is' : 'are'} protected and left unticked. Tick {protectedCount === 1 ? 'it' : 'them'} only if you are sure.</p>}
           </div>
         </div>

@@ -18,11 +18,16 @@ import { applyUserSpamVerdict, trustSender, type VerdictDeps } from '../services
 const logger = createLogger('spam-handlers');
 const fail = (error: unknown) => ({ success: false as const, error: (error as Error)?.message ?? String(error) });
 
+/** What a verdict needs, from an account's storage and engine: the server queue and the report hook with it. */
+export function verdictDepsOf(storage: VerdictDeps['storage'], syncEngine: unknown): VerdictDeps {
+  const queue = (syncEngine as { operationQueue?: VerdictDeps['queue'] } | null)?.operationQueue ?? null;
+  return { storage, queue, report: (r) => reportSenderVerdict(r) };
+}
+
 /** What a verdict needs for one account: its storage, its server queue, the report hook. */
 async function verdictDepsFor(accountId?: string): Promise<VerdictDeps> {
   const { storage, syncEngine } = await resolveAccountTarget(accountId);
-  const queue = (syncEngine as unknown as { operationQueue?: VerdictDeps['queue'] } | null)?.operationQueue ?? null;
-  return { storage, queue, report: (r) => reportSenderVerdict(r) };
+  return verdictDepsOf(storage, syncEngine);
 }
 
 export function registerSpamHandlers(): void {

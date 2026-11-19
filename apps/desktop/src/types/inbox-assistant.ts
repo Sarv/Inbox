@@ -1,5 +1,5 @@
 import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from './inbox-assistant-actions';
-import type { InboxAgentChangeSet, InboxAgentChangeSetRequest } from './inbox-assistant-changes';
+import type { InboxAgentChangeSet, InboxAgentChangeSetRequest, InboxAgentSettingChange } from './inbox-assistant-changes';
 import type { InboxAssistantDashboard, InboxAssistantDashboardRequest } from './inbox-assistant-dashboard';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest } from './local-calendar';
 
@@ -235,8 +235,8 @@ export interface InboxAssistantAgentDiagnostics {
   /** Times the model replied in prose and was asked to use a tool. */
   nudges?: number;
   stop?: 'answered' | 'step_limit';
-  /** Change sets the run staged, the messages in them, and how many "Approve for me" applied without a card. */
-  changes?: { sets: number; messages: number; autoApplied: number };
+  /** Change sets the run staged, the messages in them, how many "Approve for me" applied without a card, and standing changes asked for. */
+  changes?: { sets: number; messages: number; autoApplied: number; settings?: number };
 }
 
 export interface InboxAssistantRunDiagnostics {
@@ -307,6 +307,8 @@ export interface InboxAssistantExchange {
   reviewResult?: InboxAssistantReviewApplyResult;
   /** Mail changes the agent staged or applied in this exchange, one card each. */
   changeSets?: InboxAgentChangeSet[];
+  /** Settings the agent asked to change (filters, sender blocks), one card each. */
+  settingChanges?: InboxAgentSettingChange[];
   /** Compact receipt presentation for batches produced by one automatic run. */
   reviewBatch?: { runId: string; number: number };
   requestId?: string;
