@@ -52,6 +52,15 @@ export {
   type CategorizationResult,
 } from './categorization-utils';
 export {
+  callAIChat,
+  callAIChatWithRetry,
+  type AIChatMessage,
+  type AIChatRequest,
+  type AIChatResult,
+  type AIToolCall,
+  type AIToolDefinition,
+} from './ai-chat';
+export {
   MAX_AGENT_FAILURES,
   classifyCategorizationPass,
   decideCategorizationAction,

@@ -38,6 +38,10 @@ export function inboxAssistantDegradedStages(diagnostics: InboxAssistantRunDiagn
   const attachmentFailures: Record<string, number> = {};
   for (const account of accounts) for (const [reason, count] of Object.entries(account.attachmentFailures)) attachmentFailures[reason] = (attachmentFailures[reason] ?? 0) + count;
   if (Object.keys(attachmentFailures).length) degraded.push(`attachments_unread(${counts(attachmentFailures)})`);
+  const agent = diagnostics.agent;
+  if (agent?.fallback) degraded.push(`agent_${agent.fallback}`);
+  if (agent && Object.keys(agent.toolErrors).length) degraded.push(`agent_tool_errors(${counts(agent.toolErrors)})`);
+  if (agent?.stop === 'step_limit') degraded.push('agent_step_limit');
   const answer = diagnostics.answer;
   if (answer?.first?.format === 'malformed') degraded.push('answer_malformed');
   if (answer?.first && Object.keys(answer.first.rejected).length) degraded.push(`facts_rejected(${counts(answer.first.rejected)})`);
@@ -56,6 +60,9 @@ export function inboxAssistantRunSummary(requestId: string, status: InboxAssista
   if (diagnostics.reviewKind) parts.push(`review=${diagnostics.reviewKind}`);
   if (diagnostics.failure) parts.push(`failed_at=${diagnostics.failure.stage}`, `error=${diagnostics.failure.error.name}`
     + `${diagnostics.failure.error.code ? `/${diagnostics.failure.error.code}` : ''}${diagnostics.failure.error.status ? `/${diagnostics.failure.error.status}` : ''}`);
+  const agent = diagnostics.agent;
+  if (agent) parts.push(`agent=${agent.mode}${agent.fallback ? `:${agent.fallback}` : ''}${agent.reasoning ? `:reasoning_${agent.reasoning}` : ''}`, `steps=${agent.steps}`,
+    `tools=${counts(agent.toolCalls)}`, `tool_errors=${counts(agent.toolErrors)}`, `stop=${agent.stop ?? 'none'}`);
   const plan = diagnostics.plan;
   if (plan) parts.push(`plan=${plan.source}${plan.failure ? `:${plan.failure}` : ''}${plan.failedField ? `/${plan.failedField}` : ''}${plan.httpStatus ? `/${plan.httpStatus}` : ''}`,
     `queries=${plan.queryCount}`, `followup=${plan.followUp ? 1 : 0}`);

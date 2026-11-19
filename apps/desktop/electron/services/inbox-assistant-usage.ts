@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { callAIWithRetry, classifyAIError, type AIProviderConfig } from '@sarvinbox/core';
+import { callAIChatWithRetry, callAIWithRetry, classifyAIError, type AIChatRequest, type AIChatResult, type AIProviderConfig } from '@sarvinbox/core';
 
 import type { InboxAssistantAIUsage, InboxAssistantUsage } from '../../src/types/inbox-assistant';
 
@@ -100,6 +100,26 @@ export async function callInboxAssistantAI(
   config: AIProviderConfig, systemPrompt: string, prompt: string, signal?: AbortSignal,
   onUsage?: (usage: InboxAssistantAIUsage) => void,
 ): Promise<string> {
+  return withInboxAssistantUsage(config, signal, onUsage, tracked => callAIWithRetry(tracked, systemPrompt, prompt, signal));
+}
+
+/** A multi-turn tool call for the Inbox Agent loop, accounted exactly like a single prompt. */
+export async function callInboxAssistantChat(
+  config: AIProviderConfig, request: AIChatRequest, signal?: AbortSignal,
+  onUsage?: (usage: InboxAssistantAIUsage) => void,
+): Promise<AIChatResult> {
+  return withInboxAssistantUsage(config, signal, onUsage, tracked => callAIChatWithRetry(tracked, request, signal));
+}
+
+/**
+ * Run one provider call (with its retries) through a fetch that records the
+ * usage each HTTP attempt reports, then hand the accounting to `onUsage`.
+ */
+async function withInboxAssistantUsage<T>(
+  config: AIProviderConfig, signal: AbortSignal | undefined,
+  onUsage: ((usage: InboxAssistantAIUsage) => void) | undefined,
+  request: (tracked: AIProviderConfig) => Promise<T>,
+): Promise<T> {
   const startedAt = Date.now();
   const id = randomUUID();
   const reports: ReportedUsage[] = [];
@@ -127,9 +147,9 @@ export async function callInboxAssistantAI(
     } });
   } };
   try {
-    const text = await callAIWithRetry(tracked, systemPrompt, prompt, signal);
+    const result = await request(tracked);
     completed = true;
-    return text;
+    return result;
   } catch (error) {
     const { kind, status } = classifyAIError(error);
     failure = { errorKind: kind, ...(typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? { httpStatus: status } : {}) };
