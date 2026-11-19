@@ -93,7 +93,7 @@
       "deepmerge-ts": "^8.0.1",
       "dompurify": "^3.4.17",
       "fast-uri@3": "^3.1.9",
-      "fast-xml-parser": "^5.5.6",
+      "fast-xml-parser": "^5.12.0",
       "flatted": "^3.4.4",
       "follow-redirects@1": "^1.16.2",
       "form-data": "^4.0.6",
@@ -125,12 +125,6 @@
       "ws@7": "^7.5.11",
       "yaml@2": "^2.8.3",
       "zod@4": "^4.6.6"
-    },
-    "auditConfig": {
-      "ignoreCves": [
-        "CVE-2026-93748",
-        "CVE-2026-93687"
-      ]
     }
   }
 }

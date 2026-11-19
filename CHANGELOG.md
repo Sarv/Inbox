@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **The XML reader used for office attachments is updated to 5.12.** It fixes a
+  low-severity slowdown on malformed tags
+  ([GHSA-474x-hrwr-fgx4](https://github.com/advisories/GHSA-474x-hrwr-fgx4)).
+  Sarv Inbox never used the affected feature, so earlier versions were not
+  exposed.
+
 ## [1.4.11] - 2026-11-18
 
 ### Added
