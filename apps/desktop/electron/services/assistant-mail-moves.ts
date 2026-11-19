@@ -5,7 +5,9 @@ import {
 
 import type { AssistantReadReceipt } from './assistant-mail-actions';
 
-type MoveAction = 'archive' | 'trash';
+type MoveAction = 'archive' | 'trash' | 'move';
+/** Archive, Trash, or any folder of the account by id (a plain move, as the mail view's Move to). */
+export type AssistantMoveDestination = 'archive' | 'trash' | { folderId: string };
 type QueueResult = 'success' | 'queued' | 'failed';
 type MoveStorage = Pick<IEmailStorage,
   'getEmail' | 'getFolder' | 'getFolders' | 'updateEmail' | 'countEmailsFiledIn' | 'recalculateFolderCounts'>;
@@ -37,16 +39,20 @@ interface PlacedMove extends PlannedMove { placedTags: string }
  * can install the destination UID even if the server completes immediately.
  */
 export async function changeAssistantMailLocation(
-  target: AssistantMoveTarget, emailIds: string[], action: MoveAction,
+  target: AssistantMoveTarget, emailIds: string[], to: AssistantMoveDestination,
 ): Promise<AssistantReadReceipt> {
-  if (!['archive', 'trash'].includes(action) || !Array.isArray(emailIds) || emailIds.length > 2_000
+  const folderMove = typeof to === 'object' && to !== null && typeof to.folderId === 'string' && !!to.folderId;
+  if ((!folderMove && !['archive', 'trash'].includes(to as string)) || !Array.isArray(emailIds) || emailIds.length > 2_000
     || emailIds.some(id => typeof id !== 'string' || !id || id.length > 500)) throw new Error('Invalid mail move action.');
+  const action: MoveAction = folderMove ? 'move' : to as 'archive' | 'trash';
   await target.assertCurrent();
   const receipt: AssistantReadReceipt = { appliedIds: [], queuedIds: [], failedIds: [] };
-  const destination = await resolveStandardFolder(target.storage, action === 'trash' ? 'trash' : 'archive');
-  if (!destination) throw new Error(`${action === 'trash' ? 'Trash' : 'Archive'} folder is unavailable. No mail was moved.`);
+  const destination = folderMove ? await target.storage.getFolder((to as { folderId: string }).folderId)
+    : await resolveStandardFolder(target.storage, action === 'trash' ? 'trash' : 'archive');
+  if (!destination) throw new Error(`${action === 'trash' ? 'Trash' : action === 'archive' ? 'Archive' : 'The destination'} folder is unavailable. No mail was moved.`);
   const folders = await target.storage.getFolders();
   const inboxes = folders.filter(isInboxFolder);
+  const toInbox = isInboxFolder(destination);
   const groups = new Map<string, PlannedMove[]>();
   for (const id of new Set(emailIds)) {
     try {
@@ -58,12 +64,15 @@ export async function changeAssistantMailLocation(
       // A full conversation includes outgoing and previously archived members.
       // Archiving removes Inbox membership, not the user's Sent history.
       if ((action === 'archive' && !inbox)
-        || (action === 'trash' && (isTrashFolder(primary) || hasTag(email.tags || '||', destination.path)))) {
+        || (action === 'trash' && (isTrashFolder(primary) || hasTag(email.tags || '||', destination.path)))
+        || (action === 'move' && (primary.id === destination.id || hasTag(email.tags || '||', destination.path)))) {
         receipt.appliedIds.push(id);
         continue;
       }
       if (!target.engine) { receipt.failedIds.push(id); continue; }
-      const source = action === 'archive' ? inbox! : primary;
+      // A plain move takes the message out of the Inbox the user sees it in
+      // (Gmail: the Inbox label, not All Mail), else out of its own folder.
+      const source = action === 'archive' || (action === 'move' && inbox && !toInbox) ? inbox! : primary;
       let uid = source.id === primary.id && validUid(email.uid) ? email.uid : null;
       // Gmail's primary row can be All Mail while Inbox is a secondary label.
       // Its All Mail UID must never be sent to Inbox. UID-less moved rows also
@@ -107,7 +116,7 @@ export async function changeAssistantMailLocation(
           let tags = removeTag(item.email.tags || '||', path);
           for (const folder of folders) {
             const role = classifyFolder(folder);
-            if (role === 'inbox' || (action === 'trash' && ['archive', 'sent', 'drafts', 'spam'].includes(role || ''))) {
+            if ((role === 'inbox' && !toInbox) || (action === 'trash' && ['archive', 'sent', 'drafts', 'spam'].includes(role || ''))) {
               tags = removeTag(tags, folder.path);
             }
           }

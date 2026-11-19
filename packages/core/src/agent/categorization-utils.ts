@@ -807,7 +807,7 @@ export function validateCategorizationResponse(raw: string, knownSlugs: Set<stri
 
 // ========== AI API Client ==========
 
-function outputTokenLimit(config: AIProviderConfig): number {
+export function outputTokenLimit(config: AIProviderConfig): number {
   const value = config.maxOutputTokens;
   return typeof value === 'number' && Number.isFinite(value) && value > 0
     ? Math.max(1, Math.min(16_000, Math.floor(value))) : 16_000;
@@ -840,12 +840,18 @@ export async function callAIProvider(
   return callOpenAICompatibleAPI(config, systemPrompt, userMessage, signal);
 }
 
-async function callOpenAICompatibleAPI(
+/**
+ * One POST to an OpenAI-compatible `/chat/completions`, returning the parsed
+ * JSON. Shared by the single-prompt call below and the multi-turn tool call
+ * (`ai-chat.ts`), so both keep the same bearer refresh, redirect refusal,
+ * timeout and error classification.
+ */
+export async function postOpenAICompatibleChat(
   config: AIProviderConfig,
-  systemPrompt: string,
-  userMessage: string,
+  body: Record<string, unknown>,
   signal?: AbortSignal,
-): Promise<string> {
+  timeoutMs = 60_000,
+): Promise<unknown> {
   // No default for ``sarv`` any more — the old ``https://ai.sarv.com/llm/v1``
   // is dead. The caller must pass the oauth-provisioned ``llmBaseUrl`` via
   // ``config.baseUrl``; in prod that's the zone edge (e.g.
@@ -866,11 +872,10 @@ async function callOpenAICompatibleAPI(
   // response, never times out on its own) would freeze categorization for EVERY
   // account indefinitely. Abort the whole request — both attempts AND the body
   // read — after this budget. Chained to the caller's `signal` (pipeline shutdown).
-  const LLM_REQUEST_TIMEOUT_MS = 60_000;
   const timeoutCtl = new AbortController();
   const timer = setTimeout(
     () => { try { timeoutCtl.abort(Object.assign(new Error('AI request timed out'), { code: AI_REQUEST_TIMEOUT_CODE })); } catch { /* ignore */ } },
-    LLM_REQUEST_TIMEOUT_MS,
+    timeoutMs,
   );
   const onOuterAbort = () => { try { timeoutCtl.abort((signal as any)?.reason); } catch { /* ignore */ } };
   if (signal) {
@@ -895,15 +900,7 @@ async function callOpenAICompatibleAPI(
           'Content-Type': 'application/json',
           ...authHeaders,
         },
-        body: JSON.stringify({
-          model: config.model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMessage },
-          ],
-          max_completion_tokens: outputTokenLimit(config),
-          ...buildAIChatRequestOptions(config),
-        }),
+        body: JSON.stringify({ model: config.model, ...body, ...buildAIChatRequestOptions(config) }),
         // A redirect would carry the bearer and the mail text to an address
         // nobody checked (and could downgrade it to plain HTTP).
         redirect: 'error',
@@ -927,11 +924,70 @@ async function callOpenAICompatibleAPI(
       throw await parseSarvApiError(response, config.type);
     }
 
-    const data: any = await response.json();
-    return data.choices?.[0]?.message?.content?.trim() || '';
+    return await response.json();
   } finally {
     clearTimeout(timer);
     if (signal) signal.removeEventListener('abort', onOuterAbort);
+  }
+}
+
+async function callOpenAICompatibleAPI(
+  config: AIProviderConfig,
+  systemPrompt: string,
+  userMessage: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const data: any = await postOpenAICompatibleChat(config, {
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage },
+    ],
+    max_completion_tokens: outputTokenLimit(config),
+  }, signal);
+  return data.choices?.[0]?.message?.content?.trim() || '';
+}
+
+/**
+ * One POST to Gemini's `generateContent`, returning the parsed JSON. Shared by
+ * the single-prompt call below and the multi-turn tool call (`ai-chat.ts`).
+ * `timeoutMs` is opt-in: the categorization path has never had one here.
+ */
+export async function postGeminiGenerate(
+  config: AIProviderConfig,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): Promise<unknown> {
+  const baseUrl = effectiveAIBaseUrl(config);
+
+  const doFetch = config.fetchImpl || fetch;
+  signal?.throwIfAborted();
+  const timeoutCtl = timeoutMs === undefined ? undefined : new AbortController();
+  const timer = timeoutCtl ? setTimeout(
+    () => { try { timeoutCtl.abort(Object.assign(new Error('AI request timed out'), { code: AI_REQUEST_TIMEOUT_CODE })); } catch { /* ignore */ } },
+    timeoutMs,
+  ) : undefined;
+  const onOuterAbort = () => { try { timeoutCtl?.abort((signal as any)?.reason); } catch { /* ignore */ } };
+  if (timeoutCtl && signal) signal.addEventListener('abort', onOuterAbort);
+  try {
+    const response = await doFetch(`${baseUrl}/models/${config.model}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...aiApiKeyHeaders('gemini', config.apiKey) },
+      body: JSON.stringify(body),
+      // Same as the OpenAI-compatible call: the key and mail stay on this address.
+      redirect: 'error',
+      signal: timeoutCtl?.signal ?? signal,
+    });
+
+    if (!response.ok) {
+      // Keep shared status/retry classification while naming the actual provider.
+      throw await parseSarvApiError(response, config.type);
+    }
+
+    return await response.json();
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (timeoutCtl && signal) signal.removeEventListener('abort', onOuterAbort);
   }
 }
 
@@ -941,37 +997,19 @@ async function callGeminiAPI(
   userMessage: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const baseUrl = effectiveAIBaseUrl(config);
-
-  const doFetch = config.fetchImpl || fetch;
-  signal?.throwIfAborted();
-  const response = await doFetch(`${baseUrl}/models/${config.model}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...aiApiKeyHeaders('gemini', config.apiKey) },
-    body: JSON.stringify({
-      contents: [
-        { parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] },
-      ],
-      generationConfig: {
-        temperature: 0.3,
-        maxOutputTokens: outputTokenLimit(config),
-        // Disable Gemini 2.5 Flash thinking — same rationale as the
-        // OpenAI-compat chat_template_kwargs flag above. Ignored by
-        // non-thinking Gemini variants which don't recognise the field.
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    }),
-    // Same as the OpenAI-compatible call: the key and mail stay on this address.
-    redirect: 'error',
-    signal,
-  });
-
-  if (!response.ok) {
-    // Keep shared status/retry classification while naming the actual provider.
-    throw await parseSarvApiError(response, config.type);
-  }
-
-  const data: any = await response.json();
+  const data: any = await postGeminiGenerate(config, {
+    contents: [
+      { parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] },
+    ],
+    generationConfig: {
+      temperature: 0.3,
+      maxOutputTokens: outputTokenLimit(config),
+      // Disable Gemini 2.5 Flash thinking — same rationale as the
+      // OpenAI-compat chat_template_kwargs flag above. Ignored by
+      // non-thinking Gemini variants which don't recognise the field.
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  }, signal);
   return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
 }
 
@@ -981,11 +1019,20 @@ export async function callAIWithRetry(
   userMessage: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  return withAIRetry(() => callAIProvider(config, systemPrompt, userMessage, signal), signal);
+}
+
+/**
+ * Retry one provider request on transient failures only. Shared by every
+ * provider call so the single-prompt and tool-calling paths classify the
+ * same errors the same way.
+ */
+export async function withAIRetry<T>(request: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   return pRetry(
     async () => {
       try {
         signal?.throwIfAborted();
-        return await callAIProvider(config, systemPrompt, userMessage, signal);
+        return await request();
       } catch (error: any) {
         signal?.throwIfAborted();
         const status: number = error?.status ?? error?.statusCode ?? 0;
