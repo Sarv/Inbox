@@ -343,6 +343,16 @@ Established shared helpers (extend this list as you add more):
 - `hostIsOrUnder(host, domain)` — `packages/core/src/utils/host-match.ts` (renderer:
   `@sarvinbox/core/host-match`). Whether a host is a domain or a subdomain of it,
   never a substring match.
+- `setEmailLabel(storage, emailId, name, on)` — `apps/desktop/electron/services/email-labels.ts`.
+  The one way a label (a tag) goes on or off an email; answers `changed`,
+  `unchanged` or `missing`. Used by `emails:setLabel` and the Inbox Agent.
+- `emailsMatchingRule(storage, rule)` / `emailsFromSender(storage, address)` —
+  `apps/desktop/electron/services/filter-matching.ts`. Which stored emails a
+  filter rule matches (the Filters page's count and "apply to existing"), and
+  a sender's mail by exact address. Use them instead of another scan.
+- `revertUserSpamVerdict(deps, row)` — `apps/desktop/electron/services/spam-verdict-actions.ts`.
+  Undo of Report spam / Not spam: tag, folder, stored verdict and the sender's
+  lists back as they were; refuses while the moved message has no server UID.
 - `isAllowedArchiveEntry(path, entry)` —
   `apps/desktop/electron/services/extension-archive-rules.mjs`. What may come out of
   an extension archive (allowlisted paths, plain files and the expected folders,
@@ -353,6 +363,12 @@ Established shared helpers (extend this list as you add more):
   working on. Use it at any `catch` whose record outlives the request (a saved
   diagnostics object, a log line) instead of keeping or logging `error.message`,
   which can quote query words, mail text or a provider's response body.
+- `stageChangeSet` / `applyChangeSet` / `undoChangeSet` —
+  `apps/desktop/electron/services/inbox-assistant-change-sets.ts`. The one way the
+  Inbox Agent changes mail: a frozen set of messages it was shown, applied on the
+  user's approval (or within the "Approve for me" cap), each row at most once,
+  protected rows only when ticked, Undo only for rows still as the set left them.
+  A new agent write tool stages through it; never call a mail action from a tool.
 - `createAssistantHarness()` — `apps/desktop/test/helpers/assistant-harness.ts`.
   The real Inbox Agent end to end for tests (real databases, history store and
   provider call path; scripted network). Use it instead of hand-wiring

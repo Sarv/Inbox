@@ -5,55 +5,18 @@
  * ingest in the core message-processor; these handlers just manage the records.
  */
 
-import { collectFilterActions, computeFilterActionResult, emailMatchesRule, type FilterCondition, type FilterRule, type FilterRuleInput } from '@sarvinbox/core';
-import { cleanBodyExpression } from '@sarvinbox/storage-node';
+import { collectFilterActions, computeFilterActionResult, type EmailRecord, type FilterCondition, type FilterRule, type FilterRuleInput } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
+import { emailsMatchingRule, scanEmailsForFilter } from '../services/filter-matching';
 import { requireStorage, getSyncEngine } from '../shared';
-
-// Cap the existing-mail scan so applying/counting a filter can't lock up on a
-// huge mailbox. Newest-first, so the most relevant mail is always covered.
-const APPLY_TO_EXISTING_SCAN_CAP = 5000;
-
-/**
- * Newest-first slice of stored emails with just the fields filter conditions
- * read. Shared by the count-preview and apply paths.
- */
-function scanEmailsForFilter(): any[] {
-  const storage = requireStorage();
-  const db = (storage as any).db;
-  if (!db?.prepare) return [];
-  return db
-    .prepare(`
-      SELECT id, folder_id AS folderId, uid, tags, subject,
-             from_address AS fromAddress, from_name AS fromName,
-             to_address AS toAddress, cc_address AS ccAddress,
-             -- Through email_bodies, never the inline column: migration 73 empties
-             -- it, and a filter rule matching on body text would silently stop
-             -- matching anything.
-             ${cleanBodyExpression()} AS cleanBody
-      FROM emails
-      ORDER BY date DESC
-      LIMIT ${APPLY_TO_EXISTING_SCAN_CAP}
-    `)
-    .all() as any[];
-}
 
 /**
  * Count how many existing emails an (unsaved) rule would match — used for the
  * live "N matching emails" preview when the user ticks "apply to existing".
  */
 function countRuleMatches(input: { matchType: 'all' | 'any'; conditions: FilterCondition[] }): number {
-  const rule: FilterRule = {
-    id: '', name: '', enabled: true, priority: 0,
-    matchType: input.matchType, conditions: input.conditions, actions: [],
-    stopProcessing: false, createdAt: 0, updatedAt: 0,
-  };
-  let count = 0;
-  for (const email of scanEmailsForFilter()) {
-    if (emailMatchesRule(email, rule)) count++;
-  }
-  return count;
+  return emailsMatchingRule(requireStorage(), input).length;
 }
 
 /**
@@ -66,13 +29,13 @@ async function applyRuleToExistingEmails(rule: FilterRule): Promise<number> {
   const storage = requireStorage();
   const syncEngine = getSyncEngine();
   const folders = await storage.getFolders();
-  const rows = scanEmailsForFilter();
+  const rows = scanEmailsForFilter(storage);
 
   const connected = syncEngine?.isConnected?.() ?? false;
   let affected = 0;
 
   for (const email of rows) {
-    const actions = collectFilterActions(email, [rule]);
+    const actions = collectFilterActions(email as EmailRecord, [rule]);
     if (actions.length === 0) continue;
 
     const { tags, folderId, changed } = computeFilterActionResult(email, actions, folders as any);

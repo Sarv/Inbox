@@ -474,3 +474,24 @@ describe('the one-line run summary', () => {
     expect(inboxAssistantDegradedStages({ version: 1, plan })).toEqual(['plan_fallback:invalid_shape/filters']);
   });
 });
+
+describe('the app.log lines of an agent run', () => {
+  // Breaks: an agent run that fell back to the JSON protocol, hit tool errors or ran
+  // out of steps logs as a clean run, so a degraded provider goes unnoticed.
+  it('flags a protocol fallback, tool errors and the step limit as degraded', () => {
+    const diagnostics: InboxAssistantRunDiagnostics = { version: 1, route: 'agent', outcome: 'no_evidence',
+      agent: { mode: 'json', fallback: 'tools_refused', steps: 14, toolCalls: { search_mail: 3 }, toolErrors: { 'search_mail:invalid_call': 2 }, stop: 'step_limit' } };
+    expect(inboxAssistantDegradedStages(diagnostics)).toEqual(['agent_tools_refused', 'agent_tool_errors(search_mail:invalid_call:2)', 'agent_step_limit']);
+    expect(inboxAssistantRunSummary('r', 'completed', diagnostics)).toContain('agent=json:tools_refused steps=14 tools=search_mail:3 tool_errors=search_mail:invalid_call:2 stop=step_limit');
+    expect(inboxAssistantDegradedStages({ version: 1, route: 'agent', agent: { mode: 'native', steps: 2, toolCalls: {}, toolErrors: {}, stop: 'answered' } })).toEqual([]);
+    expect(inboxAssistantRunSummary('r', 'completed', { version: 1, route: 'agent', agent: { mode: 'native', reasoning: 'off', steps: 2, toolCalls: {}, toolErrors: {} } })).toContain('agent=native:reasoning_off steps=2');
+  });
+
+  // Breaks: app.log cannot tell a run that changed mail from one that only read it.
+  it('counts the change sets a run staged and applied, and nothing else about them', () => {
+    const line = inboxAssistantRunSummary('r', 'completed', { version: 1, route: 'agent',
+      agent: { mode: 'native', steps: 3, toolCalls: { change_mail: 2 }, toolErrors: {}, stop: 'answered', changes: { sets: 2, messages: 35, autoApplied: 30 } } });
+    expect(line).toContain('stop=answered changes=sets:2,messages:35,auto:30');
+    expect(inboxAssistantRunSummary('r', 'completed', { version: 1, route: 'agent', agent: { mode: 'native', steps: 1, toolCalls: {}, toolErrors: {} } })).not.toContain('changes=');
+  });
+});
