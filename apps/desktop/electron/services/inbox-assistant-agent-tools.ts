@@ -1,5 +1,5 @@
 import type { AIToolDefinition, EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
-import { parseAttachmentNames, parseTags } from '@sarvinbox/core';
+import { parseAttachmentNames, parseTags, trimCharsStart } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssistantEvidence, InboxAssistantProgress } from '../../src/types/inbox-assistant';
 import { instantToWallClock, startOfLocalDate, validLocalDate } from '../../src/utils/local-calendar';
@@ -482,7 +482,7 @@ const listFolders: InboxAgentTool = {
       if (!opened) { lines.push(`${account.email}: could not be opened.`); continue; }
       lines.push(`${account.email}:`);
       for (const folder of opened.folders.slice(0, 200)) {
-        lines.push(`  ${folder.path}${folder.specialUse ? ` (${folder.specialUse.replace('\\', '').toLowerCase()})` : ''}: ${folder.totalCount} messages, ${folder.unreadCount} unread`);
+        lines.push(`  ${folder.path}${folder.specialUse ? ` (${trimCharsStart(folder.specialUse, '\\').toLowerCase()})` : ''}: ${folder.totalCount} messages, ${folder.unreadCount} unread`);
       }
     }
     return lines.join('\n');
