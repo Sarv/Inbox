@@ -1,3 +1,4 @@
+import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // emails:fetchBodiesBatch prefetches bodies for the visible rows. The behaviour
@@ -68,6 +69,7 @@ vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccount
 vi.mock('../../../../electron/ipc/agent-handlers', () => ({ logUserAction: h.logUserAction }));
 vi.mock('../../../../electron/services/accounts-registry', () => ({ readRegistryAccounts: () => [{ id: 'active-account' }, { id: 'other-account' }] }));
 
+import { captureLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import {
   CID_REPAIR_MEMORY,
   claimCidRepairAttempt,
@@ -1139,5 +1141,27 @@ describe('Starred folder — server stars are the folder sync\'s job, not an IPC
   // is re-registered; a manual "sync stars" must go through syncFlags.
   it('no longer registers emails:syncStarred', () => {
     expect(h.handlers.has('emails:syncStarred')).toBe(false);
+  });
+});
+
+describe('emails:search — what reaches the log', () => {
+  // Breaks: 'Search emails error: <error>' prints the error whole, and an FTS
+  // error quotes the token it choked on: the words the user searched for. The
+  // renderer re-runs the same query here right after a failed AI search.
+  it('logs a failed search by the error class and code only, and still answers a failure', async () => {
+    const SENTINEL = 'SENTINEL-salary-revision-Jane';
+    h.storage.searchEmails.mockRejectedValue(Object.assign(new Error(`fts5: syntax error near "${SENTINEL}"`), { code: 'SQLITE_ERROR' }));
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      const result = await h.handlers.get('emails:search')!(null, `${SENTINEL} from:jane@example.com`);
+
+      expect(result.success).toBe(false);
+      expect(logs.containing(SENTINEL)).toEqual([]);
+      expect(logs.containing('Search emails error:')).toEqual([
+        "[ERROR] [email-handlers] Search emails error: { name: 'Error', code: 'SQLITE_ERROR' }",
+      ]);
+    } finally {
+      logs.stop();
+    }
   });
 });

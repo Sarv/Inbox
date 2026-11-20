@@ -74,6 +74,44 @@ describe('renderer console → app.log forwarder', () => {
     expect(forward).toHaveBeenCalledWith({ level: 'debug', name: '', text: 'dbg' });
   });
 
+  // The release level policy. vitest runs in DEV, so the test above only covers
+  // the dev branch; these stub a release build (DEV false) and re-import.
+  // What breaks if they fail: a line meant for DevTools only (console.debug, a
+  // logger.debug) is written to every user's app.log — or, the other way, a
+  // release drops info/warn/error lines a bug report needs.
+  describe('in a release build', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('drops console.debug but still forwards console.log', async () => {
+      vi.stubEnv('DEV', false);
+      vi.stubEnv('VITE_LOG_LEVEL', undefined);
+      await load();
+      console.debug('dev only');
+      expect(forward).not.toHaveBeenCalled();
+      console.log('plain');
+      expect(forward).toHaveBeenCalledWith({ level: 'info', name: '', text: 'plain' });
+      expect(forward).toHaveBeenCalledTimes(1);
+    });
+
+    // A QA build opts back in with VITE_LOG_LEVEL=debug (any case).
+    it('forwards console.debug when the build set VITE_LOG_LEVEL=debug', async () => {
+      vi.stubEnv('DEV', false);
+      vi.stubEnv('VITE_LOG_LEVEL', 'DEBUG');
+      await load();
+      console.debug('qa');
+      expect(forward).toHaveBeenCalledWith({ level: 'debug', name: '', text: 'qa' });
+    });
+
+    // Any other level name does not turn debug forwarding on.
+    it('keeps dropping console.debug for another VITE_LOG_LEVEL', async () => {
+      vi.stubEnv('DEV', false);
+      vi.stubEnv('VITE_LOG_LEVEL', 'info');
+      await load();
+      console.debug('dev only');
+      expect(forward).not.toHaveBeenCalled();
+    });
+  });
+
   it('never throws when the bridge is absent (preload not ready / older shell)', async () => {
     (globalThis as any).window = {}; // no electronAPI
     await load();

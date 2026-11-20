@@ -6,6 +6,7 @@ import type { EmailRecord, FolderRecord } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { captureLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import * as fakeCoreDb from '../../../../electron/services/__testing__/fake-core-db';
 
 /**
@@ -731,5 +732,59 @@ describe('the poll’s per-email line (CASA L-7)', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('[TRACE]');
     expect(lines[0]).toContain('P2 start: a-poll from=sender@example.test');
+  });
+});
+
+describe('the per-email P2 lines name no category', () => {
+  // Breaks: '[Pipeline:P2] ✓ <id> … cats=[<slugs>]' and the linked-account
+  // reuse line ('… no AI call: [<slugs>]') go back to writing category slugs
+  // at INFO for every categorized email. A custom category's slug is made from
+  // the name the user typed ("Sentinel Payslip Jane" -> sentinel_payslip_jane),
+  // so it reached a release app.log on every message sorted into it. The
+  // capture runs at DEBUG, the release default (TRACE is the opt-in level).
+  it('logs how many categories an email got, for an AI verdict and a linked-account reuse', async () => {
+    const SLUG = 'sentinel_payslip_jane';
+    for (const a of h.accounts) {
+      a.storage.upsertCategoryDefinition({ slug: SLUG, name: 'Sentinel Payslip Jane', prompt: 'payslips', isSystem: false, isEnabled: true });
+    }
+    seedMirror(established(true));
+    const s = await launch();
+    const originalProvider = h.provider;
+    const provider = vi.spyOn(h, 'provider').mockImplementation(async (url, init) => {
+      const response = await originalProvider(url, init);
+      const payload = await response.json();
+      const verdict = JSON.parse(payload.choices[0].message.content);
+      for (const result of verdict) result.categories = [SLUG];
+      payload.choices[0].message.content = JSON.stringify(verdict);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    const logs = captureLogs({ setLogSink: s.core.setLogSink, setLogLevel: s.core.setLogLevel, getLogLevel: s.core.getLogLevel }, { level: 'debug' });
+    /** The same message delivered to one account (dual delivery shares the Message-ID). */
+    const arrive = async (accountId: string, id: string) => {
+      const email = mail(id, `Subject of ${id}`);
+      email.messageId = '<dual-delivered@example.test>';
+      await h.accounts.find((a) => a.id === accountId)!.storage.insertEmail(email);
+      s.core.getEventBus().emit(s.core.createEvent.emailSynced(email, 'INBOX', true));
+    };
+    try {
+      await arrive('acct-a', 'custom-a');
+      await until(decided([['acct-a', 'custom-a']]), 'the AI verdict to save');
+      await arrive('acct-b', 'custom-b');
+      await until(decided([['acct-b', 'custom-b']]), 'the linked copy to reuse it');
+    } finally {
+      logs.stop();
+      provider.mockRestore();
+    }
+
+    // The custom slug really was the verdict, and the second copy reused it
+    // without a second AI call: the lines below are about that slug.
+    expect(row('acct-a', 'custom-a').ai_categories).toBe(`|${SLUG}|`);
+    expect(h.sent).toHaveLength(1);
+    expect(logs.lines.filter((line) => line.toLowerCase().includes('sentinel'))).toEqual([]);
+    expect(logs.containing('[Pipeline:P2] ✓ custom-a ')).toEqual([expect.stringMatching(/ cats=1 action=/)]);
+    expect(logs.containing('custom-b reusing categories from a linked account')).toEqual([
+      expect.stringMatching(/\(same Message-ID\) — no AI call: cats=1$/),
+    ]);
+    expect(logs.containing('[Pipeline:P2] ✓ custom-b ')).toEqual([expect.stringMatching(/ cats=1 action=/)]);
   });
 });

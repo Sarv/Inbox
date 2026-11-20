@@ -48,11 +48,16 @@ import { promises as dns } from 'node:dns';
 
 import { BLOCKLISTS, type Blocklist } from '@sarv-in/mailguard';
 import {
+  allowedSarvReputationOrigin,
   LocalDnsblProvider,
   ReputationStage,
   SarvReputationProvider,
   createLogger,
+  describeEndpointOrigin,
+  failureCause,
+  onSarvBaseUrlChanged,
   readBlocklistPrefs,
+  sarvReputationOrigin,
   type BlocklistPrefs,
   type ItemReputation,
   type ReputationCacheStore,
@@ -217,7 +222,11 @@ export const DNS_TIMEOUT_MS = 3_000;
 /** Per-request budget for the Sarv service, for the same reason. Its breaker bounds a slow day. */
 export const SARV_TIMEOUT_MS = 5_000;
 
-/** The first signed-in Sarv account's bearer, or null — the service is per user. */
+/**
+ * The first signed-in Sarv account's bearer, or null — the service is per user.
+ * Only ever called by a provider whose address passed `sarvReputationOrigin`:
+ * no other provider's token (Gmail's restricted scope among them) is minted.
+ */
 async function sarvToken(): Promise<string | null> {
   const accounts = await listSignedInAccounts();
   const sarv = accounts.find((a) => a.provider === 'sarv');
@@ -237,22 +246,45 @@ function resolverFor(servers: readonly string[]): ((name: string) => Promise<str
     try {
       resolver.setServers([...servers]);
     } catch (e) {
-      logger.warn(`Blocklist resolvers not usable (${servers.join(', ')}): ${(e as Error).message} — asking nobody until they are fixed`);
+      // The count and the failure's code only: what was typed in that field may
+      // be anything, and node's message quotes it.
+      logger.warn(`Blocklist resolvers not usable (${servers.length} named): ${failureCause(e)} — asking nobody until they are fixed`);
       return null;
     }
   }
   return (name) => resolver.resolve4(name);
 }
 
+/** The settings choose the Sarv service, but this build has none to ask (no build does until it runs). */
+function sarvServiceMissing(settings: ReputationSettings): boolean {
+  return settings.enabled && settings.provider === 'sarv' && allowedSarvReputationOrigin() === null;
+}
+
+/**
+ * The Sarv address the settings name when it is NOT Sarv's reputation service —
+ * the case in which nothing is asked — or null (local DNS, no address yet,
+ * Sarv's own origin, or no service in this build: `sarvServiceMissing`).
+ */
+function refusedSarvAddress(settings: ReputationSettings): string | null {
+  if (!settings.enabled || settings.provider !== 'sarv' || !settings.endpoint) return null;
+  if (sarvServiceMissing(settings)) return null;
+  return sarvReputationOrigin(settings.endpoint) === null ? settings.endpoint : null;
+}
+
 /** The provider the settings name, or null when they name nobody who can be asked. */
 export function providerForSettings(settings: ReputationSettings): ReputationProvider | null {
   if (!settings.enabled) return null;
   if (settings.provider === 'sarv') {
-    if (!settings.endpoint) return null;
+    // The address is a renderer-written setting and the bearer also opens the
+    // Sarv mailbox: it goes to Sarv's reputation origin or nowhere. A refused
+    // address builds nothing — no stage, no request, no token minted — and does
+    // not fall back to this computer's DNS, which the user chose not to use.
+    const origin = sarvReputationOrigin(settings.endpoint);
+    if (!origin) return null;
     return new SarvReputationProvider({
-      endpoint: settings.endpoint,
+      endpoint: origin,
       getToken: sarvToken,
-      fetch: (url, init) => chromiumFetch(url, init as RequestInit),
+      fetch: (url, init) => chromiumFetch(url, { ...init, redirect: 'error' } as RequestInit),
       timeoutMs: SARV_TIMEOUT_MS,
     });
   }
@@ -306,8 +338,33 @@ const sameAsking = (a: ReputationSettings, b: ReputationSettings): boolean =>
   a.servers.join(' ') === b.servers.join(' ') &&
   a.endpoint === b.endpoint;
 
-const sameSettings = (a: ReputationSettings, b: ReputationSettings): boolean =>
-  sameAsking(a, b) && a.reports === b.reports && a.links === b.links && a.domainAge === b.domainAge;
+/** The choices that change neither whom the stage asks nor what it has learned. */
+const sameOptions = (a: ReputationSettings, b: ReputationSettings): boolean =>
+  a.reports === b.reports && a.links === b.links && a.domainAge === b.domainAge;
+
+/**
+ * Where these settings send the Sarv bearer under the registry as it is NOW,
+ * or null. Part of whom the stage asks: the same saved address means another
+ * origin, or none, once a dev build's override re-points the registry.
+ */
+const sarvOriginFor = (settings: ReputationSettings): string | null =>
+  settings.enabled && settings.provider === 'sarv' ? sarvReputationOrigin(settings.endpoint) : null;
+
+/** The Sarv origin the current stage was built for (see `sarvOriginFor`). */
+let appliedOrigin: string | null = null;
+/** Stops listening to the registry; set once a refresh has run. */
+let unwatchRegistry: (() => void) | null = null;
+
+/**
+ * Re-read when the Sarv registry is re-pointed. Startup wires the first engine
+ * before initializeOAuth applies a dev build's SARVINBOX_SARV_REPUTATION_BASE_URL.
+ * Without this the stage would keep the origin it was built with until the next
+ * settings write: it would refuse the dev service, or keep sending production
+ * the dev sign-in's bearer.
+ */
+function watchSarvRegistry(): void {
+  unwatchRegistry ??= onSarvBaseUrlChanged(refreshReputation);
+}
 
 /**
  * Give a sync engine the shared lookup.
@@ -322,7 +379,8 @@ export function attachReputation(engine: { setReputationLookup(fn: ReputationLoo
 }
 
 /**
- * Re-read the settings and rebuild the stage if what it asks changed.
+ * Re-read the settings and rebuild the stage if what it asks changed, or if
+ * the Sarv registry now sends the saved address somewhere else (or nowhere).
  *
  * A rebuild also CLEARS the cache, which is the point: a user who has just
  * added a zone, or switched to the Sarv service, expects the next message to
@@ -330,6 +388,7 @@ export function attachReputation(engine: { setReputationLookup(fn: ReputationLoo
  * anything else — link lookups, registration dates, reports — keeps both.
  */
 export function refreshReputation(): void {
+  watchSarvRegistry();
   let settings: ReputationSettings;
   try {
     settings = settingsFrom(readAppSetting(SETTINGS_KEY));
@@ -337,33 +396,49 @@ export function refreshReputation(): void {
     // Fail closed: see the module header. The stage and the settings it was
     // built from are kept, so a store that reads again unchanged resumes
     // where it was — but nothing is asked until it does.
-    if (!unreadable) logger.warn(`Blocklist settings unreadable — asking nobody until they can be read: ${(e as Error).message}`);
+    if (!unreadable) logger.warn(`Blocklist settings unreadable — asking nobody until they can be read: ${failureCause(e)}`);
     unreadable = true;
     lastFailedReadAt = Date.now();
     return;
   }
   unreadable = false;
   const previous = applied;
-  if (previous && sameSettings(settings, previous)) return;
+  const origin = sarvOriginFor(settings);
+  const sameWho = previous !== null && sameAsking(settings, previous) && origin === appliedOrigin;
+  if (sameWho && sameOptions(settings, previous)) return;
   applied = settings;
-  if (!previous || !sameAsking(settings, previous)) {
+  if (!sameWho) {
+    appliedOrigin = origin;
     const provider = providerForSettings(settings);
     stage = provider ? new ReputationStage(provider, cacheStore) : null;
     if (previous) {
       try {
         getReputationCache().clear();
       } catch (e) {
-        logger.warn(`Blocklist cache not cleared: ${(e as Error).message}`);
+        logger.warn(`Blocklist cache not cleared: ${failureCause(e)}`);
       }
     }
-    logger.info(stage ? `Blocklist lookups on: ${describe(settings)}` : 'Blocklist lookups off');
+    const refused = refusedSarvAddress(settings);
+    if (stage) logger.info(`Blocklist lookups on: ${describe(settings)}`);
+    // Once per change of who is asked, never per message. A Sarv choice saved
+    // when the tab offered it is not switched to this computer's DNS: that
+    // would send senders to list operators the user chose not to ask.
+    else if (sarvServiceMissing(settings)) logger.warn("Blocklist lookups off: they are set to ask Sarv's reputation service, which this build has no address for, so nothing is asked and no Sarv sign-in is used until another choice is made under Security → Blocklists");
+    // Only the address's origin: whatever else was typed (credentials, a path)
+    // stays out of the log.
+    else if (refused) logger.warn(`Blocklist lookups off: the Sarv reputation service address (${describeEndpointOrigin(refused)}) is not Sarv's, so nothing is asked and no Sarv sign-in is used until it is changed`);
+    else logger.info('Blocklist lookups off');
   }
   if (previous) for (const listener of listeners) listener();
 }
 
 function describe(settings: ReputationSettings): string {
+  // The resolvers are named: they are configuration, not mail, and a stage
+  // exists only once node accepted every one of them as an address, so they
+  // are not free text. Which resolver asked is what tells a network that an
+  // operator refuses from a list that is down.
   const who = settings.provider === 'sarv'
-    ? `the Sarv service at ${settings.endpoint}`
+    ? `the Sarv service at ${appliedOrigin}`
     : `${settings.zones.join(', ')} via ${settings.servers.length > 0 ? settings.servers.join(', ') : 'the system resolver'}`;
   return settings.links ? `${who}, link domains included` : who;
 }
@@ -404,9 +479,13 @@ export function linkReputationStage(): ReputationStage | null {
 
 // -------------------------------------------------------------- the report loop
 
-/** Do the settings allow the user's own verdicts to leave the machine? */
+/**
+ * Do the settings allow the user's own verdicts to leave the machine? Only to
+ * Sarv's reputation origin: a refused address reports nothing, builds nothing
+ * and logs nothing (a bulk Report spam calls this once per domain).
+ */
 export function reportsAllowed(settings: ReputationSettings): boolean {
-  return settings.enabled && settings.provider === 'sarv' && !!settings.endpoint && settings.reports;
+  return settings.enabled && settings.provider === 'sarv' && settings.reports && sarvReputationOrigin(settings.endpoint) !== null;
 }
 
 /**
@@ -422,14 +501,18 @@ export function reportSenderVerdict(
   const provider = deps.provider === undefined ? providerForSettings(settings) : deps.provider;
   if (!provider?.report) return;
   provider.report(report).then((accepted) => {
-    if (accepted) logger.info(`Reported ${report.verdict} for ${report.domain ?? report.ip}`);
+    // The verdict only: which sender it was about is the user's mail.
+    if (accepted) logger.info(`Reported a ${report.verdict} verdict to the Sarv reputation service`);
   }).catch(() => { /* fail-open */ });
 }
 
 /** Test seam: forget the stage and the settings it was built from. */
 export function resetReputationForTests(): void {
+  unwatchRegistry?.();
+  unwatchRegistry = null;
   stage = null;
   applied = null;
+  appliedOrigin = null;
   unreadable = false;
   lastFailedReadAt = 0;
   listeners.clear();

@@ -64,6 +64,14 @@ export interface OAuthProviderConfig {
    */
   apiBaseUrl?: string;
   edgeBaseUrl?: string;
+  /**
+   * Sarv-only: the ORIGIN of Sarv's sender-reputation service (no path). The
+   * one place outside the AI edge and the catalog API a Sarv bearer may be sent
+   * (`sarvReputationOrigin` in token-destinations.ts). Unset in every build
+   * until the service runs, which means a Sarv bearer goes to no reputation
+   * address; a dev build can point it at a test service.
+   */
+  reputationBaseUrl?: string;
 }
 
 export interface OAuthAccount {

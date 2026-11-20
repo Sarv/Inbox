@@ -191,6 +191,18 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
     // Pure (zero imports) — the OpenPGP lookup / auto-encrypt preferences, read
     // by the Encryption tab with the same function main decides lookups with.
     '@sarvinbox/core/pgp-prefs': resolve(desktopDir, '../../packages/core/src/pgp/prefs.ts'),
+    // Pure (error-class-name only) — what a failure WAS ({ name, code, status })
+    // and nothing it was working on, so a renderer catch can log a provider or
+    // parse failure without the mail text its message quotes.
+    '@sarvinbox/core/error-diagnostic': resolve(desktopDir, '../../packages/core/src/utils/error-diagnostic.ts'),
+    // Pure (provider registry, IMAP presets, and the logger and error-class-name
+    // the registry uses) — where a Sarv token may be sent, so the Blocklists tab
+    // warns about the same reputation address main refuses.
+    '@sarvinbox/core/token-destinations': resolve(desktopDir, '../../packages/core/src/oauth/token-destinations.ts'),
+    // Pure (zero imports) — what a log line may say about text that is not
+    // ours (field names, sizes, a URL's scheme), so renderer lines describe a
+    // search or a model's answer by the same rules as main's.
+    '@sarvinbox/core/log-text': resolve(desktopDir, '../../packages/core/src/utils/log-text.ts'),
   };
 }
 

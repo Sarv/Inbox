@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail, formatSenderBehaviorFacts, SENDER_BEHAVIOR_UNAVAILABLE } from '@sarvinbox/core';
+import { parseLLMJsonArray, valueShapeForLog, cleanEmailHtmlForLLM, errorDiagnostic, failureCause, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail, formatSenderBehaviorFacts, SENDER_BEHAVIOR_UNAVAILABLE } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext, SenderSignals } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -273,8 +273,11 @@ export class AICategorizationService {
       }
     } catch (error) {
       if (this.currentRun === run && !run.controller.signal.aborted) {
-        logger.error('[AICategorizationService] Processing error:', error);
-        this.emitError((error as Error).message);
+        // Class, code and status only: a provider's error carries its response body.
+        logger.error('[AICategorizationService] Processing error:', errorDiagnostic(error));
+        // The renderer logs this message (console.error, forwarded to app.log),
+        // so it names the failure by one token, never by the error's text.
+        this.emitError(`AI categorization failed (${failureCause(error)})`);
       }
     } finally {
       if (this.currentRun === run) {
@@ -405,7 +408,9 @@ export class AICategorizationService {
         this.autoFailStreak = 0;
       }
     } catch (error) {
-      logger.error('[AICategorizationService] Auto-tick error:', error);
+      // Class and code only: the read of the backlog can fail with a message
+      // that quotes the query (and with it mail text), as 'Processing error' can.
+      logger.error('[AICategorizationService] Auto-tick error:', errorDiagnostic(error));
     }
   }
 
@@ -570,14 +575,13 @@ export class AICategorizationService {
           if ((settle.reason as Error)?.name !== 'AbortError') {
             this.lastChunkError = settle.reason;
           }
-          const errMsg = (settle.reason as Error)?.message || String(settle.reason);
           // The LLM endpoint being unreachable — whether at the socket level
           // (DNS/refused/reset) or an HTTP upstream failure (502/503/504 from a
           // gateway/proxy) — fails every email in the chunk identically.
           // Collapse those into ONE concise log after the loop instead of N
           // stack-traced errors (a 502 otherwise dumps the full nginx HTML page
           // per email). Both are transient and retried next cycle. Genuine
-          // per-email failures still log individually (with a bounded message).
+          // per-email failures still log individually (by status and class).
           if (isConnectionError(settle.reason) || isUpstreamError(settle.reason)) {
             networkFailuresThisChunk++;
             const host = (settle.reason as any)?.endpoint;
@@ -591,9 +595,13 @@ export class AICategorizationService {
               ? `HTTP ${status}${hostSuffix}`
               : `${truncateForLog(describeNetworkError(settle.reason))}${hostSuffix}`;
           } else {
-            // Bound the message — a failed LLM call can carry a multi-KB HTML
-            // body; never spill the whole thing into the log.
-            this.emitLog('error', `Email ${email.id} LLM call failed: ${truncateForLog(errMsg)}`);
+            // What the failure was, never its message: a provider's error
+            // (`API request failed: <status> - <body>`) carries the endpoint's
+            // response body, which can quote the prompt (the mail). This line
+            // is relayed to the renderer too.
+            const status = (settle.reason as { status?: unknown })?.status;
+            const httpStatus = typeof status === 'number' ? `HTTP ${status} ` : '';
+            this.emitLog('error', `Email ${email.id} LLM call failed: ${httpStatus}${JSON.stringify(errorDiagnostic(settle.reason))}`);
           }
           continue;
         }
@@ -704,7 +712,9 @@ export class AICategorizationService {
       this.emitProgress();
     } catch (error) {
       if (this.currentRun !== run || run.controller.signal.aborted) return;
-      logger.error('[AICategorizationService] Realtime processing failed:', error);
+      // Class, code and status only: a provider's error (`API request failed:
+      // <status> - <body>`) carries its response body, which can quote the mail.
+      logger.error('[AICategorizationService] Realtime processing failed:', errorDiagnostic(error));
       this.progress.failed += emailIds.length;
       this.progress.lastError = (error as Error).message;
       this.emitProgress();
@@ -1052,53 +1062,28 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
   // ========== Validation ==========
 
   private validateResponse(raw: string): CategorizationResult[] {
-    // Strips <think>/<thinking>/<reasoning>/<thought> blocks (reasoning
-    // models like Gemma and DeepSeek R1 emit these inline) before fences.
-    const clean = cleanLLMJsonResponse(raw);
-
-    // Three-pass parse:
-    //   1. Direct JSON.parse on the cleaned response.
-    //   2. Retry after escaping unescaped control chars (raw \n in reasoning).
-    //   3. Per-object salvage — walk the array, parse each {...} entry
-    //      independently. Survives truncation, single bad reasoning
-    //      string, trailing prose, and other partial corruption that
-    //      would kill the whole batch.
-    let parsed = tryParseLLMJson<any[]>(clean);
-    if (parsed === null) {
-      // Salvage — return whatever objects we can extract individually.
-      const { items: salvaged, diagnostics } = salvageJsonArrayWithDiagnostics<any>(clean);
-      const diagSummary =
-        `inputLen=${diagnostics.inputLength} ` +
-        `attempted=${diagnostics.objectsAttempted} ` +
-        `closed=${diagnostics.objectsClosed} ` +
-        `parsed=${diagnostics.objectsParsed} ` +
-        `truncated=${diagnostics.truncatedMidObject} ` +
-        `reachedEnd=${diagnostics.reachedArrayEnd}`;
-      if (salvaged.length > 0) {
-        this.emitLog('warn', `Whole-array parse failed; salvaged ${salvaged.length} object(s) [${diagSummary}]`);
-        if (diagnostics.truncatedMidObject) {
-          this.emitLog('warn', `↳ response was TRUNCATED mid-object — model hit token limit. Consider smaller batch or higher max_tokens.`);
-        }
-        parsed = salvaged;
-      } else {
-        // Last resort: the array may be buried in reasoning prose / model markers
-        // that the tag-stripper and object-salvage missed (e.g. gpt-oss's analysis
-        // channel). Bracket-match the first balanced [...] and parse it as a unit.
-        const arr = extractBalancedJsonArray(clean);
-        const retry = arr && arr !== clean ? tryParseLLMJson<any[]>(arr) : null;
-        if (Array.isArray(retry)) {
-          this.emitLog('warn', `Recovered array via bracket-match after salvage failed [${diagSummary}]`);
-          parsed = retry;
-        } else {
-          // Not a usable array/object → skip this batch (agent_status stays
-          // pending, so it retries). Log a SHORT, single-line preview of what we
-          // actually got so the breaking shape is visible without a full dump.
-          const got = clean.replace(/\s+/g, ' ').trim().slice(0, 200);
-          this.emitLog('error', `No usable JSON in response [${diagSummary}] got="${got}"`);
-          return [];
-        }
+    // The three-pass read shared with core's validateCategorizationResponse:
+    // thinking tags (Gemma, DeepSeek R1) and fences stripped, then a whole
+    // JSON.parse (retried with raw control characters escaped), per-object
+    // salvage (survives truncation, one bad reasoning string, trailing prose),
+    // and the first balanced [...] (an array buried in reasoning prose).
+    const read = parseLLMJsonArray(raw);
+    if (read.how === 'salvaged') {
+      this.emitLog('warn', `Whole-array parse failed; salvaged ${read.value.length} object(s) [${read.summary}]`);
+      if (read.diagnostics.truncatedMidObject) {
+        this.emitLog('warn', `↳ response was TRUNCATED mid-object — model hit token limit. Consider smaller batch or higher max_tokens.`);
       }
+    } else if (read.how === 'bracket') {
+      this.emitLog('warn', `Recovered array via bracket-match after salvage failed [${read.summary}]`);
+    } else if (read.how === 'none') {
+      // Not a usable array/object → skip this batch (agent_status stays
+      // pending, so it retries). The walk's counts say what shape broke; the
+      // answer itself is the model's reading of the user's mail and stays out
+      // of the log (and out of the renderer relay, which writes it again).
+      this.emitLog('error', `No usable JSON in response [${read.summary}]`);
+      return [];
     }
+    const parsed = read.value;
 
     if (!Array.isArray(parsed)) {
       this.emitLog('error', `Response is not an array — got: ${typeof parsed}`);
@@ -1109,7 +1094,9 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
     const results: CategorizationResult[] = [];
     for (const item of parsed) {
       if (!item || typeof item !== 'object' || !item.emailId) {
-        logger.warn('[AICategorizationService] Skipping invalid item:', item);
+        // Its shape only: an item the model returned can carry its reasoning
+        // about the email, and that is not log material.
+        logger.warn(`[AICategorizationService] Skipping an invalid item: ${valueShapeForLog(item)}`);
         continue;
       }
 

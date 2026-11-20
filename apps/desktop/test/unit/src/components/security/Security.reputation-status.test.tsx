@@ -72,6 +72,10 @@ describe('the reputation card', () => {
     expect(text()).toContain('Blocklists are off');
     expect(text()).toContain('Change this under Security → Blocklists.');
     expect(text()).not.toContain('Background checks');
+    // Breaks: after upgrade, a user who had chosen Sarv's reputation service
+    // (which no build can ask yet) or saved an address that is not Sarv's sees
+    // no reason their senders are no longer checked.
+    expect(text()).toContain('set to Sarv’s reputation service, which is not available yet or has an address that is not Sarv’s');
   });
 
   // "Run now" pulls the background pass forward; with neither link lookups

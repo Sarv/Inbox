@@ -61,7 +61,7 @@ if [ -n "$BRANCH" ]; then
 fi
 
 if [ "$MODE" = "prod" ]; then
-    echo "=== Sarv URLs: production (oauth.sarv.com / ai.sarv.com / jpr1-ai-edge.sarv.com) ==="
+    echo "=== Sarv URLs: production (oauth.sarv.com / ai.sarv.com / jpr1-ai-edge.sarv.com; no reputation service yet) ==="
     # Match a shipped build's log verbosity (release default is 'info'); the dev
     # default 'debug' floods the log with the IMAP command/pool trace. An
     # explicit SARV_LOG_LEVEL at the shell still wins.
@@ -85,6 +85,8 @@ else
     echo "   OAuth: $SARVINBOX_SARV_OAUTH_BASE_URL"
     echo "   API  : $SARVINBOX_SARV_API_BASE_URL"
     echo "   Edge : $SARVINBOX_SARV_EDGE_BASE_URL"
+    # Not defaulted to localhost: the Blocklists setting stores https only.
+    echo "   Reputation: ${SARVINBOX_SARV_REPUTATION_BASE_URL:-none (no Sarv reputation service yet)}"
     echo "   Client: $SARVINBOX_SARV_CLIENT_ID"
 fi
 

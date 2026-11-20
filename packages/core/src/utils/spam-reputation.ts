@@ -54,9 +54,11 @@ import {
 } from '@sarv-in/mailguard/reputation';
 import type { SpamAssessment, SpamReason } from '@sarv-in/mailguard/verdict';
 
+import { sarvReputationOrigin } from '../oauth/token-destinations';
+
 import { CircuitBreakers, type CircuitBreakerOptions } from './circuit-breaker';
+import { failureCause } from './error-diagnostic';
 import { logger } from './logger';
-import { trimTrailingSlashes } from './trailing-slash';
 
 /** The zones the local provider asks by default, and how to read their answers. */
 export { BLOCKLISTS as DEFAULT_DNSBL_LISTS };
@@ -368,7 +370,12 @@ export class LocalDnsblProvider implements ReputationProvider {
       } catch (e) {
         const code = (e as { code?: string })?.code ?? '';
         if (NOT_LISTED_CODES.has(code)) return [];
-        throw e;
+        // The library keeps a failure's MESSAGE as the zone's error, and a
+        // resolver's message names the query — `queryA ETIMEOUT
+        // 4.3.2.1.zen.spamhaus.org`, a sender's address or a domain the mail
+        // links to. Only what the failure was goes on, so the note and the
+        // breaker's warning below can carry it.
+        throw Object.assign(new Error(failureCause(e)), code ? { code } : {});
       }
     };
   }
@@ -432,6 +439,9 @@ export class LocalDnsblProvider implements ReputationProvider {
         this.breakers.succeeded(list.name);
         continue;
       }
+      // Either what a thrown lookup WAS (`this.query` keeps only its code or
+      // class) or the library's own sentence for a refusal code — never the
+      // name that was queried.
       const reason = lastError.get(list.name);
       if (reason === undefined || !this.breakers.failed(list.name)) continue;
       logger.warn(
@@ -450,17 +460,28 @@ export interface SarvReputationResponse {
 }
 
 export interface SarvReputationDeps {
-  /** Service origin, e.g. `https://reputation.sarv.com`. */
+  /**
+   * The service's address as the settings name it. Only Sarv's own reputation
+   * origin is ever asked (`sarvReputationOrigin`): anything else is refused
+   * with no request and no token.
+   */
   endpoint: string;
   /** A valid Sarv OAuth access token, or null when nobody is signed in. */
   getToken: () => Promise<string | null>;
-  fetch: (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+  /**
+   * Always called with `redirect: 'error'`: a 307/308 would re-send the bearer
+   * and the batch to wherever `Location` points.
+   */
+  fetch: (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal; redirect: 'error' }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
   timeoutMs?: number;
   /** The service's breaker: consecutive failed lookups that pause it, and for how long. */
   breaker?: CircuitBreakerOptions;
 }
 
 const SARV_SERVICE = 'sarv';
+
+/** The note on every item when the configured address is not Sarv's reputation service. */
+export const SARV_REPUTATION_REFUSED_NOTE = "The Sarv reputation service address is not Sarv's, so nothing was asked";
 
 /**
  * The Sarv-hosted lookup. Authenticated with the user's own Sarv token, and
@@ -469,17 +490,30 @@ const SARV_SERVICE = 'sarv';
  * arrives, so a service that keeps failing is PAUSED rather than waited on by
  * every message behind it; not being signed in costs no request and is not a
  * failure.
+ *
+ * WHERE THE BEARER GOES is decided here too, where the Authorization header is
+ * attached, whoever built the provider: the address must be Sarv's reputation
+ * origin (`sarvReputationOrigin`), requests go to that canonical origin rather
+ * than the typed spelling, and redirects are refused. A refused address is not
+ * an outage — it is permanent until the settings change — so it never mints a
+ * token, never steps the breaker and is never retried.
  */
 export class SarvReputationProvider implements ReputationProvider {
   readonly name = 'sarv';
   private readonly breakers: CircuitBreakers;
+  /** The canonical origin to send to, or null when the configured address is refused. */
+  private readonly origin: string | null;
 
   constructor(private readonly deps: SarvReputationDeps) {
     this.breakers = new CircuitBreakers(deps.breaker);
+    this.origin = sarvReputationOrigin(deps.endpoint);
   }
 
   async lookup(query: ReputationQuery): Promise<ReputationResult> {
     if (query.ips.length === 0 && query.domains.length === 0) return { provider: this.name, ips: new Map(), domains: new Map() };
+    // Before the breaker and the token: no request, no step, no log line (this
+    // is the ingest path, once per arriving message).
+    if (!this.origin) return unknownResult(this.name, query, SARV_REPUTATION_REFUSED_NOTE);
     if (!this.breakers.isClosed(SARV_SERVICE)) {
       return unknownResult(this.name, query, 'Sarv reputation service paused after repeated failures');
     }
@@ -494,28 +528,30 @@ export class SarvReputationProvider implements ReputationProvider {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), this.deps.timeoutMs ?? 10_000) : null;
     try {
-      const res = await this.deps.fetch(`${trimTrailingSlashes(this.deps.endpoint)}/v1/reputation/lookup`, {
+      const res = await this.deps.fetch(`${this.origin}/v1/reputation/lookup`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ ips: query.ips, domains: query.domains }),
         signal: controller?.signal,
+        redirect: 'error',
       });
-      if (!res.ok) return this.failed(query, `Sarv reputation service answered ${res.status}`);
+      if (!res.ok) return this.failed(query, `Sarv reputation service answered ${res.status}`, `status ${res.status}`);
       const body = (await res.json()) as SarvReputationResponse;
       this.breakers.succeeded(SARV_SERVICE);
       return this.parse(body, query);
     } catch (e) {
-      return this.failed(query, `Sarv reputation service unreachable: ${(e as Error)?.message ?? e}`);
+      const cause = failureCause(e);
+      return this.failed(query, `Sarv reputation service unreachable (${cause})`, cause);
     } finally {
       if (timer) clearTimeout(timer);
     }
   }
 
   /** A lookup that learned nothing: unknown for everything asked, and one step toward the pause. */
-  private failed(query: ReputationQuery, note: string): ReputationResult {
+  private failed(query: ReputationQuery, note: string, cause: string): ReputationResult {
     if (this.breakers.failed(SARV_SERVICE)) {
       logger.warn(
-        `[Reputation] Sarv service: ${this.breakers.failureThreshold} consecutive failed lookups — not asking it for ${Math.round(this.breakers.cooldownMs / 60_000)} min. Last error: ${note}`,
+        `[Reputation] Sarv service: ${this.breakers.failureThreshold} consecutive failed lookups — not asking it for ${Math.round(this.breakers.cooldownMs / 60_000)} min. Last error: ${cause}`,
       );
     }
     return unknownResult(this.name, query, note);
@@ -523,6 +559,7 @@ export class SarvReputationProvider implements ReputationProvider {
 
   /** POST /v1/reputation/report — the user's verdict, never their mail. True when the service accepted it. */
   async report(report: SenderReport): Promise<boolean> {
+    if (!this.origin) return false;
     if (!report.domain && !report.ip) return false;
     let token: string | null;
     try {
@@ -532,10 +569,11 @@ export class SarvReputationProvider implements ReputationProvider {
     }
     if (!token) return false;
     try {
-      const res = await this.deps.fetch(`${trimTrailingSlashes(this.deps.endpoint)}/v1/reputation/report`, {
+      const res = await this.deps.fetch(`${this.origin}/v1/reputation/report`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ domain: report.domain, ip: report.ip, verdict: report.verdict }),
+        redirect: 'error',
       });
       return res.ok;
     } catch {

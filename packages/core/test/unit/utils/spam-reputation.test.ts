@@ -1,9 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { setSarvBaseUrl } from '../../../src/oauth/providers';
+import { failureCause } from '../../../src/utils/error-diagnostic';
 import {
   DEFAULT_DNSBL_LISTS,
   LocalDnsblProvider,
   REPUTATION_MAX_POINTS,
+  SARV_REPUTATION_REFUSED_NOTE,
   SarvReputationProvider,
   USER_REPORTS_MIN,
   linkReputationReasons,
@@ -12,6 +15,15 @@ import {
   unknownResult,
   type ReputationResult,
 } from '../../../src/utils/spam-reputation';
+
+/**
+ * The reputation origin these tests configure — the only address the provider
+ * will send its bearer to. No build has one (Sarv runs no such service yet), so
+ * it is set here the way a dev build's override sets it; `.test` never resolves.
+ */
+const SARV_REP = 'https://reputation.sarv.test';
+beforeAll(() => setSarvBaseUrl({ reputationBase: SARV_REP }));
+afterAll(() => setSarvBaseUrl({ reputationBase: '' }));
 
 /**
  * The reputation stage: blocklists and the Sarv service as spam signals.
@@ -216,10 +228,12 @@ describe('SarvReputationProvider', () => {
     return { ok: status < 400, status, json: async () => body };
   };
 
+  // Behaviour changed (reputation-token fix): the address used to be any https
+  // host; only Sarv's reputation origin is asked now, so it is what this uses.
   it('posts the batch with the bearer and reads listings and reports', async () => {
     const seen: Array<{ url: string; init: { headers: Record<string, string>; body: string } }> = [];
     const p = new SarvReputationProvider({
-      endpoint: 'https://reputation.sarv.example/',
+      endpoint: `${SARV_REP}/`,
       getToken: async () => 'tok-1',
       fetch: fetchWith(200, {
         ips: [{ ip: '1.2.3.4', status: 'listed', listed: [{ list: 'Spamhaus ZEN', category: 'spam', detail: 'SBL' }] }],
@@ -227,7 +241,7 @@ describe('SarvReputationProvider', () => {
       }, seen as never),
     });
     const r = await p.lookup(query);
-    expect(seen[0].url).toBe('https://reputation.sarv.example/v1/reputation/lookup');
+    expect(seen[0].url).toBe(`${SARV_REP}/v1/reputation/lookup`);
     expect(seen[0].init.headers.authorization).toBe('Bearer tok-1');
     expect(JSON.parse(seen[0].init.body)).toEqual(query);
     expect(r.ips.get('1.2.3.4')).toMatchObject({ status: 'listed', hits: [{ list: 'Spamhaus ZEN', category: 'spam' }] });
@@ -236,12 +250,16 @@ describe('SarvReputationProvider', () => {
 
   // Fail OPEN, every way it can fail.
   it('is unknown — never clean — without a token, on an error status, on bad JSON, or when unreachable', async () => {
-    const base = { endpoint: 'https://r.example', fetch: fetchWith(200, {}) };
+    const base = { endpoint: SARV_REP, fetch: fetchWith(200, {}) };
     expect((await new SarvReputationProvider({ ...base, getToken: async () => null }).lookup(query)).ips.get('1.2.3.4')).toMatchObject({ status: 'unknown', note: expect.stringContaining('signed in') });
     expect((await new SarvReputationProvider({ ...base, getToken: async () => { throw new Error('refresh failed'); } }).lookup(query)).ips.get('1.2.3.4')?.status).toBe('unknown');
     expect((await new SarvReputationProvider({ ...base, getToken: async () => 't', fetch: fetchWith(503, {}) }).lookup(query)).ips.get('1.2.3.4')).toMatchObject({ status: 'unknown', note: expect.stringContaining('503') });
     expect((await new SarvReputationProvider({ ...base, getToken: async () => 't', fetch: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad json'); } }) }).lookup(query)).ips.get('1.2.3.4')?.status).toBe('unknown');
-    expect((await new SarvReputationProvider({ ...base, getToken: async () => 't', fetch: async () => { throw new Error('ECONNREFUSED'); } }).lookup(query)).domains.get('x.example')).toMatchObject({ status: 'unknown', note: expect.stringContaining('ECONNREFUSED') });
+    // Behaviour changed: the note names the failure's code, not its message
+    // (which can quote an address or the text a parse choked on).
+    const refused = Object.assign(new Error('connect ECONNREFUSED 203.0.113.9:443'), { code: 'ECONNREFUSED' });
+    const unreachable = (await new SarvReputationProvider({ ...base, getToken: async () => 't', fetch: async () => { throw refused; } }).lookup(query)).domains.get('x.example');
+    expect(unreachable).toMatchObject({ status: 'unknown', note: 'Sarv reputation service unreachable (ECONNREFUSED)' });
     // Items the service left out of a good answer are unknown too.
     expect((await new SarvReputationProvider({ ...base, getToken: async () => 't', fetch: fetchWith(200, { ips: [] }) }).lookup(query)).ips.get('1.2.3.4')?.status).toBe('unknown');
     expect((await new SarvReputationProvider({ ...base, getToken: async () => 't', fetch: fetchWith(200, 'nonsense') }).lookup(query)).ips.get('1.2.3.4')?.status).toBe('unknown');
@@ -249,7 +267,7 @@ describe('SarvReputationProvider', () => {
 
   it('makes no request for an empty query', async () => {
     const fetch = vi.fn();
-    const r = await new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => 't', fetch }).lookup({ ips: [], domains: [] });
+    const r = await new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => 't', fetch }).lookup({ ips: [], domains: [] });
     expect(fetch).not.toHaveBeenCalled();
     expect(r.ips.size).toBe(0);
   });
@@ -300,7 +318,7 @@ describe('edges', () => {
 
   it('the Sarv client reads a listed item without category or detail, and an answer with unknown status', async () => {
     const p = new SarvReputationProvider({
-      endpoint: 'https://r.example', getToken: async () => 't',
+      endpoint: SARV_REP, getToken: async () => 't',
       fetch: async () => ({ ok: true, status: 200, json: async () => ({ ips: [{ ip: '1.2.3.4', listed: [{ list: 'L' }] }], domains: [{ domain: 'x.example' }, { domain: 'not-asked.example', status: 'clean' }] }) }),
     });
     const r = await p.lookup({ ips: ['1.2.3.4'], domains: ['x.example'] });
@@ -343,14 +361,14 @@ describe('linkReputationReasons', () => {
 describe('SarvReputationProvider.report', () => {
   const seen: Array<{ url: string; init: { headers: Record<string, string>; body: string } }> = [];
   const provider = (status = 202, token: string | null = 'tok') => new SarvReputationProvider({
-    endpoint: 'https://r.example/', getToken: async () => token,
+    endpoint: `${SARV_REP}/`, getToken: async () => token,
     fetch: async (url, init) => { seen.push({ url, init: init as never }); return { ok: status < 400, status, json: async () => ({}) }; },
   });
 
   it('posts the sender domain, address and verdict with the bearer — and nothing else', async () => {
     seen.length = 0;
     expect(await provider().report({ domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' })).toBe(true);
-    expect(seen[0].url).toBe('https://r.example/v1/reputation/report');
+    expect(seen[0].url).toBe(`${SARV_REP}/v1/reputation/report`);
     expect(seen[0].init.headers.authorization).toBe('Bearer tok');
     expect(JSON.parse(seen[0].init.body)).toEqual({ domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' });
   });
@@ -360,9 +378,9 @@ describe('SarvReputationProvider.report', () => {
     expect(await provider(202, null).report({ domain: 'x.example', ip: null, verdict: 'ham' })).toBe(false);
     expect(await provider().report({ domain: null, ip: null, verdict: 'spam' })).toBe(false);
     expect(await provider(500).report({ domain: 'x.example', ip: null, verdict: 'spam' })).toBe(false);
-    const broken = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => 't', fetch: async () => { throw new Error('ECONNRESET'); } });
+    const broken = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => 't', fetch: async () => { throw new Error('ECONNRESET'); } });
     expect(await broken.report({ domain: 'x.example', ip: null, verdict: 'spam' })).toBe(false);
-    const noToken = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => { throw new Error('refresh failed'); }, fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+    const noToken = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => { throw new Error('refresh failed'); }, fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
     expect(await noToken.report({ domain: 'x.example', ip: null, verdict: 'spam' })).toBe(false);
   });
 });
@@ -440,7 +458,7 @@ describe('SarvReputationProvider — the breaker', () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const clock = { now: 1_000 };
     const fetch = vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
-    const p = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => 't', fetch, breaker: { failureThreshold: 2, cooldownMs: 60_000, now: () => clock.now } });
+    const p = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => 't', fetch, breaker: { failureThreshold: 2, cooldownMs: 60_000, now: () => clock.now } });
 
     await p.lookup(query);
     await p.lookup(query);
@@ -461,7 +479,7 @@ describe('SarvReputationProvider — the breaker', () => {
     let token: string | null = null;
     let ok = false;
     const fetch = vi.fn(async () => ({ ok, status: ok ? 200 : 500, json: async () => ({ ips: [] }) }));
-    const p = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => token, fetch, breaker: { failureThreshold: 2 } });
+    const p = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => token, fetch, breaker: { failureThreshold: 2 } });
 
     for (let i = 0; i < 5; i += 1) await p.lookup(query);
     expect(fetch).not.toHaveBeenCalled();
@@ -476,5 +494,235 @@ describe('SarvReputationProvider — the breaker', () => {
     await p.lookup(query);
     expect(fetch).toHaveBeenCalledTimes(4);
     spy.mockRestore();
+  });
+});
+
+/**
+ * Where the Sarv bearer goes. The address comes from a renderer-written
+ * setting, and the bearer is also the Sarv mailbox's XOAUTH2 credential, so the
+ * provider itself — where the Authorization header is attached, whoever built
+ * it — sends only to Sarv's reputation origin, never follows a redirect, and
+ * treats any other address as refused for good rather than as an outage.
+ */
+describe('SarvReputationProvider — where the bearer may go', () => {
+  const query = { ips: ['1.2.3.4'], domains: ['x.example'] };
+  type Seen = { url: string; init: { redirect?: string; headers: Record<string, string> } };
+  const answering = (seen: Seen[]) => vi.fn(async (url: string, init: unknown) => {
+    seen.push({ url, init: init as Seen['init'] });
+    return { ok: true, status: 200, json: async () => ({ ips: [], domains: [] }) };
+  });
+
+  // Breaks: any constructor of the provider other than main's
+  // providerForSettings can still send the bearer to a renderer-chosen host.
+  it.each([
+    'https://rep.sarv.example',
+    'https://reputation.sarv.test.evil.example',
+    'https://user:pw@reputation.sarv.test',
+    'http://reputation.sarv.test',
+    'https://reputation.sarv.test/v1',
+    '',
+  ])('asks nothing and mints no token for %j', async (endpoint) => {
+    const getToken = vi.fn(async () => 'tok');
+    const fetch = vi.fn();
+    const p = new SarvReputationProvider({ endpoint, getToken, fetch });
+
+    const r = await p.lookup(query);
+    expect(r.ips.get('1.2.3.4')).toEqual({ status: 'unknown', hits: [], note: SARV_REPUTATION_REFUSED_NOTE });
+    expect(r.domains.get('x.example')).toEqual({ status: 'unknown', hits: [], note: SARV_REPUTATION_REFUSED_NOTE });
+    expect(await p.report({ domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' })).toBe(false);
+    expect(getToken).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a build with no reputation origin (every build, until Sarv runs the
+  // service) still sends the bearer to the address the settings name.
+  it('asks nothing and mints no token, even for the address it asked a moment ago, once no origin is configured', async () => {
+    setSarvBaseUrl({ reputationBase: '' });
+    try {
+      const getToken = vi.fn(async () => 'tok');
+      const fetch = vi.fn();
+      const p = new SarvReputationProvider({ endpoint: SARV_REP, getToken, fetch });
+      expect((await p.lookup(query)).ips.get('1.2.3.4')?.note).toBe(SARV_REPUTATION_REFUSED_NOTE);
+      expect(await p.report({ domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' })).toBe(false);
+      expect(getToken).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      setSarvBaseUrl({ reputationBase: SARV_REP });
+    }
+  });
+
+  // Breaks: what the policy checked and what is fetched diverge (the raw
+  // string used to be concatenated, so a typed spelling was the destination).
+  it('sends lookup and report to the canonical origin, never the typed spelling', async () => {
+    const seen: Seen[] = [];
+    const p = new SarvReputationProvider({ endpoint: 'https://REPUTATION.sarv.test.:443/', getToken: async () => 'tok', fetch: answering(seen) });
+
+    await p.lookup(query);
+    await p.report({ domain: 'spam.example', ip: null, verdict: 'spam' });
+    expect(seen.map((s) => s.url)).toEqual([`${SARV_REP}/v1/reputation/lookup`, `${SARV_REP}/v1/reputation/report`]);
+  });
+
+  // Breaks: a 307/308 from the service re-POSTs the sender list, and on a
+  // same-site hop the bearer, to wherever Location points.
+  it('refuses redirects on lookup and report', async () => {
+    const seen: Seen[] = [];
+    const p = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => 'tok', fetch: answering(seen) });
+
+    await p.lookup(query);
+    await p.report({ domain: 'spam.example', ip: null, verdict: 'ham' });
+    expect(seen).toHaveLength(2);
+    expect(seen.every((s) => s.init.redirect === 'error')).toBe(true);
+    expect(seen.every((s) => s.init.headers.authorization === 'Bearer tok')).toBe(true);
+  });
+
+  // Breaks: a permanent refusal is treated like an outage — paused, retried,
+  // warned about every cooldown — so a corrected address is ignored for half an
+  // hour, or app.log fills with a line per arriving message.
+  it('never steps or trips the breaker for a refused address', async () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const getToken = vi.fn(async () => 'tok');
+    const p = new SarvReputationProvider({ endpoint: 'https://evil.example', getToken, fetch: vi.fn(), breaker: { failureThreshold: 1 } });
+
+    for (let i = 0; i < 5; i += 1) {
+      expect((await p.lookup(query)).ips.get('1.2.3.4')?.note).toBe(SARV_REPUTATION_REFUSED_NOTE);
+    }
+    expect(getToken).not.toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  // Breaks: a transient blip (a reset, a 503, a timeout) is read as permanent
+  // and the next message is not asked, or one is cached as an answer.
+  it('asks again after a reset, a 503 or a timeout, each one unknown', async () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const outcomes: Array<'reset' | 503 | 'timeout' | 'ok'> = ['reset', 503, 'timeout', 'ok'];
+    const fetch = vi.fn(async (_url: string, init: { signal?: AbortSignal }) => {
+      const next = outcomes.shift();
+      if (next === 'reset') throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+      if (next === 'timeout') {
+        return new Promise<never>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('This operation was aborted', 'AbortError')));
+        });
+      }
+      if (next === 503) return { ok: false, status: 503, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ ips: [{ ip: '1.2.3.4', status: 'clean' }] }) };
+    });
+    const p = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => 't', fetch, timeoutMs: 5, breaker: { failureThreshold: 5 } });
+
+    const notes = [];
+    for (let i = 0; i < 3; i += 1) notes.push((await p.lookup({ ips: ['1.2.3.4'], domains: [] })).ips.get('1.2.3.4'));
+    expect(notes).toEqual([
+      { status: 'unknown', hits: [], note: 'Sarv reputation service unreachable (ECONNRESET)' },
+      { status: 'unknown', hits: [], note: 'Sarv reputation service answered 503' },
+      { status: 'unknown', hits: [], note: 'Sarv reputation service unreachable (AbortError)' },
+    ]);
+    expect((await p.lookup({ ips: ['1.2.3.4'], domains: [] })).ips.get('1.2.3.4')?.status).toBe('clean');
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(spy).not.toHaveBeenCalled(); // three in a row is below this breaker's threshold
+    spy.mockRestore();
+  });
+
+  // Breaks: the breaker's warning (a release app.log line) quotes an address
+  // from the failure or the text a parse error choked on.
+  it('names only what the failure was when the breaker trips', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(' ')); });
+    const failures: unknown[] = [
+      Object.assign(new Error('connect ECONNREFUSED 203.0.113.9:443'), { code: 'ECONNREFUSED' }),
+      new SyntaxError('Unexpected token < in JSON: <html>private-body-text'),
+      // A transport that throws on an error status, with the body in its message.
+      Object.assign(new Error('Bad Gateway: <html>private-body-text'), { status: 502 }),
+    ];
+    for (const failure of failures) {
+      const p = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => 't', fetch: async () => { throw failure; }, breaker: { failureThreshold: 1 } });
+      await p.lookup(query);
+    }
+    const rateLimited = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => 't', fetch: async () => ({ ok: false, status: 429, json: async () => ({}) }), breaker: { failureThreshold: 1 } });
+    await rateLimited.lookup(query);
+
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toContain('Last error: ECONNREFUSED');
+    expect(lines[1]).toContain('Last error: SyntaxError');
+    expect(lines[2]).toContain('Last error: status 502');
+    expect(lines[3]).toContain('Last error: status 429');
+    expect(lines.join('\n')).not.toMatch(/203\.0\.113\.9|private-body-text/);
+    spy.mockRestore();
+  });
+
+  // Breaks: main's fetch is Electron's net.fetch, which rejects with a plain
+  // Error whose only identifier is its message. Without this the note and the
+  // breaker's warn say just "Error" while the service's host does not resolve.
+  it('keeps Chromium’s net::ERR_ name for a net.fetch failure, and nothing else of its message', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(' ')); });
+    const failures: Array<[unknown, string]> = [
+      [new Error('net::ERR_NAME_NOT_RESOLVED'), 'net::ERR_NAME_NOT_RESOLVED'],
+      // A wrapper that adds words around it, one of them the host.
+      [new TypeError('fetch to reputation.sarv.test failed: net::ERR_CONNECTION_REFUSED'), 'net::ERR_CONNECTION_REFUSED'],
+      // A real machine code still wins over a token in the message.
+      [Object.assign(new Error('net::ERR_FAILED'), { code: 'ECONNRESET' }), 'ECONNRESET'],
+      // Lower case, or no name after the prefix, is not Chromium's: the class.
+      [new Error('net::err_failed at reputation.sarv.test'), 'Error'],
+      [new Error('net::ERR_'), 'Error'],
+    ];
+    for (const [failure, cause] of failures) {
+      const p = new SarvReputationProvider({ endpoint: SARV_REP, getToken: async () => 't', fetch: async () => { throw failure; }, breaker: { failureThreshold: 1 } });
+      expect((await p.lookup(query)).domains.get('x.example')?.note).toBe(`Sarv reputation service unreachable (${cause})`);
+      expect(failureCause(failure)).toBe(cause);
+    }
+    expect(lines.map((line) => line.slice(line.indexOf('Last error: ')))).toEqual(failures.map(([, cause]) => `Last error: ${cause}`));
+    expect(lines.join('\n')).not.toContain('reputation.sarv.test');
+    // A thrown non-Error has no message to read.
+    expect(failureCause('net::ERR_FAILED')).toBe('string');
+    spy.mockRestore();
+  });
+});
+
+/**
+ * What a failed DNS lookup leaves behind. Node's resolver names the query in its
+ * message — a sender's reversed address, or a domain the mail links to — and
+ * that message used to become the zone's note (shown on the Security page and
+ * logged by the background pass) and its breaker's warning.
+ */
+describe('LocalDnsblProvider — failures name no query', () => {
+  const zen = DEFAULT_DNSBL_LISTS.find((list) => list.name === 'spamhaus-zen')!;
+  const dbl = DEFAULT_DNSBL_LISTS.find((list) => list.name === 'spamhaus-dbl')!;
+  const failing = (make: (name: string) => unknown) => async (name: string): Promise<string[]> => { throw make(name); };
+
+  // Breaks: app.log and the Security page carry the sender's address or a
+  // domain from the mail as part of a resolver error.
+  it('keeps the code of a resolver failure, not the name it asked about', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(' ')); });
+    const p = new LocalDnsblProvider({
+      resolve4: failing((name) => Object.assign(new Error(`queryA ETIMEOUT ${name}`), { code: 'ETIMEOUT' })),
+      lists: [zen, dbl],
+      breaker: { failureThreshold: 1 },
+    });
+
+    const r = await p.lookup({ ips: ['1.2.3.4'], domains: ['secret-link.example'] });
+    expect(r.ips.get('1.2.3.4')).toMatchObject({ status: 'unknown', note: 'Spamhaus ZEN: ETIMEOUT' });
+    expect(r.domains.get('secret-link.example')).toMatchObject({ status: 'unknown', note: 'Spamhaus DBL: ETIMEOUT' });
+    expect(lines).toHaveLength(2); // both zones tripped, once each
+    expect(lines.every((line) => line.includes('Last error: ETIMEOUT'))).toBe(true);
+    expect(lines.join('\n')).not.toMatch(/4\.3\.2\.1|secret-link/);
+    spy.mockRestore();
+  });
+
+  // Breaks: a failure with no code (a library bug, a TypeError) is logged with
+  // its message, which may quote the query too.
+  it('keeps the class of a failure that has no code', async () => {
+    const p = new LocalDnsblProvider({ resolve4: failing((name) => new TypeError(`bad answer for ${name}`)), lists: [dbl] });
+    const r = await p.lookup({ ips: [], domains: ['secret-link.example'] });
+    expect(r.domains.get('secret-link.example')).toMatchObject({ status: 'unknown', note: 'Spamhaus DBL: TypeError' });
+  });
+
+  // Breaks: an answer that is a refusal stops being read as one (the library's
+  // own sentence, which names no query, is what the note carries).
+  it('still explains an operator refusal in the library’s words', async () => {
+    const p = new LocalDnsblProvider({ resolve4: resolver({ '4.3.2.1.zen.spamhaus.org': ['127.255.255.254'] }), lists: [zen] });
+    const note = (await p.lookup({ ips: ['1.2.3.4'], domains: [] })).ips.get('1.2.3.4')?.note ?? '';
+    expect(note).toMatch(/^Spamhaus ZEN: .*resolver/);
+    expect(note).not.toContain('4.3.2.1');
   });
 });

@@ -1,9 +1,13 @@
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
+import { createLogger } from '@sarvinbox/core/logger';
 import { X, Loader2, Check, RefreshCw, Sparkles } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
 import { polishText, getDefaultProvider, PolishContext, PolishResponse } from '../services/ai-service';
 
 import { SandboxedEmailBody } from './SandboxedEmailBody';
+
+const log = createLogger('PolishModal');
 
 interface PolishModalProps {
   originalText: string;
@@ -40,10 +44,11 @@ export function PolishModal({ originalText, originalSubject, context, onAccept, 
         ...context,
         subject: originalSubject,
       }, customInstructions);
-      console.log('[PolishModal] Received result:', result);
       setPolishedResult(result);
     } catch (err) {
-      console.error('[PolishModal] Error:', err);
+      // The message is shown to the user below; the log gets what the failure
+      // was, never its text (a provider's error can quote the draft).
+      log.error('polish failed', errorDiagnostic(err));
       setError((err as Error).message || 'Failed to polish text');
     } finally {
       setLoading(false);

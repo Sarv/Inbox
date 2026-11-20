@@ -1,4 +1,4 @@
-import { setLogSink } from '@sarvinbox/core';
+import { setLogSink, setSarvBaseUrl } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -108,6 +108,31 @@ afterEach(() => {
   setLogSink(null);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('oauth:listProviders — the reputation origin the Blocklists tab is told', () => {
+  type Listed = { success: boolean; data: Array<{ id: string; reputationOrigin: string | null }> };
+  const listed = async () => ((await h.handlers.get('oauth:listProviders')!({})) as Listed).data;
+  afterEach(() => setSarvBaseUrl({ reputationBase: '' }));
+
+  // Breaks: the tab offers Sarv's reputation service while main has no address
+  // for it (no build has one until the service runs), or never offers it once
+  // main has one: a dev build's override lives only in main's registry.
+  it('reports no origin as every build ships, and main’s canonical origin once it has one', async () => {
+    expect((await listed()).find((p) => p.id === 'sarv')?.reputationOrigin).toBeNull();
+
+    setSarvBaseUrl({ reputationBase: 'https://REP.dev.example/' });
+    const data = await listed();
+    expect(data.find((p) => p.id === 'sarv')?.reputationOrigin).toBe('https://rep.dev.example');
+    expect(data.filter((p) => p.id !== 'sarv').map((p) => p.reputationOrigin)).toEqual([null, null, null]);
+  });
+
+  // Breaks: a malformed override (a path, credentials) is reported as an
+  // address the tab can accept, although main refuses to send anything there.
+  it('reports no origin for a configured value that is not a bare origin', async () => {
+    setSarvBaseUrl({ reputationBase: 'https://user:pw@rep.dev.example/v1' });
+    expect((await listed()).find((p) => p.id === 'sarv')?.reputationOrigin).toBeNull();
+  });
 });
 
 describe('no access token reaches the renderer', () => {

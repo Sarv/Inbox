@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { isLoopbackHost } from '@sarvinbox/core';
+import { isBareOrigin, isLoopbackHost } from '@sarvinbox/core';
 
 export interface ScannerCapabilities {
   protocolVersion: 1;
@@ -21,7 +21,9 @@ export function scannerOrigin(value: string, allowDevelopmentLoopback = false): 
   if (url.protocol !== 'https:' && !(allowDevelopmentLoopback && isLoopbackHost(url.hostname) && url.protocol === 'http:')) {
     throw new Error('Scanner connections require HTTPS. HTTP loopback is available only in the development app.');
   }
-  if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) {
+  // The scanner is reached by origin, which would drop credentials, a path, a
+  // query or a fragment silently: refused instead (core `isBareOrigin`).
+  if (!isBareOrigin(url)) {
     throw new Error('Use the scanner origin without credentials, a path, query, or fragment.');
   }
   return url.origin;

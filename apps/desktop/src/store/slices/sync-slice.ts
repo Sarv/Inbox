@@ -1,6 +1,7 @@
 import type { RealtimeEvent } from '@sarvinbox/core';
 import { sentFolderPathsOf } from '@sarvinbox/core/conversation-membership';
 import { isSentMailFolder } from '@sarvinbox/core/folder-mapping';
+import { createLogger } from '@sarvinbox/core/logger';
 import pLimit from 'p-limit';
 
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
@@ -20,6 +21,8 @@ import {
 import type { SyncSlice, SliceCreator } from '../types';
 
 import { buildEmailReplacementPatch, selectLoadedEmailIds } from './emails-slice';
+
+const log = createLogger('SyncSlice');
 
 /**
  * Trailing window for coalescing IMAP realtime (IDLE) events.
@@ -172,8 +175,10 @@ export async function refreshVisibleViewForFolder(
     const isCurrentFolder = isFolderInView(state.folders, state.selectedFolderId, folderPath);
 
     if (state.viewingAICategory && (isCurrentFolder || state.selectedVirtualFolder)) {
-      // AI-categorized view (Needs Response, Reminders, etc.).
-      console.log(`[Store] refreshView: re-fetching AI category (${state.viewingAICategory}) after ${folderPath} sync`);
+      // AI-categorized view (Needs Response, Reminders, etc.). Never the
+      // slug: a custom category's slug is made from the name the user typed,
+      // and this branch only runs with one set.
+      log.info(`[Store] refreshView: re-fetching AI category (aiCategory=set) after ${folderPath} sync`);
       await state.loadAICategoryEmails?.(state.viewingAICategory);
     } else if (
       isCurrentFolder &&

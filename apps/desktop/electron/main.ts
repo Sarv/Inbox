@@ -17,7 +17,7 @@ import netModule from 'net';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 
-import { SyncEngine, ExtensionManager, createLogger, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
+import { SyncEngine, ExtensionManager, createLogger, errorDiagnostic, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
 import { app, BrowserWindow, Menu, dialog, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
 
@@ -1409,7 +1409,8 @@ app.on('before-quit', (event) => {
     try {
       await getAttachmentPreviewProtection()?.dispose();
     } catch (error) {
-      logger.warn('Could not clear attachment previews on shutdown:', error);
+      // Its code only: a failed unlink quotes the copy's path, which ends in the attachment's name.
+      logger.warn('Could not clear attachment previews on shutdown:', errorDiagnostic(error));
     }
     // Let the pipeline-event persister's final flush reach the DB before we
     // start closing things underneath it.

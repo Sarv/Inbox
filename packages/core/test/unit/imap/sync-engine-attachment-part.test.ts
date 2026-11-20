@@ -1,7 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 import { SyncEngine } from '../../../src/imap/sync-engine';
+import { captureLogs, type CapturedLogs } from '../../../src/test-support/log-capture';
 import type { BodyStructure } from '../../../src/types/imap';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 // Regression tests for the single-attachment fetch path and its recovery from a
 // part whose Content-Transfer-Encoding header LIES.
@@ -377,6 +379,18 @@ describe('SyncEngine.fetchAttachment (whole-message fallback)', () => {
     ).rejects.toThrow('not found');
   });
 
+  // Breaks: the "not found" error names the attachment again, and every
+  // attachment IPC handler writes that error to a release app.log whole (the
+  // name comes from the mail: "Payslip-Jane-Doe.pdf").
+  it('does not name the missing attachment in its error', async () => {
+    const { client } = makeWholeMessageClient(LYING_SOURCE);
+    const error = await makeEngine(client)
+      .fetchAttachment('e1', 'INBOX', 42, 'SENTINEL-Payslip-Jane-Doe.pdf')
+      .catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('Attachment not found in message');
+  });
+
   // Transient failure: breaks if an empty body is parsed as "no attachments"
   // and reported as a content problem rather than a fetch that has to be retried.
   it('throws when the message body comes back empty', async () => {
@@ -395,5 +409,64 @@ describe('SyncEngine.fetchAttachment (whole-message fallback)', () => {
     await expect(
       makeEngine(client).fetchAttachment('e1', 'INBOX', 42, 'note.txt'),
     ).rejects.toThrow('Message not found');
+  });
+});
+
+// The part fetch's failure line reaches a release app.log (warn). It used to
+// name the attachment ("Payslip-Jane-Doe.pdf", from the mail) and quote the
+// error's message, which for an ImapFlow command error can carry the command
+// it ran. It now names the email and UID, and the error's class and code.
+describe('SyncEngine.fetchAttachmentPart — what reaches the log', () => {
+  const NAME = 'SENTINEL-Payslip-Jane.pdf';
+  const named = () => structure({ disposition: { type: 'attachment', params: { filename: NAME } } } as Partial<BodyStructure>);
+  let logs: CapturedLogs;
+  beforeEach(() => { logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }); });
+  afterEach(() => { logs.stop(); });
+
+  // Breaks (transient): a connection blip writes the file name, or the error
+  // text, on its way to the whole-message fallback.
+  it('logs a transient failure by email, uid and error code, then falls back', async () => {
+    const { client } = makeClient({ bodyStructure: named(), decoded: Buffer.alloc(300) });
+    client.downloadPart.mockRejectedValue(Object.assign(new Error(`Connection closed fetching ${NAME}`), { code: 'ETIMEDOUT' }));
+
+    expect(await makeEngine(client).fetchAttachmentPart('e-1', 'INBOX', 42, NAME)).toBeNull();
+
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing('fetchAttachmentPart failed')).toEqual([
+      "[WARN] [sarvinbox] fetchAttachmentPart failed for email e-1 uid 42 (falling back to full message) { name: 'Error', code: 'ETIMEDOUT' }",
+    ]);
+  });
+
+  // Breaks (permanent): a server refusal of the structure FETCH — an ImapFlow
+  // error carrying the executed command — is written with its text.
+  it('logs a permanent refusal by error class only', async () => {
+    const { client } = makeClient({ bodyStructure: named(), decoded: Buffer.alloc(300) });
+    client.fetchMessagesByUID.mockRejectedValue(Object.assign(new Error('Command failed'), {
+      responseText: `NO no such part for ${NAME}`, executedCommand: `A5 UID FETCH 42 (BODYSTRUCTURE) "${NAME}"`,
+    }));
+
+    expect(await makeEngine(client).fetchAttachmentPart('e-1', 'INBOX', 42, NAME)).toBeNull();
+
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing("fetchAttachmentPart failed for email e-1 uid 42 (falling back to full message) { name: 'Error' }")).toHaveLength(1);
+  });
+
+  // Breaks (multi-account, re-run): each account's engine logs its own email
+  // and uid, and a retry of the same open logs the same name-free line again.
+  it('names the failing email per engine, on every retry, never the file', async () => {
+    const a = makeClient({ bodyStructure: named(), decoded: Buffer.alloc(300) });
+    const b = makeClient({ bodyStructure: named(), decoded: Buffer.alloc(300) });
+    a.client.downloadPart.mockRejectedValue(new Error(`reset ${NAME}`));
+    b.client.downloadPart.mockRejectedValue(new Error(`reset ${NAME}`));
+    const first = makeEngine(a.client);
+    const second = makeEngine(b.client);
+
+    await first.fetchAttachmentPart('acct-a-email', 'INBOX', 7, NAME);
+    await first.fetchAttachmentPart('acct-a-email', 'INBOX', 7, NAME);
+    await second.fetchAttachmentPart('acct-b-email', 'Archive', 9, NAME);
+
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing('for email acct-a-email uid 7')).toHaveLength(2);
+    expect(logs.containing('for email acct-b-email uid 9')).toHaveLength(1);
   });
 });

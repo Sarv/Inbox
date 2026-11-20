@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   buildAttachmentUrl,
   createLogger,
+  errorDiagnostic,
   isInlineRenderableAttachment,
   isPreviewableAttachment,
   parseAttachmentUrl,
@@ -349,8 +350,11 @@ export class AttachmentPreviewProtection {
       // External apps read after openPath resolves. Retain only this private copy briefly.
       const ownedDirectory = directory;
       const timer = setTimeout(() => {
+        // Never the error itself: a failed unlink (Word or Acrobat still holding
+        // the copy, EBUSY on Windows) quotes the path, and the path ends in the
+        // attachment's own name. Its code says what happened.
         void this.removeOpened(ownedDirectory).catch((error) =>
-          logger.warn('Could not remove temporary attachment preview:', error)
+          logger.warn('Could not remove temporary attachment preview:', errorDiagnostic(error))
         );
       }, this.ttlMs);
       timer.unref?.();
@@ -407,6 +411,6 @@ export function setAttachmentPreviewProtection(value: AttachmentPreviewProtectio
   if (previews && previews !== value)
     void previews
       .dispose()
-      .catch((error) => logger.warn('Could not clear attachment previews:', error));
+      .catch((error) => logger.warn('Could not clear attachment previews:', errorDiagnostic(error)));
   previews = value;
 }

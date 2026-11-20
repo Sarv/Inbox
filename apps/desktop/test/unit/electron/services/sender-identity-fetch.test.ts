@@ -4,9 +4,10 @@ import { request as realHttpsRequest, type RequestOptions } from 'node:https';
 import { createServer, isIP, type LookupFunction, type Server } from 'node:net';
 import { Readable } from 'node:stream';
 
-import { discoverFavicon, lookupBimi } from '@sarvinbox/core';
+import { discoverFavicon, getLogLevel, lookupBimi, setLogLevel, setLogSink } from '@sarvinbox/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { captureLogs, type CapturedLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import {
   MAX_BODY_BYTES,
   MAX_REDIRECTS,
@@ -749,5 +750,55 @@ describe('on real sockets: a refusal happens before any connection', () => {
     const resolve: Resolver = (_host, _options, callback) => setImmediate(() => callback(null, [{ address: '127.0.0.1', family: 4 }]));
     await expect(senderIdentityFetch({ timeoutMs: 5_000, resolve, request: toPort(port) })('https://brand.example/')).rejects.toBeInstanceOf(RefusedDestinationError);
     expect(connections).toBe(0);
+  });
+});
+
+// The refusal warning is a release app.log line. The host it refused came from
+// a sender's BIMI record or homepage, so it names one of the user's
+// correspondents (the same reason the per-domain BIMI line was removed).
+describe('what a refused fetch writes to the log', () => {
+  const SENTINEL_HOST = 'sentinel-correspondent-bank.example';
+  let logs: CapturedLogs;
+  afterEach(() => { logs?.stop(); });
+
+  // Breaks: '[SenderIdentity] refused a fetch to <host>: …' names the
+  // correspondent's domain when its name resolves to a private address.
+  it('says the name resolved to a non-public address, never the name', async () => {
+    const net = fakeNet({}, { [SENTINEL_HOST]: ['127.0.0.1'] });
+    logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }, { level: 'info' });
+
+    await expect(net.fetchFor()(`https://${SENTINEL_HOST}/logo.svg`)).rejects.toMatchObject({ reason: 'private-address' });
+
+    expect(logs.containing('sentinel-correspondent')).toEqual([]);
+    expect(logs.lines).toEqual([
+      '[WARN] [sender-identity-fetch] [SenderIdentity] refused a fetch: its name resolved to an address that is not public',
+    ]);
+  });
+
+  // Breaks: a private IP written into a BIMI l= or an icon link is logged as
+  // the address it named, or not reported at all.
+  it('says the URL named a non-public IP address, never the address', async () => {
+    const net = fakeNet({});
+    logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }, { level: 'info' });
+
+    const res = await net.fetchFor()('https://192.168.77.13/logo.svg');
+
+    expect(res).toMatchObject({ ok: false, status: 0 });
+    expect(logs.containing('192.168.77.13')).toEqual([]);
+    expect(logs.lines).toEqual([
+      '[WARN] [sender-identity-fetch] [SenderIdentity] refused a fetch: the URL names an IP address that is not public',
+    ]);
+  });
+
+  // Breaks: a routine refusal (plain http, another site) starts writing a
+  // release line, with the host in it.
+  it('writes nothing for a routine refusal at the release level', async () => {
+    const net = fakeNet({});
+    logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }, { level: 'info' });
+
+    await net.fetchFor()(`http://${SENTINEL_HOST}/favicon.ico`);
+    await net.fetchFor({ site: 'other.example' })(`https://${SENTINEL_HOST}/favicon.ico`);
+
+    expect(logs.lines).toEqual([]);
   });
 });

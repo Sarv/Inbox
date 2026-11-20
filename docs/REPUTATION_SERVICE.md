@@ -30,6 +30,39 @@ service validates it against `oauth.sarv.com` and rate-limits per user.
 A missing or rejected token (`401`/`403`) must make the client fail OPEN: the
 message is judged from its headers alone.
 
+## Host, and where the client will send the token
+
+The service is not running yet, and the client ships with NO origin for it
+(`reputationBase` in `buildSarvProvider`, `packages/core/src/oauth/providers.ts`).
+With none, a Sarv token goes to no reputation address and Security >
+Blocklists does not offer the service. A Sarv choice saved earlier stays off,
+with the reason, until the user changes it. When the service has a real
+hostname, its origin becomes that default (the paths below are appended to it),
+and the tab offers the choice again: it asks main for the origin through
+`oauth:listProviders` (`reputationOrigin`).
+
+The token also opens the user's mailbox, and the address in Security >
+Blocklists is a setting the renderer writes. So the client sends the token to
+the configured origin and nowhere else (`sarvReputationOrigin` in
+`packages/core/src/oauth/token-destinations.ts`, checked both in the main
+process before any token is read and in `SarvReputationProvider`):
+
+- the address must be https on the default port, with the exact host
+  (letter case and one trailing dot do not matter), and no credentials, path,
+  query or fragment. A subdomain, a lookalike or another Sarv host is refused;
+- requests go to the canonical origin, not to the spelling the user typed;
+- redirects are not followed, so a `3xx` counts as a failed request;
+- a refused address means nothing is sent at all: no lookup, no report, no
+  token. That lasts until the setting changes. It is not retried, does not
+  count toward the pause below, and the client does not fall back to querying
+  the lists from this computer;
+- a failure on the right address (a timeout, a reset, a `5xx`) is different: it
+  is unknown for now and asked again next time, as described under the lookup.
+
+A development build can point the client at a test origin with
+`SARVINBOX_SARV_REPUTATION_BASE_URL` (see SARV_OAUTH_SETUP.md). A release build
+ignores it.
+
 ## `POST /v1/reputation/lookup`
 
 Request (`application/json`):

@@ -1,5 +1,5 @@
 import type { DomainAgeLookup } from '@sarv-in/mailguard';
-import { ReputationStage, type FolderRecord, type ItemReputation, type ReputationProvider, type ReputationResult } from '@sarvinbox/core';
+import { ReputationStage, setSarvBaseUrl, type FolderRecord, type ItemReputation, type ReputationProvider, type ReputationResult } from '@sarvinbox/core';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -551,7 +551,10 @@ describe('more edges', () => {
   it('the scheduler skips a runtime whose storage predates the stage, logs notes, and does not re-arm after a stop mid-pass', async () => {
     vi.useFakeTimers();
     try {
-      store({ provider: 'sarv', endpoint: 'https://rep.sarv.example', links: true, domainAge: false });
+      // The configured reputation origin: any other address is refused and asks
+      // nobody. No build has one yet, so it is set here as a dev build would.
+      setSarvBaseUrl({ reputationBase: 'https://reputation.sarv.test' });
+      store({ provider: 'sarv', endpoint: 'https://reputation.sarv.test', links: true, domainAge: false });
       h.accounts = [{ provider: 'sarv', email: 'rc@sarv.example' }];
       let release!: () => void;
       h.fetchGate = new Promise<void>((r) => { release = r; });
@@ -577,6 +580,7 @@ describe('more edges', () => {
     } finally {
       stopSpamReputationScheduler();
       vi.useRealTimers();
+      setSarvBaseUrl({ reputationBase: '' });
     }
   });
 });

@@ -9,6 +9,7 @@ import { IMAPError, type IMAPConfig, type IIMAPClient, type IMAPFolder, type IMA
 import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
+import { errorDiagnostic } from '../utils/error-diagnostic';
 import {
   decideMidSyncRecount,
   refreshCountsForFolders,
@@ -2468,7 +2469,9 @@ export class SyncEngine {
 
       const attachment = parsed.attachments.find(a => a.filename === filename);
       if (!attachment) {
-        throw new Error(`Attachment "${filename}" not found`);
+        // No file name: the name comes from the mail, and the attachment IPC
+        // handlers write this error to app.log as it is.
+        throw new Error('Attachment not found in message');
       }
 
       // The lying-encoding recovery, judged against the source we already hold.
@@ -2547,7 +2550,7 @@ export class SyncEngine {
   }
 
   async fetchAttachmentPart(
-    _emailId: string,
+    emailId: string,
     folderPath: string,
     uid: number,
     filename: string,
@@ -2576,7 +2579,10 @@ export class SyncEngine {
       await this.reselectMonitoredFolder(); // we SELECTed off the monitored folder
       return r;
     } catch (err) {
-      logger.warn(`fetchAttachmentPart failed for "${filename}" (falling back to full message): ${(err as Error)?.message ?? err}`);
+      // The email and UID, not the file name (it comes from the mail), and the
+      // error's class and code, not its message (an IMAP error quotes the
+      // command it ran).
+      logger.warn(`fetchAttachmentPart failed for email ${emailId} uid ${uid} (falling back to full message)`, errorDiagnostic(err));
       return null;
     }
   }

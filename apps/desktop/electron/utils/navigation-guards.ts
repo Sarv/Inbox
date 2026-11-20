@@ -18,6 +18,8 @@
  * extension-panel rule reads them (see isPanelNavigationAllowed).
  */
 
+import { urlSchemeForLog } from '@sarvinbox/core';
+
 import {
   classifyNavigation,
   type NavigationScope,
@@ -84,7 +86,9 @@ export function installNavigationGuards(
     if (verdict === 'external') {
       deps.openExternal(url).catch((err) => deps.warn('[Main] openExternal failed:', err));
     } else {
-      deps.warn(`[Main] Blocked ${scope}-level navigation:`, url);
+      // The scheme only: a frame navigation starts inside an email body, so
+      // the rest of the URL is the mail's (its host, path and query).
+      deps.warn(`[Main] Blocked ${scope}-level navigation:`, urlSchemeForLog(url));
     }
   };
 

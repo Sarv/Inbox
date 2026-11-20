@@ -35,6 +35,7 @@ import {
   type ExtractedSignals,
   type ContactEnrichment,
 } from '@sarvinbox/core/contact-enrichment';
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
 import { htmlToPlainText } from '@sarvinbox/core/html-text';
 import { createLogger } from '@sarvinbox/core/logger';
 
@@ -498,7 +499,9 @@ export function installEnrichmentBatchListener(): void {
           const result = await enrichContact({ contactId, accountId: payload.accountId, automatic: true });
           await api.contactEnrichment?.reportProgress?.({ contactId, batchId: payload.batchId, ok: result.ok, reason: result.ok ? null : result.reason });
         } catch (err) {
-          log.error('Contact enrichment failed:', contactId, err);
+          // Its class and status only: a provider's error can carry its response
+          // body, which can quote the prompt built from this contact's mail.
+          log.error('Contact enrichment failed:', contactId, errorDiagnostic(err));
           try { await api.contactEnrichment?.reportProgress?.({ contactId, batchId: payload.batchId, ok: false, reason: 'llm_failed' }); } catch { /* transport unavailable */ }
         }
         updateStatus({ processed: enrichmentStatus.processed + 1 });
@@ -513,7 +516,7 @@ export function installEnrichmentBatchListener(): void {
     }
   };
   api.contactEnrichment.onRunBatch((payload: { contactIds: string[]; accountId?: string; batchId?: string }) => {
-    serialBatch = serialBatch.then(() => processBatch(payload)).catch(error => { log.error('Enrichment batch failed:', error); });
+    serialBatch = serialBatch.then(() => processBatch(payload)).catch(error => { log.error('Enrichment batch failed:', errorDiagnostic(error)); });
     return serialBatch;
   });
   // Register the receiver BEFORE advertising readiness: native work can start

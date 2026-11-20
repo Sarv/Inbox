@@ -29,8 +29,13 @@ vi.mock('@sarvinbox/core', async () => {
   const effects = await import(
     '../../../../../../packages/core/src/extensions/workflow-effects'
   );
+  const logBudget = await import(
+    '../../../../../../packages/core/src/extensions/runtime/log-budget'
+  );
   return {
     planWorkflowEffects: effects.planWorkflowEffects,
+    // The real switch (SARV_DEBUG_EXTENSIONS), unset here: tracing stays off.
+    extensionDebugEnabled: logBudget.extensionDebugEnabled,
     createLogger: () => ({
       info: (...args: unknown[]) => h.logs.push(args.join(' ')),
       warn: (...args: unknown[]) => h.logs.push(args.join(' ')),

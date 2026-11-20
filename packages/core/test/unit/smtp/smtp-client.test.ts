@@ -1,8 +1,10 @@
 import { simpleParser } from 'mailparser';
 import type { AddressObject } from 'mailparser';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { captureLogs, type CapturedLogs } from '../../../src/test-support/log-capture';
 import type { SMTPConfig, SendEmailOptions } from '../../../src/types/smtp';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 // The SMTP client is the last hop before the wire, so these tests assert on the
 // EXACT bytes/options that would have reached the server. nodemailer's transport
@@ -601,5 +603,50 @@ describe('smtpClient singleton', () => {
   it('is a ready SMTPClient instance that starts disconnected', () => {
     expect(smtpClient).toBeInstanceOf(SMTPClient);
     expect(smtpClient.isConnected()).toBe(false);
+  });
+});
+
+// Release redaction removes addresses from app.log, but the display name in
+// "Jane Doe <jane@x>" survives it and names the people the user writes to. The
+// send line logs how many recipients there were, never who.
+describe('SMTPClient.sendEmail — what reaches the log', () => {
+  const NAME = 'Jane SENTINEL-Payroll';
+  let client: InstanceType<typeof SMTPClient>;
+  let logs: CapturedLogs;
+
+  beforeEach(async () => {
+    client = new SMTPClient();
+    await client.connect(baseConfig());
+    logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+  });
+  afterEach(() => { logs.stop(); });
+
+  const recipients = () => send({
+    to: [`${NAME} <jane@example.com>`, 'bob@example.com'],
+    cc: [`"${NAME} (HR)" <hr@example.com>`],
+    bcc: [`${NAME} Bcc <b@example.com>`],
+  });
+
+  // Breaks: "Sending email to: Jane … <jane@…>" writes the recipients' names.
+  it('logs recipient counts, not names, on a successful send', async () => {
+    const result = await client.sendEmail(recipients());
+
+    expect(result.success).toBe(true);
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing('Sending email: to=2 cc=1 bcc=1 recipient(s)')).toHaveLength(1);
+  });
+
+  // Breaks: a failed (transient) send writes the names on its way to the outbox
+  // retry; the retry must be as quiet as the first try.
+  it('logs no names on a transient failure or its retry', async () => {
+    h.state.sendError = Object.assign(new Error('451 Try again later'), { responseCode: 451 });
+    const failed = await client.sendEmail(recipients());
+    h.state.sendError = null;
+    const retried = await client.sendEmail(recipients());
+
+    expect(failed).toMatchObject({ success: false, transient: true });
+    expect(retried.success).toBe(true);
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing('Sending email: to=2 cc=1 bcc=1 recipient(s)')).toHaveLength(2);
   });
 });

@@ -1,4 +1,9 @@
+import { failureCause } from '../utils/error-diagnostic';
+import { createLogger } from '../utils/logger';
+
 import type { OAuthProviderConfig, OAuthProviderId } from './types';
+
+const logger = createLogger('OAuth');
 
 // Gmail requires the full mail.google.com scope for IMAP+SMTP over XOAUTH2.
 // Google restricts this scope — until the app is verified, only test users
@@ -98,12 +103,20 @@ interface SarvUrls {
   oauthBase?: string;
   apiBase?: string;
   edgeBase?: string;
+  reputationBase?: string;
 }
 
 function buildSarvProvider(urls: SarvUrls = {}): OAuthProviderConfig {
   const oauthBase = urls.oauthBase || 'https://oauth.sarv.com';
   const apiBase = urls.apiBase || 'https://ai.sarv.com';
   const edgeBase = urls.edgeBase || 'https://jpr1-ai-edge.sarv.com';
+  // Sarv's sender-reputation service (docs/REPUTATION_SERVICE.md) is not
+  // running yet, so no build has an address for it: with none configured a
+  // Sarv bearer goes to no reputation address at all, and the Blocklists tab
+  // does not offer the service. A dev build can name a test server
+  // (SARVINBOX_SARV_REPUTATION_BASE_URL). When the service ships, its origin is
+  // the default here. Empty means none, so a caller can clear an override.
+  const reputationBase = urls.reputationBase || undefined;
   return {
     id: 'sarv',
     label: 'Sarv',
@@ -167,6 +180,7 @@ function buildSarvProvider(urls: SarvUrls = {}): OAuthProviderConfig {
     apiBaseUrl: apiBase,
     edgeBaseUrl: edgeBase,
     llmBaseUrl: `${edgeBase}/edge/v1/llm`,
+    reputationBaseUrl: reputationBase,
   };
 }
 
@@ -230,16 +244,28 @@ export function setOAuthClientSecret(id: OAuthProviderId, clientSecret: string):
   REGISTRY[id].clientSecret = clientSecret;
 }
 
+const sarvUrlListeners = new Set<() => void>();
+
+/**
+ * Be told after `setSarvBaseUrl` has re-pointed the Sarv registry, whether or
+ * not any URL actually changed. Anything that fixed a Sarv address when it was
+ * built has to rebuild from here. The reputation stage takes its origin when it
+ * is built, and startup wires it before initializeOAuth applies a dev build's
+ * overrides. Returns the unsubscribe.
+ */
+export function onSarvBaseUrlChanged(listener: () => void): () => void {
+  sarvUrlListeners.add(listener);
+  return () => {
+    sarvUrlListeners.delete(listener);
+  };
+}
+
 /**
  * Swap one or more Sarv base URLs (prod ↔ dev). Each arg is optional —
  * unspecified URLs keep their production defaults (or previously-set value).
  * Preserves client credentials set via setOAuthClientId/Secret.
  */
-export function setSarvBaseUrl(urls: {
-  oauthBase?: string;
-  apiBase?: string;
-  edgeBase?: string;
-}): void {
+export function setSarvBaseUrl(urls: SarvUrls): void {
   const current = REGISTRY.sarv;
   const inferCurrent = (prop: 'authEndpoint' | 'apiBaseUrl' | 'edgeBaseUrl'): string | undefined => {
     const v = current[prop];
@@ -255,10 +281,20 @@ export function setSarvBaseUrl(urls: {
     oauthBase: urls.oauthBase ?? currentOauthBase,
     apiBase: urls.apiBase ?? current.apiBaseUrl,
     edgeBase: urls.edgeBase ?? current.edgeBaseUrl,
+    reputationBase: urls.reputationBase ?? current.reputationBaseUrl,
   });
   next.clientId = current.clientId;
   next.clientSecret = current.clientSecret;
   REGISTRY.sarv = next;
+  // The registry is already set: a listener that fails is its own problem, and
+  // the caller (startup's initializeOAuth) must not fail because of it.
+  for (const listener of [...sarvUrlListeners]) {
+    try {
+      listener();
+    } catch (e) {
+      logger.warn(`A listener for Sarv address changes failed: ${failureCause(e)}`);
+    }
+  }
 }
 
 export function isOAuthProviderConfigured(id: OAuthProviderId): boolean {

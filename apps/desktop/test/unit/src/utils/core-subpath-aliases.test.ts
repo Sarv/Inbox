@@ -195,4 +195,13 @@ describe('renderer core-subpath aliases', () => {
     const logger = await import('@sarvinbox/core/logger');
     expect(typeof logger.createLogger('AliasTest').info).toBe('function');
   });
+
+  // Breaks: the renderer's log lines cannot use the log-text reducers (field
+  // names and sizes instead of values), so they fall back to hand-rolled copies
+  // that print what a model or the user chose.
+  it('resolves the log-text alias with the reducers the renderer logs through', async () => {
+    const logText = await import('@sarvinbox/core/log-text');
+    expect(logText.setFieldNamesForLog({ textQuery: 'SENTINEL', from: '' })).toBe('textQuery');
+    expect(logText.fieldSizesForLog({ content: 'SENTINEL' })).toEqual({ content: 8 });
+  });
 });
