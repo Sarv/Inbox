@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AgentReplyDrafter, type ReplyDrafterDeps, type ThreadMessage } from '../../../src/agent/reply-drafter';
+import { captureLogs, type CapturedLogs } from '../../../src/test-support/log-capture';
 import type { EmailRecord } from '../../../src/types/models';
 import { MAX_MESSAGE_BYTES } from '../../../src/utils/json-size';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 const email = {
   id: 'incoming', threadId: 'thread-1', messageId: '<incoming@example.test>',
@@ -255,5 +257,52 @@ describe('reply drafter on stranger-sized input', () => {
 
     expect(deps.searchEmails).toHaveBeenCalledExactlyOnceWith('q'.repeat(1_000), { from: undefined, limit: 5 });
     expect(searchWeb).toHaveBeenCalledExactlyOnceWith('q'.repeat(1_000));
+  });
+});
+
+// The plan's search queries are written by the model FROM the email being
+// answered (names, invoice numbers, products). A failed search is logged at
+// error level, which a release app.log keeps, so the line may say which kind
+// of search failed and how long its query was, never the query.
+describe('reply drafter search failures', () => {
+  const SENTINEL = 'SENTINEL-invoice-Q204-Acme';
+  let logs: CapturedLogs;
+  beforeEach(() => { logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }); });
+  afterEach(() => { logs.stop(); });
+
+  // Breaks: "Email search failed: <query>" / "Web search failed: <query>" puts
+  // the model's query into app.log; or one failed search stops the draft.
+  it('logs each failed search by kind, query length and error class, and still drafts', async () => {
+    const plan = JSON.stringify({ needs_search: true, email_searches: [{ query: `${SENTINEL} email` }, 'second query'], web_searches: [`${SENTINEL} web`] });
+    const { drafter, deps } = setup([message(1)], plan);
+    vi.mocked(deps.searchEmails)
+      .mockImplementationOnce(() => { throw Object.assign(new Error(`fts5: syntax error near "${SENTINEL}"`), { code: 'SQLITE_ERROR' }); });
+    deps.searchWeb = vi.fn(async () => { throw Object.assign(new Error(`429 for ${SENTINEL}`), { status: 429 }); });
+
+    const result = await drafter.draftReply(email);
+
+    expect(result.body).toBe('A reviewed reply.');
+    // The second email search (no failure) still ran and counted.
+    expect(result.searchesPerformed).toEqual(['email: second query']);
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    expect(logs.containing('Email search failed')).toEqual([
+      `[ERROR] [sarvinbox] [ReplyDrafter] Email search failed (query: string(${SENTINEL.length + 6} chars)) { name: 'Error', code: 'SQLITE_ERROR' }`,
+    ]);
+    expect(logs.containing('Web search failed')).toEqual([
+      `[ERROR] [sarvinbox] [ReplyDrafter] Web search failed (query: string(${SENTINEL.length + 4} chars)) { name: 'Error', status: 429 }`,
+    ]);
+  });
+
+  // Breaks: a query that is not a string (untyped LLM JSON) throws while the
+  // failure is being logged, or is written out.
+  it('logs a non-string query by its shape', async () => {
+    const plan = JSON.stringify({ needs_search: true, email_searches: [{ query: { text: SENTINEL } }], web_searches: [] });
+    const { drafter, deps } = setup([message(1)], plan);
+    vi.mocked(deps.searchEmails).mockImplementationOnce(() => { throw new TypeError('query.trim is not a function'); });
+
+    await drafter.draftReply(email);
+
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    expect(logs.containing('Email search failed (query: object keys=[text])')).toHaveLength(1);
   });
 });

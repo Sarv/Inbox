@@ -1,6 +1,6 @@
-import type { ItemReputation, ReputationProvider, SenderReport } from '@sarvinbox/core';
+import { setSarvBaseUrl, type ItemReputation, type ReputationProvider, type SarvReputationDeps, type SenderReport } from '@sarvinbox/core';
 import Database from 'better-sqlite3';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * Blocklist settings -> the one process-wide lookup.
@@ -23,8 +23,19 @@ const h = vi.hoisted(() => ({
   queries: [] as Array<{ name: string; servers: string[] | null }>,
   /** Listed answers by query name; anything else is NXDOMAIN. */
   answers: {} as Record<string, string[]>,
-  fetchCalls: [] as Array<{ url: string; init: { body?: string; headers?: Record<string, string> } }>,
+  fetchCalls: [] as Array<{ url: string; init: { body?: string; headers?: Record<string, string>; redirect?: string } }>,
+  /** How many of the next Sarv requests fail as a connection reset would. */
+  fetchFailures: 0,
+  /** What the fake Sarv service answers a lookup with. */
+  sarvAnswer: { ips: [], domains: [] } as unknown,
   accounts: [] as Array<{ provider: string; email: string }>,
+  /** What main built each Sarv provider with, so main's own transport can be tested apart from core's. */
+  sarvDeps: [] as SarvReputationDeps[],
+}));
+// Spies, so a test can say the token store was never read and no token minted.
+const oauth = vi.hoisted(() => ({
+  listSignedInAccounts: vi.fn(async () => h.accounts),
+  getValidAccessToken: vi.fn(async (_provider: string, email: string) => `tok-${email}`),
 }));
 
 vi.mock('electron', () => ({
@@ -56,15 +67,27 @@ vi.mock('node:dns', () => ({
   },
 }));
 vi.mock('../../../../electron/services/net-fetch', () => ({
-  chromiumFetch: async (url: string, init: { body?: string; headers?: Record<string, string> }) => {
+  chromiumFetch: async (url: string, init: { body?: string; headers?: Record<string, string>; redirect?: string }) => {
     h.fetchCalls.push({ url, init });
-    return { ok: true, status: 200, json: async () => ({ ips: [], domains: [] }) };
+    if (h.fetchFailures > 0) {
+      h.fetchFailures -= 1;
+      throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    }
+    return { ok: true, status: 200, json: async () => h.sarvAnswer };
   },
 }));
-vi.mock('../../../../electron/services/oauth-service', () => ({
-  listSignedInAccounts: async () => h.accounts,
-  getValidAccessToken: async (_provider: string, email: string) => `tok-${email}`,
-}));
+vi.mock('../../../../electron/services/oauth-service', () => oauth);
+// The real provider, recording the deps main hands it.
+vi.mock('@sarvinbox/core', async (importOriginal) => {
+  const core = await importOriginal<typeof import('@sarvinbox/core')>();
+  class RecordingSarvReputationProvider extends core.SarvReputationProvider {
+    constructor(deps: SarvReputationDeps) {
+      super(deps);
+      h.sarvDeps.push(deps);
+    }
+  }
+  return { ...core, SarvReputationProvider: RecordingSarvReputationProvider };
+});
 
 import {
   DEFAULT_REPUTATION_SETTINGS,
@@ -76,6 +99,7 @@ import {
   SETTINGS_RETRY_MS,
   attachReputation,
   availableBlocklists,
+  blocklistProviderName,
   getReputationCache,
   getReputationSettings,
   linkReputationStage,
@@ -117,8 +141,22 @@ const wired = () => {
   return engine;
 };
 const asked = () => h.queries.map((q) => q.name);
+/**
+ * The reputation origin these tests configure — the only address the Sarv
+ * bearer may go to. No build has one (Sarv runs no such service yet), so each
+ * test starts with it set the way a dev build's override sets it.
+ */
+const SARV_REP = 'https://reputation.sarv.test';
+/** Every line the service logs at info or warn, as it would reach app.log. */
+const captureLog = () => {
+  const lines: Array<{ level: 'info' | 'warn'; line: string }> = [];
+  const info = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { lines.push({ level: 'info', line: args.map(String).join(' ') }); });
+  const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { lines.push({ level: 'warn', line: args.map(String).join(' ') }); });
+  return { lines, restore: () => { info.mockRestore(); warn.mockRestore(); } };
+};
 
 beforeEach(() => {
+  setSarvBaseUrl({ reputationBase: SARV_REP }); // before the reset, so no stale stage hears it
   resetReputationForTests();
   h.settings.clear();
   h.settingsUnreadable = false;
@@ -126,7 +164,12 @@ beforeEach(() => {
   h.queries = [];
   h.answers = {};
   h.fetchCalls = [];
+  h.fetchFailures = 0;
+  h.sarvAnswer = { ips: [], domains: [] };
   h.accounts = [];
+  h.sarvDeps = [];
+  oauth.listSignedInAccounts.mockClear();
+  oauth.getValidAccessToken.mockClear();
 });
 
 describe('readReputationSettings', () => {
@@ -263,14 +306,17 @@ describe('attachReputation', () => {
 
   // The Sarv service is the other provider of the ONE setting: asked as mail
   // arrives, with the user's own bearer — and then no list operator hears
-  // from this machine at all.
+  // from this machine at all. Behaviour changed (reputation-token fix): this
+  // used to send the bearer to whatever https address was saved; only Sarv's
+  // reputation origin is asked now, and never through a redirect.
   it('asks the Sarv service instead of any DNS zone when the settings name it', async () => {
-    store(saved({ provider: 'sarv', endpoint: 'https://rep.sarv.example' }));
+    store(saved({ provider: 'sarv', endpoint: SARV_REP }));
     h.accounts = [{ provider: 'sarv', email: 'rc@sarv.example' }];
     const engine = wired();
 
     await engine.lookup!({ ip: SENDER_IP, domains: ['sender.example'] });
-    expect(h.fetchCalls.map((c) => c.url)).toEqual(['https://rep.sarv.example/v1/reputation/lookup']);
+    expect(h.fetchCalls.map((c) => c.url)).toEqual([`${SARV_REP}/v1/reputation/lookup`]);
+    expect(h.fetchCalls[0]!.init.redirect).toBe('error');
     expect(h.fetchCalls[0]!.init.headers?.authorization).toBe('Bearer tok-rc@sarv.example');
     expect(JSON.parse(h.fetchCalls[0]!.init.body ?? '{}')).toEqual({ ips: [SENDER_IP], domains: ['sender.example'] });
     expect(asked()).toEqual([]);
@@ -539,7 +585,9 @@ describe('the one cache', () => {
 });
 
 describe('the report loop', () => {
-  const on = saved({ provider: 'sarv', endpoint: 'https://r.example', reports: true });
+  // Behaviour changed (reputation-token fix): reports go to Sarv's reputation
+  // origin only, so that is the address these settings name.
+  const on = saved({ provider: 'sarv', endpoint: SARV_REP, reports: true });
   const provider = (report = vi.fn<(report: SenderReport) => Promise<boolean>>().mockResolvedValue(true)): ReputationProvider & { report: typeof report } => ({
     name: 'sarv', lookup: async () => ({ provider: 'sarv', ips: new Map(), domains: new Map() }), report,
   });
@@ -576,7 +624,8 @@ describe('the report loop', () => {
     h.accounts = [{ provider: 'sarv', email: 'rc@sarv.example' }];
     reportSenderVerdict(verdict);
     await settle();
-    expect(h.fetchCalls.map((c) => c.url)).toEqual(['https://r.example/v1/reputation/report']);
+    expect(h.fetchCalls.map((c) => c.url)).toEqual([`${SARV_REP}/v1/reputation/report`]);
+    expect(h.fetchCalls[0]!.init.redirect).toBe('error');
     expect(JSON.parse(h.fetchCalls[0]!.init.body ?? '{}')).toEqual({ domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' });
   });
 
@@ -588,6 +637,481 @@ describe('the report loop', () => {
     reportSenderVerdict(verdict, { provider: p });
     await settle();
     expect(p.report).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Where the Sarv bearer goes. The address is a setting the renderer writes, and
+ * the bearer is also the Sarv mailbox's XOAUTH2 credential, so main asks Sarv's
+ * reputation origin or nobody — deciding before the token store is read — and
+ * a refused address is permanent until the settings change.
+ */
+describe('the Sarv bearer goes to Sarv’s reputation service only', () => {
+  const sarvAccount = { provider: 'sarv', email: 'rc@sarv.example' };
+
+  // Breaks (CASA): a renderer-written setting sends the Sarv mailbox token, and
+  // every arriving sender, to its own server.
+  it.each([
+    'https://rep.sarv.example',
+    'https://reputation.sarv.test.evil.example',
+    'https://evilsarv.com',
+    'https://user:pw@reputation.sarv.test',
+    'https://reputation.sarv.test:8443',
+  ])('asks nobody and mints no token when the saved address is %j', async (endpoint) => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint, links: true }));
+      h.accounts = [sarvAccount];
+      const engine = wired();
+
+      await expect(engine.lookup!({ ip: SENDER_IP, domains: ['sender.example'] })).resolves.toBeNull();
+      expect(h.fetchCalls).toEqual([]);
+      expect(oauth.listSignedInAccounts).not.toHaveBeenCalled();
+      expect(oauth.getValidAccessToken).not.toHaveBeenCalled();
+      expect(blocklistProviderName()).toBeNull();
+      expect(linkReputationStage()).toBeNull();
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: a user who chose Sarv to keep list operators out has their senders
+  // queried from this machine instead.
+  it('does not fall back to this computer’s DNS when the address is refused', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: 'https://rep.sarv.example', zones: [...DEFAULT_ZONES] }));
+      const engine = wired();
+
+      await engine.lookup!({ ip: SENDER_IP, domains: ['sender.example'] });
+      expect(asked()).toEqual([]);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: a per-message warn stalls the ingest event loop on a first sync, or
+  // app.log records credentials typed into the URL, its path or its query.
+  it('logs the refusal once per settings change, naming only the address’s origin', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: 'https://user:secret@evil.example:8443/steal?q=token' }));
+      const engine = wired();
+      for (let i = 0; i < 50; i += 1) await engine.lookup!({ ip: `185.199.108.${i + 1}` });
+      noteAppSettingChanged(SETTINGS_KEY); // the same settings, written again
+      reportSenderVerdict({ domain: 'spam.example', ip: null, verdict: 'spam' });
+
+      const warns = log.lines.filter((l) => l.level === 'warn').map((l) => l.line);
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain('(https://evil.example:8443) is not Sarv\'s');
+      expect(warns[0]).not.toMatch(/user|secret|steal|token/);
+
+      store(saved({ provider: 'sarv', endpoint: 'https://another.example' }));
+      noteAppSettingChanged(SETTINGS_KEY);
+      expect(log.lines.filter((l) => l.level === 'warn')).toHaveLength(2);
+      expect(log.lines.some((l) => l.line.includes('Blocklist lookups on'))).toBe(false);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: another provider's token (Gmail's restricted scope) or a second
+  // Sarv account's token is minted for the reputation service, the typed
+  // spelling rather than the checked origin is fetched, or a redirect can carry
+  // the bearer away.
+  it('asks with the first signed-in Sarv account’s bearer only, at the canonical origin, with no redirects', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: 'https://Reputation.Sarv.test/' }));
+      h.accounts = [
+        { provider: 'gmail', email: 'a@gmail.example' },
+        { provider: 'sarv', email: 'b@sarv.example' },
+        { provider: 'sarv', email: 'c@sarv.example' },
+      ];
+      const engine = wired();
+
+      await engine.lookup!({ ip: SENDER_IP });
+      expect(oauth.getValidAccessToken).toHaveBeenCalledTimes(1);
+      expect(oauth.getValidAccessToken).toHaveBeenCalledWith('sarv', 'b@sarv.example');
+      expect(h.fetchCalls.map((c) => [c.url, c.init.redirect, c.init.headers?.authorization])).toEqual([
+        [`${SARV_REP}/v1/reputation/lookup`, 'error', 'Bearer tok-b@sarv.example'],
+      ]);
+      expect(blocklistProviderName()).toBe('sarv');
+      // The info line names the origin asked, not what was typed.
+      expect(log.lines.some((l) => l.level === 'info' && l.line.includes(`the Sarv service at ${SARV_REP}`))).toBe(true);
+      expect(log.lines.some((l) => l.line.includes('Reputation.Sarv.test'))).toBe(false);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: main's own redirect rule, under core's, is dropped. A core change
+  // that let a redirect through would then carry the bearer to wherever
+  // Location points, and no other test would notice.
+  it('refuses redirects in main’s own transport, whatever the provider asks for', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: 'https://REPUTATION.sarv.test.:443/' }));
+      wired();
+
+      expect(h.sarvDeps).toHaveLength(1);
+      const deps = h.sarvDeps[0]!;
+      expect(deps.endpoint).toBe(SARV_REP); // the checked origin, not the typed spelling
+      const init = { method: 'POST', headers: {}, body: '{}', redirect: 'follow' } as unknown as Parameters<SarvReputationDeps['fetch']>[1];
+      await deps.fetch(`${SARV_REP}/v1/reputation/lookup`, init);
+      expect(h.fetchCalls.map((c) => c.init.redirect)).toEqual(['error']);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: the provider falls back to whatever token exists, or counts "not
+  // signed in" as an outage that pauses it after the user does sign in.
+  it('sends nothing, and mints no Gmail token, while only other providers are signed in', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: SARV_REP }));
+      h.accounts = [{ provider: 'gmail', email: 'a@gmail.example' }, { provider: 'microsoft', email: 'm@outlook.example' }];
+      const engine = wired();
+
+      for (let i = 0; i < 8; i += 1) await expect(engine.lookup!({ ip: SENDER_IP })).resolves.toBeNull();
+      expect(h.fetchCalls).toEqual([]);
+      expect(oauth.getValidAccessToken).not.toHaveBeenCalled();
+
+      h.accounts = [...h.accounts, sarvAccount];
+      await engine.lookup!({ ip: SENDER_IP });
+      expect(h.fetchCalls).toHaveLength(1);
+      expect(oauth.getValidAccessToken).toHaveBeenCalledWith('sarv', sarvAccount.email);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: a connection blip becomes hours of "no opinion" or a cached
+  // "clean", or the next message is not asked at all.
+  it('asks again on the next message after a network failure, and caches only a real answer', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: SARV_REP }));
+      h.accounts = [sarvAccount];
+      h.sarvAnswer = { ips: [{ ip: SENDER_IP, status: 'clean' }], domains: [] };
+      h.fetchFailures = 1;
+      const engine = wired();
+
+      await expect(engine.lookup!({ ip: SENDER_IP })).resolves.toBeNull();
+      expect(getReputationCache().count()).toBe(0);
+      await expect(engine.lookup!({ ip: SENDER_IP })).resolves.not.toBeNull();
+      expect(getReputationCache().count()).toBe(1);
+      await engine.lookup!({ ip: SENDER_IP });
+      expect(h.fetchCalls).toHaveLength(2); // the third came from the cache
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: fixing the address does nothing until a restart, or answers given
+  // while another address was saved survive the fix.
+  it('starts asking, with a cleared cache, as soon as a refused address is corrected', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: 'https://rep.sarv.example' }));
+      h.accounts = [sarvAccount];
+      const engine = wired();
+      await expect(engine.lookup!({ ip: SENDER_IP })).resolves.toBeNull();
+      getReputationCache().set('ip', SENDER_IP, { status: 'listed', hits: [{ list: 'Old', category: 'spam', detail: 'from before' }] }, 'sarv', Math.floor(Date.now() / 1000));
+
+      store(saved({ provider: 'sarv', endpoint: SARV_REP }));
+      noteAppSettingChanged(SETTINGS_KEY);
+      expect(getReputationCache().count()).toBe(0);
+      await engine.lookup!({ ip: SENDER_IP });
+      expect(h.fetchCalls.map((c) => c.url)).toEqual([`${SARV_REP}/v1/reputation/lookup`]);
+      expect(blocklistProviderName()).toBe('sarv');
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: pressing Report spam (or a bulk report, one call per domain) sends
+  // the bearer to the refused host, builds a provider for it, or logs a line
+  // per domain.
+  it('reports nothing, builds nothing and mints no token for a refused address', async () => {
+    const log = captureLog();
+    try {
+      const refused = saved({ provider: 'sarv', endpoint: 'https://rep.sarv.example', reports: true });
+      expect(reportsAllowed(refused)).toBe(false);
+      expect(reportsAllowed({ ...refused, endpoint: SARV_REP })).toBe(true);
+
+      const report = vi.fn<(report: SenderReport) => Promise<boolean>>().mockResolvedValue(true);
+      reportSenderVerdict({ domain: 'spam.example', ip: null, verdict: 'spam' }, { settings: refused, provider: { name: 'sarv', lookup: async () => ({ provider: 'sarv', ips: new Map(), domains: new Map() }), report } });
+
+      store(refused);
+      h.accounts = [sarvAccount];
+      for (let i = 0; i < 20; i += 1) reportSenderVerdict({ domain: `d${i}.example`, ip: null, verdict: 'spam' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(report).not.toHaveBeenCalled();
+      expect(h.fetchCalls).toEqual([]);
+      expect(oauth.listSignedInAccounts).not.toHaveBeenCalled();
+      expect(oauth.getValidAccessToken).not.toHaveBeenCalled();
+      expect(log.lines.filter((l) => l.level === 'warn')).toHaveLength(1); // the settings read, not each report
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: the release app.log records which sender the user reported.
+  it('logs that a verdict was reported, never the sender it was about', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: SARV_REP, reports: true }));
+      h.accounts = [sarvAccount];
+      reportSenderVerdict({ domain: 'reported-sender.example', ip: '203.0.113.7', verdict: 'spam' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(h.fetchCalls).toHaveLength(1);
+      expect(log.lines.some((l) => l.line.includes('Reported a spam verdict'))).toBe(true);
+      expect(log.lines.some((l) => /reported-sender|203\.0\.113\.7/.test(l.line))).toBe(false);
+
+      // A report the service did not accept is not claimed as sent.
+      const lines = log.lines.length;
+      const declined = vi.fn<(report: SenderReport) => Promise<boolean>>().mockResolvedValue(false);
+      reportSenderVerdict({ domain: 'x.example', ip: null, verdict: 'ham' }, { provider: { name: 'sarv', lookup: async () => ({ provider: 'sarv', ips: new Map(), domains: new Map() }), report: declined } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(declined).toHaveBeenCalledTimes(1);
+      expect(log.lines).toHaveLength(lines);
+    } finally {
+      log.restore();
+    }
+  });
+});
+
+/**
+ * A dev build's SARVINBOX_SARV_REPUTATION_BASE_URL is applied by
+ * initializeOAuth, which startup runs AFTER the first engine is wired, so the
+ * stage is first built against the registry as the build ships it. It has to
+ * follow the registry when that moves, not wait for the next settings write.
+ */
+describe('the stage follows the Sarv registry when it is re-pointed', () => {
+  const DEV_REP = 'https://rep.dev.example';
+  const sarvAccount = { provider: 'sarv', email: 'rc@sarv.example' };
+  afterEach(() => setSarvBaseUrl({ reputationBase: SARV_REP }));
+
+  // Breaks: the dev override does nothing on a normal launch. The dev service
+  // stays refused, with a "not Sarv's" warn, until the user edits the setting.
+  it('starts asking the dev service as soon as the registry names it', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: DEV_REP }));
+      h.accounts = [sarvAccount];
+      const engine = wired();
+      await expect(engine.lookup!({ ip: SENDER_IP })).resolves.toBeNull();
+      expect(h.fetchCalls).toEqual([]);
+
+      setSarvBaseUrl({ reputationBase: DEV_REP });
+      await engine.lookup!({ ip: SENDER_IP });
+      expect(h.fetchCalls.map((c) => c.url)).toEqual([`${DEV_REP}/v1/reputation/lookup`]);
+      expect(blocklistProviderName()).toBe('sarv');
+      expect(log.lines.some((l) => l.level === 'info' && l.line.includes(`the Sarv service at ${DEV_REP}`))).toBe(true);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: once a dev build re-points the registry, production keeps getting
+  // the dev sign-in's bearer from the old provider, and its answers stay cached.
+  it('stops asking the old origin, and forgets its answers, once the registry moves away from it', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: SARV_REP }));
+      h.accounts = [sarvAccount];
+      h.sarvAnswer = { ips: [{ ip: SENDER_IP, status: 'clean' }], domains: [] };
+      const engine = wired();
+      await engine.lookup!({ ip: SENDER_IP });
+      expect(getReputationCache().count()).toBe(1);
+      oauth.getValidAccessToken.mockClear();
+      const heard = vi.fn();
+      onReputationSettingsChanged(heard);
+
+      setSarvBaseUrl({ reputationBase: DEV_REP });
+      await expect(engine.lookup!({ ip: '203.0.113.50' })).resolves.toBeNull();
+      expect(h.fetchCalls).toHaveLength(1); // only the lookup made before the move
+      expect(oauth.getValidAccessToken).not.toHaveBeenCalled();
+      expect(getReputationCache().count()).toBe(0);
+      expect(blocklistProviderName()).toBeNull();
+      expect(heard).toHaveBeenCalledTimes(1); // the background pass hears whom it now asks
+      expect(log.lines.filter((l) => l.level === 'warn').map((l) => l.line)).toEqual([
+        expect.stringContaining(`(${SARV_REP}) is not Sarv's`),
+      ]);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: every registry write (startup sets it even when nothing changed)
+  // rebuilds the stage and throws away every cached answer.
+  it('keeps the stage and its answers when the registry is written but the origin does not change', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: SARV_REP }));
+      h.accounts = [sarvAccount];
+      h.sarvAnswer = { ips: [{ ip: SENDER_IP, status: 'clean' }], domains: [] };
+      const engine = wired();
+      await engine.lookup!({ ip: SENDER_IP });
+
+      setSarvBaseUrl({});
+      setSarvBaseUrl({ reputationBase: SARV_REP });
+      await engine.lookup!({ ip: SENDER_IP });
+      expect(h.fetchCalls).toHaveLength(1); // the second answer came from the cache
+      expect(h.sarvDeps).toHaveLength(1); // one provider, never rebuilt
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: a registry move rebuilds the local-DNS stage, clearing its answers,
+  // although the Sarv address plays no part in it.
+  it('leaves a local-DNS stage and its answers alone', async () => {
+    store(saved({ zones: ['spamhaus-zen'] }));
+    h.answers[`${REVERSED}.zen.spamhaus.org`] = ['127.0.0.2'];
+    const engine = wired();
+    await engine.lookup!({ ip: SENDER_IP });
+
+    setSarvBaseUrl({ reputationBase: DEV_REP });
+    await engine.lookup!({ ip: SENDER_IP });
+    expect(asked()).toEqual([`${REVERSED}.zen.spamhaus.org`]); // answered from the cache
+  });
+});
+
+/**
+ * Every build ships with no reputation origin: Sarv runs no such service yet.
+ * A Sarv choice saved when the tab offered it must then ask nobody, with one
+ * warn saying why, and never move to this computer's DNS.
+ */
+describe('with no Sarv reputation service configured, as every build ships', () => {
+  const sarvAccount = { provider: 'sarv', email: 'rc@sarv.example' };
+  const NO_SERVICE = "set to ask Sarv's reputation service, which this build has no address for";
+  beforeEach(() => setSarvBaseUrl({ reputationBase: '' }));
+
+  // Breaks: the Sarv bearer goes to whatever address the saved choice names
+  // (the address this fix first built in had no DNS record, so whoever
+  // registered it would have received it); or the lookups quietly move to
+  // this computer's DNS, asking list operators the user chose not to ask; or
+  // app.log does not say why blocklists are off.
+  it('asks nobody, mints no token, reports nothing, does not switch to DNS, and warns once why', async () => {
+    const log = captureLog();
+    try {
+      const choice = saved({ provider: 'sarv', endpoint: 'https://reputation.sarv.com', reports: true });
+      store(choice);
+      h.accounts = [sarvAccount];
+      const engine = wired();
+      await expect(engine.lookup!({ ip: SENDER_IP, domains: ['sender.example'] })).resolves.toBeNull();
+      await engine.lookup!({ ip: '203.0.113.50' });
+      reportSenderVerdict({ domain: 'spam.example', ip: null, verdict: 'spam' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(h.fetchCalls).toEqual([]);
+      expect(h.queries).toEqual([]);
+      expect(h.sarvDeps).toEqual([]);
+      expect(oauth.listSignedInAccounts).not.toHaveBeenCalled();
+      expect(oauth.getValidAccessToken).not.toHaveBeenCalled();
+      expect(blocklistProviderName()).toBeNull();
+      expect(reportsAllowed(choice)).toBe(false);
+      const warns = log.lines.filter((l) => l.level === 'warn').map((l) => l.line);
+      expect(warns).toEqual([expect.stringContaining(NO_SERVICE)]);
+      expect(warns[0]).not.toContain('reputation.sarv.com');
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: a Sarv choice with no address saved reads as plain "off" in
+  // app.log, so nothing says the choice itself is what keeps blocklists off.
+  it('gives the same reason when the Sarv choice has no address saved', () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: '' }));
+      wired();
+      expect(log.lines.filter((l) => l.level === 'warn').map((l) => l.line)).toEqual([expect.stringContaining(NO_SERVICE)]);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: blocklists turned off, or set to this computer's DNS, start
+  // warning about a Sarv service they never asked for.
+  it('says nothing about Sarv when the switch is off or local DNS is chosen', () => {
+    const log = captureLog();
+    try {
+      store(saved({ provider: 'sarv', endpoint: '', enabled: false }));
+      wired();
+      store(saved({ zones: ['spamhaus-zen'] }));
+      noteAppSettingChanged(SETTINGS_KEY);
+      expect(log.lines.some((l) => l.line.includes(NO_SERVICE))).toBe(false);
+      expect(blocklistProviderName()).toBe('local-dnsbl');
+    } finally {
+      log.restore();
+    }
+  });
+});
+
+/** What the service logs about its own failures: the failure's code, never what the user typed. */
+describe('its own failures in the log', () => {
+  // Breaks: whatever was typed into the resolver field (node's message quotes
+  // it) reaches the release app.log.
+  it('names how many resolvers were unusable and why, not what was typed', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ servers: ['10.0.0.1', 'office-dns.corp.example'] }));
+      wired();
+      const warns = log.lines.filter((l) => l.level === 'warn').map((l) => l.line);
+      expect(warns).toEqual([expect.stringContaining('Blocklist resolvers not usable (2 named): ERR_INVALID_IP_ADDRESS')]);
+      expect(warns[0]).not.toMatch(/office-dns|10\.0\.0\.1/);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: an unreadable store's or a closed cache's error message (which can
+  // carry a file path or SQL) reaches the release app.log.
+  it('names only the class of a failed settings read or cache clear', async () => {
+    const log = captureLog();
+    try {
+      h.settingsUnreadable = true;
+      wired();
+      noteAppSettingChanged(SETTINGS_KEY); // still unreadable: said once, not per read
+      h.settingsUnreadable = false;
+      store(saved({ zones: ['spamcop'] }));
+      noteAppSettingChanged(SETTINGS_KEY);
+      (h.db as Database.Database).close();
+      store(saved({ zones: ['spamhaus-zen'] }));
+      noteAppSettingChanged(SETTINGS_KEY);
+
+      const warns = log.lines.filter((l) => l.level === 'warn').map((l) => l.line);
+      expect(warns).toEqual([
+        expect.stringMatching(/Blocklist settings unreadable — asking nobody until they can be read: Error$/),
+        expect.stringMatching(/Blocklist cache not cleared: TypeError$/),
+      ]);
+      expect(warns.join('\n')).not.toMatch(/not a database|connection is not open/);
+    } finally {
+      log.restore();
+    }
+  });
+
+  // Breaks: the info line stops saying which resolvers ask, which is how a
+  // network an operator refuses is told from a list that is down. They are
+  // logged only once node has accepted each as an address, so they are never
+  // free text (see the unusable case above).
+  it('names the resolvers it asks through once they are usable', async () => {
+    const log = captureLog();
+    try {
+      store(saved({ zones: ['spamhaus-zen'], servers: ['10.0.0.1', '10.0.0.2'], links: true }));
+      wired();
+      expect(log.lines.filter((l) => l.level === 'info').map((l) => l.line)).toEqual([
+        expect.stringContaining('Blocklist lookups on: spamhaus-zen via 10.0.0.1, 10.0.0.2, link domains included'),
+      ]);
+    } finally {
+      log.restore();
+    }
   });
 });
 

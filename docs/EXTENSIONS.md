@@ -448,6 +448,12 @@ context.exports             // the functions your declared capabilities point at
 it. Everything else is always present and refuses politely without the
 permission.
 
+`context.log` and `console.*` write to the app's log file, within a per-extension
+budget. Warnings and errors are always written. Info and debug lines are
+written only in a development build, or in a release when the app is started
+with `SARV_DEBUG_EXTENSIONS=1`: an extension often holds mail, and the log file
+must not. Never log the mail you were given, in any case.
+
 `context.events` needs `email:read` to subscribe to anything, because the bus says
 what is happening in the mailbox and `email:synced` carries the whole message.
 Extensions listen and cannot emit: the app acts on these events, and must not be able

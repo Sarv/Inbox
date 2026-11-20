@@ -1,7 +1,8 @@
 import { BLOCKLISTS } from '@sarv-in/mailguard/reputation';
 import { normalizeBlocklistEndpoint } from '@sarvinbox/core/blocklist-prefs';
+import { matchReputationOrigin } from '@sarvinbox/core/token-destinations';
 import { CalendarClock, Cloud, Globe, Info, Link2, Server } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { getReputationPrefs, setReputationPrefs } from '../../store/helpers';
 import { Tooltip } from '../Tooltip';
@@ -34,11 +35,16 @@ import { Tooltip } from '../Tooltip';
  * `LINKED_CJS_DEPS` (apps/desktop/vite/linked-packages.ts) to keep it in Vite's
  * pre-bundle. Without that the dev server serves it unconverted and this tab
  * takes the whole window down; see docs/mailguard.md.
+ *
+ * Sarv's reputation service is offered only when main has an address for it.
+ * No build does until the service runs, so the choice is hidden; a Sarv choice
+ * saved before then stays shown, off, with the reason, so it can be changed.
  */
 export function BlocklistsTab() {
   const [prefs, setPrefs] = useState(getReputationPrefs);
   const [serversDraft, setServersDraft] = useState(() => prefs.servers.join(', '));
   const [endpointDraft, setEndpointDraft] = useState(() => prefs.endpoint);
+  const sarvOrigin = useSarvReputationOrigin();
 
   const save = (next: typeof prefs) => {
     setPrefs(next);
@@ -69,7 +75,14 @@ export function BlocklistsTab() {
     if (endpoint) setEndpointDraft(endpoint);
     save({ ...prefs, endpoint });
   };
-  const endpointRejected = endpointDraft.trim() !== '' && normalizeBlocklistEndpoint(endpointDraft) === '';
+  const draftEndpoint = normalizeBlocklistEndpoint(endpointDraft);
+  const endpointRejected = endpointDraft.trim() !== '' && draftEndpoint === '';
+  // https, but not Sarv's reputation service: main sends the Sarv sign-in to
+  // that one origin only, so it asks nobody. Checked against the origin main
+  // reported, by the rule main applies. The address stays as typed so the user
+  // can see what to fix.
+  const sarvOffered = typeof sarvOrigin === 'string';
+  const endpointNotSarv = sarvOffered && draftEndpoint !== '' && matchReputationOrigin(draftEndpoint, sarvOrigin) === null;
 
   const sarv = prefs.provider === 'sarv';
 
@@ -84,9 +97,11 @@ export function BlocklistsTab() {
             </p>
             <p>
               Every other spam check reads the message itself. This one sends the delivering
-              server&rsquo;s address, and the sender&rsquo;s domains, to whoever you choose below — a
-              blocklist operator over DNS, or Sarv&rsquo;s reputation service — as each message
-              arrives, so a listed sender is filed before you see it. That operator learns who
+              server&rsquo;s address, and the sender&rsquo;s domains,{' '}
+              {sarvOffered || sarv
+                ? <>to whoever you choose below — a blocklist operator over DNS, or Sarv&rsquo;s reputation service —</>
+                : <>to the blocklist operators below, over DNS,</>}
+              {' '}as each message arrives, so a listed sender is filed before you see it. That operator learns who
               writes to you, as it happens. Untick a list, or the switch, and it is not asked.
             </p>
             <p>
@@ -154,6 +169,7 @@ export function BlocklistsTab() {
               </span>
             </span>
           </label>
+          {(sarvOffered || sarv) && (
           <label className="flex items-start gap-3 px-3 py-3 text-sm cursor-pointer hover:bg-accent/40 transition-colors">
             <input
               type="radio"
@@ -167,11 +183,13 @@ export function BlocklistsTab() {
             <span className="flex-1">
               <span className="font-medium">Sarv reputation service</span>
               <span className="block text-xs text-muted-foreground">
-                Sarv&rsquo;s service is asked with your Sarv sign-in, so lookups never go to list
-                operators from your machine.
+                {sarvOrigin === null
+                  ? 'Not available yet. Nothing is asked while this is chosen.'
+                  : 'Sarv’s service is asked with your Sarv sign-in, so lookups never go to list operators from your machine.'}
               </span>
             </span>
           </label>
+          )}
         </div>
         {prefs.enabled && !sarv && prefs.zones.length === 0 && (
           <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
@@ -181,6 +199,15 @@ export function BlocklistsTab() {
       </section>
 
       {sarv ? (
+        sarvOrigin === undefined ? null : sarvOrigin === null ? (
+          <section>
+            <p className="rounded-lg border border-border bg-card p-4 text-sm text-amber-600 dark:text-amber-400">
+              Sarv&rsquo;s reputation service is not available yet, so no blocklist is asked and your
+              Sarv sign-in is not used. Choose This computer&rsquo;s DNS above to use the blocklists,
+              or turn the switch off.
+            </p>
+          </section>
+        ) : (
         <section>
           <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">
             Sarv service
@@ -192,7 +219,7 @@ export function BlocklistsTab() {
                 value={endpointDraft}
                 onChange={(event) => setEndpointDraft(event.target.value)}
                 onBlur={commitEndpoint}
-                placeholder="https://reputation.sarv.com"
+                placeholder={sarvOrigin}
                 aria-label="Sarv reputation service address"
                 className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
@@ -200,6 +227,11 @@ export function BlocklistsTab() {
             {endpointRejected ? (
               <p className="text-xs text-amber-600 dark:text-amber-400">
                 The address has to start with https:// — nothing is asked until it does.
+              </p>
+            ) : endpointNotSarv ? (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Only Sarv&rsquo;s reputation service, {sarvOrigin}, can be asked with your Sarv
+                sign-in. Nothing is asked until the address is Sarv&rsquo;s.
               </p>
             ) : (
               !prefs.endpoint && (
@@ -224,6 +256,7 @@ export function BlocklistsTab() {
             </label>
           </div>
         </section>
+        )
       ) : (
         <>
           <section>
@@ -317,4 +350,31 @@ export function BlocklistsTab() {
       </section>
     </div>
   );
+}
+
+/**
+ * Where Sarv's reputation service answers, as main's registry has it: the
+ * origin, null when this build has none (no build does until the service runs)
+ * or main could not be asked, or undefined until main has answered. Asked of
+ * main because only its registry carries a dev build's
+ * SARVINBOX_SARV_REPUTATION_BASE_URL; this window's copy never does.
+ */
+function useSarvReputationOrigin(): string | null | undefined {
+  const [origin, setOrigin] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => window.electronAPI.oauth.listProviders())
+      .then((res) => {
+        const sarv = res.success ? res.data?.find((p) => p.id === 'sarv') : undefined;
+        if (live) setOrigin(sarv?.reputationOrigin ?? null);
+      })
+      .catch(() => {
+        if (live) setOrigin(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return origin;
 }

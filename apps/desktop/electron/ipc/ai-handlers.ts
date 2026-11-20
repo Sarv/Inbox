@@ -7,6 +7,8 @@
 import {
   conversationSenders,
   createLogger,
+  errorDiagnostic,
+  setFieldNamesForLog,
   type FirstSplitClearAllResult,
   type FirstSplitClearCounts,
   type FirstSplitGetResult,
@@ -25,6 +27,9 @@ import { clearPipelineAIConfig } from '../services/pipeline-ai-config-store';
 import { onCategoryDefinitionUpserted } from '../services/unified-pipeline-service';
 import { requireStorage } from '../shared';
 const logger = createLogger('ai-handlers');
+
+/** The search fields the 'Executing structured query' line reports itself (as set/none, or a number). */
+const SEARCH_LOGGED_FIELDS = ['folderId', 'aiCategory', 'limit', 'offset'] as const;
 
 /**
  * Every initialized account's storage (active first, deduped). Category badges
@@ -591,7 +596,14 @@ export function registerAIHandlers(): void {
     ) => {
       try {
         const storage = requireStorage();
-        logger.info('[AI Search] Executing structured query:', searchQuery);
+        // Which filters are set, never what they hold: the words, senders,
+        // recipients and labels are what the user typed into search, and a
+        // custom category's slug is made from the name the user gave it.
+        logger.info(
+          `[AI Search] Executing structured query: fields=${setFieldNamesForLog(searchQuery, SEARCH_LOGGED_FIELDS)} ` +
+            `folder=${searchQuery.folderId ? 'set' : 'all'} aiCategory=${searchQuery.aiCategory ? 'set' : 'none'} ` +
+            `limit=${Number.isFinite(searchQuery.limit) ? searchQuery.limit : 'default'} offset=${Number.isFinite(searchQuery.offset) ? searchQuery.offset : 0}`,
+        );
 
         // Resolve folder path from folderId
         let folderPath: string | undefined;
@@ -633,10 +645,11 @@ export function registerAIHandlers(): void {
           sortOrder: 'desc',
         });
 
-        logger.info(`[AI Search] Found ${emails.length} results (folder=${folderPath || 'all'}, aiCategory=${searchQuery.aiCategory || 'none'})`);
+        logger.info(`[AI Search] Found ${emails.length} results (folder=${folderPath || 'all'}, aiCategory=${searchQuery.aiCategory ? 'set' : 'none'})`);
         return { success: true, data: emails };
       } catch (error) {
-        logger.error('[AI Search] Error:', error);
+        // A full-text search error names the query's tokens: class and code only.
+        logger.error('[AI Search] Error:', errorDiagnostic(error));
         return { success: false, error: (error as Error).message };
       }
     }
@@ -680,7 +693,8 @@ export function registerAIHandlers(): void {
         });
         return { success: true, data: total };
       } catch (error) {
-        logger.error('[AI Search] Count error:', error);
+        // The same query as ai:search, so the same rule: class and code only.
+        logger.error('[AI Search] Count error:', errorDiagnostic(error));
         return { success: false, error: (error as Error).message };
       }
     }

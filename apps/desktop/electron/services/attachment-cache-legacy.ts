@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { createLogger, parseAttachmentNames, resolveWithinDir, safeFilename } from '@sarvinbox/core';
+import { createLogger, errorDiagnostic, parseAttachmentNames, resolveWithinDir, safeFilename } from '@sarvinbox/core';
 
 import { readRegistryAccounts } from './accounts-registry';
 import { ensureAccountRuntime } from './accounts-runtime';
@@ -105,14 +105,15 @@ async function retireLegacyEmail(accountId: string, email: LegacyEmail, dir: str
       } catch (error) {
         // Never cached, or already moved by an open of the draft: nothing to keep.
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        // Unreadable right now (permissions, I/O): it may be the only copy.
-        logger.warn('[attachment-cache] could not read a legacy draft attachment; keeping it for the next launch', error);
+        // Unreadable right now (permissions, I/O): it may be the only copy. Its
+        // code only: Node's message quotes the path, which ends in the file's name.
+        logger.warn('[attachment-cache] could not read a legacy draft attachment; keeping it for the next launch', errorDiagnostic(error));
         return false;
       }
       try {
         await storeCachedAttachment(accountId, email.id, filename, content);
       } catch (error) {
-        logger.warn('[attachment-cache] could not seal a legacy draft attachment; keeping it for the next launch', error);
+        logger.warn('[attachment-cache] could not seal a legacy draft attachment; keeping it for the next launch', errorDiagnostic(error));
         return false;
       } finally {
         content.fill(0);

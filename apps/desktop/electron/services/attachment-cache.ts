@@ -5,6 +5,7 @@ import * as path from 'path';
 import {
   createLogger,
   deriveSubkey,
+  errorDiagnostic,
   isSealedBytes,
   openSealedBytes,
   parseAttachmentNames,
@@ -315,7 +316,6 @@ export async function getOrCacheAttachment(
   // believe (see above).
   await ensureCacheGeneration(attachmentCacheRoot());
 
-  const safeName = safeFilename(filename);
   const cachedPath = cacheEntryPath(accountId, emailId, filename, !!uid);
 
   // Return cached file if it exists
@@ -344,8 +344,10 @@ export async function getOrCacheAttachment(
   const content: Buffer = partContent?.content
     ?? (await syncEngine.fetchAttachment(emailId, folderPath, uid, filename)).content;
   if (content.length > MAX_ATTACHMENT_BYTES) {
+    // No file name: the attachment IPC handlers log their error whole, and
+    // the name comes from the mail. The user knows which file they opened.
     throw new AttachmentError(
-      `Attachment "${safeName}" is ${Math.round(content.length / (1024 * 1024))} MB, ` +
+      `This attachment is ${Math.round(content.length / (1024 * 1024))} MB, ` +
         `over the ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB limit`,
       413,
     );
@@ -684,8 +686,9 @@ async function reconcileStoredAttachmentSize(
     const next = [...stored];
     next[index] = actualBytes;
     await storage.updateEmail(email.id, { attachmentSizes: JSON.stringify(next) });
+    // The attachment's position, not its name (which comes from the mail).
     logger.info(
-      `[attachment-cache] corrected stored size for "${filename}": ` +
+      `[attachment-cache] corrected stored size of attachment ${index} on email ${email.id}: ` +
         `${String(stored[index])} -> ${actualBytes} bytes`,
     );
   } catch (error) {
@@ -693,9 +696,14 @@ async function reconcileStoredAttachmentSize(
   }
 }
 
-/** Message for a failed attachment request, without leaking internals. */
+/**
+ * Message for a failed attachment request, without leaking internals. The
+ * message goes back to the renderer as it is; the log line gets the error's
+ * class and code only, because an unexpected failure can quote the
+ * attachment's name (which comes from the mail) or other mail text.
+ */
 export function attachmentErrorMessage(error: unknown): string {
   if (error instanceof AttachmentError) return error.message;
-  logger.error('[attachment-cache] unexpected failure:', error);
+  logger.error('[attachment-cache] unexpected failure:', errorDiagnostic(error));
   return (error as Error)?.message ?? 'Attachment could not be read';
 }

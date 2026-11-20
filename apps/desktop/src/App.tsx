@@ -1,4 +1,6 @@
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
 import { escapeHtml } from '@sarvinbox/core/html-escape';
+import { createLogger } from '@sarvinbox/core/logger';
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -65,6 +67,11 @@ import type { LocalCalendarOpenEvent } from './types/local-calendar';
 import { shouldShowOnboarding, shouldShowNoAccountEmptyState } from './utils/app-gates';
 import { openInboxAssistantDraft } from './utils/inbox-assistant-draft';
 import { setImageTrustAccount } from './utils/remote-images';
+
+// The extension AI bridge: prompts an extension built from mail go to the
+// provider here, and a provider's error can carry its response body, which can
+// quote that mail. Lines name the request and the failure's class, never text.
+const aiBridgeLog = createLogger('AIBridge');
 
 function App() {
   const attachmentActions = useAttachmentActions();
@@ -612,7 +619,7 @@ function App() {
     // When extensions in main process need AI, they send requests here
     if (window.electronAPI?.extensions?.onAICompleteRequest) {
       window.electronAPI.extensions.onAICompleteRequest(async (request) => {
-        console.log('[AI Bridge] Received AI completion request:', request.requestId);
+        aiBridgeLog.info(`received an AI completion request ${request.requestId}`);
         try {
           const result = await makeAICompletion({
             systemPrompt: request.systemPrompt,
@@ -625,7 +632,7 @@ function App() {
             result,
           });
         } catch (error) {
-          console.error('[AI Bridge] AI completion failed:', error);
+          aiBridgeLog.error(`AI completion failed for request ${request.requestId}`, errorDiagnostic(error));
           window.electronAPI.extensions.sendAICompleteResponse({
             requestId: request.requestId,
             success: false,

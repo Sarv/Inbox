@@ -1819,9 +1819,9 @@ describe('setupAICategorizationListeners', () => {
     expect(state.removeDraftFromViews).toHaveBeenCalledWith('r1');
   });
 
-  it('mirrors main-process categorization logs at the matching console level', () => {
+  it('mirrors main-process categorization logs at the matching console level in a dev build', () => {
     // The categorization service runs in main, so without this the devtools
-    // console is empty and AI failures are invisible.
+    // console is empty and AI failures are invisible. (vitest runs in DEV.)
     const { handlers } = setup();
     handlers.log({ level: 'error', message: 'bad json' });
     expect(consoleSpies.error).toHaveBeenCalledWith('[main:cat]', 'bad json');
@@ -1829,6 +1829,21 @@ describe('setupAICategorizationListeners', () => {
     expect(consoleSpies.warn).toHaveBeenCalledWith('[main:cat]', 'retrying');
     handlers.log({ level: 'info', message: 'done' });
     expect(consoleSpies.log).toHaveBeenCalledWith('[main:cat]', 'done');
+  });
+
+  // Breaks: a release writes every main categorization line to app.log TWICE —
+  // main writes it, then this relay's console call is forwarded back into the
+  // same file — failure lines that quote a model's answer included.
+  it('does not relay main categorization logs in a release build', () => {
+    vi.stubEnv('DEV', false);
+    try {
+      const { handlers } = setup();
+      expect(handlers.log).toBeUndefined();
+      // The other channels are still wired.
+      expect(handlers.progress).toBeTypeOf('function');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('tolerates a bridge that only exposes the required aiCategorization channels', () => {

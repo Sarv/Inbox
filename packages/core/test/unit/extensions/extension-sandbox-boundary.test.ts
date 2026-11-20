@@ -56,8 +56,9 @@ import { UnsupportedNodeApiError } from '../../../src/extensions/runtime/unsuppo
 import { ExtensionState, type ExtensionContext, type ExtensionInfo, type ExtensionManifest, type ExtensionPermission } from '../../../src/extensions/types';
 import { createEventBus } from '../../../src/pipeline/event-bus';
 import type { WorkflowContext } from '../../../src/pipeline/types';
+import { captureLogs } from '../../../src/test-support/log-capture';
 import type { EmailRecord } from '../../../src/types/models';
-import { setLogSink } from '../../../src/utils/logger';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 let workDir: string;
 
@@ -226,6 +227,33 @@ describe('a bridge believes nothing about who sent a message', () => {
     setLogSink(null);
 
     expect(lines.find((line) => line.includes('FORGED'))).toBe('[Extension:attacker] FORGED');
+    await bridge.shutdown();
+  });
+
+  // Breaks: an extension's ctx.log.info(input) writes the mail it was handed
+  // (a thread to summarise) into a release app.log, which runs at 'info'; or
+  // SARV_DEBUG_EXTENSIONS=1 no longer shows an author their own lines; or a
+  // warning stops reaching the log with them.
+  it('keeps ctx.log info lines out of a release log unless SARV_DEBUG_EXTENSIONS=1', async () => {
+    const SENTINEL = 'SENTINEL-thread-about-Jane-payslip';
+    const { channel, far } = hostileChannel();
+    const bridge = bridgeFor('mine', channel, contextFor('mine', []));
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }, { level: 'info' });
+    try {
+      vi.stubEnv('SARV_DEBUG_EXTENSIONS', '');
+      far.post({ type: 'log', extensionId: 'mine', level: 'info', message: `summary of ${SENTINEL}` });
+      far.post({ type: 'log', extensionId: 'mine', level: 'warn', message: 'quota low' });
+      await vi.waitFor(() => expect(logs.containing('quota low')).toHaveLength(1));
+      expect(logs.containing(SENTINEL)).toEqual([]);
+
+      vi.stubEnv('SARV_DEBUG_EXTENSIONS', '1');
+      far.post({ type: 'log', extensionId: 'mine', level: 'info', message: `summary of ${SENTINEL}` });
+      await vi.waitFor(() => expect(logs.containing(SENTINEL)).toHaveLength(1));
+      expect(logs.containing(SENTINEL)[0]).toBe(`[INFO] [extension-bridge] [Extension:mine] summary of ${SENTINEL}`);
+    } finally {
+      logs.stop();
+      vi.unstubAllEnvs();
+    }
     await bridge.shutdown();
   });
 

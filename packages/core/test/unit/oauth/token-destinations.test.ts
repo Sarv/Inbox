@@ -1,13 +1,17 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   getOAuthProvider,
   setSarvBaseUrl,
 } from '../../../src/oauth/providers';
 import {
+  allowedSarvReputationOrigin,
+  describeEndpointOrigin,
   isOAuthMailHostAllowed,
   isSarvAIEndpointAllowed,
+  matchReputationOrigin,
   oauthMailHostsFor,
+  sarvReputationOrigin,
 } from '../../../src/oauth/token-destinations';
 
 // Where main may send an OAuth bearer. The host / baseUrl arrives from the
@@ -188,5 +192,181 @@ describe('isSarvAIEndpointAllowed — a Sarv bearer only goes to Sarv AI', () =>
   it('does not treat the configured API base as an AI endpoint', () => {
     setSarvBaseUrl({ apiBase: 'https://api.example.test' });
     expect(isSarvAIEndpointAllowed('https://api.example.test/edge/v1/llm')).toBe(false);
+  });
+});
+
+describe('sarvReputationOrigin — a Sarv bearer only goes to Sarv’s reputation service', () => {
+  // No build has a reputation origin (Sarv runs no such service yet), so these
+  // tests configure one the way a dev build's override does. `.test` never
+  // resolves, so the fixture cannot pass for a real service.
+  const PRODUCTION = 'https://reputation.sarv.test';
+  beforeEach(() => {
+    setSarvBaseUrl({ reputationBase: PRODUCTION });
+  });
+  afterEach(() => {
+    // Back to the shipped state: no origin (the AI block's reset leaves this one alone).
+    setSarvBaseUrl({ reputationBase: '' });
+  });
+
+  // Breaks: the Sarv reputation service stops being asked for a user who typed
+  // its address in another legal spelling, or the request goes to the typed
+  // spelling rather than the checked origin.
+  it.each([
+    'https://reputation.sarv.test',
+    'https://reputation.sarv.test/',
+    'https://REPUTATION.Sarv.test',
+    'https://reputation.sarv.test.',
+    'https://reputation.sarv.test:443',
+    ' https://reputation.sarv.test/ ',
+    'https:\\\\reputation.sarv.test',
+    'https://reputation%2Esarv.test',
+    'https://reputation.sarv.test?',
+  ])('allows %j and answers the canonical origin', (url) => {
+    expect(sarvReputationOrigin(url)).toBe(PRODUCTION);
+  });
+
+  // Breaks (CASA): the Sarv token, which is also the mailbox's XOAUTH2
+  // credential, is POSTed to a host that only looks like Sarv's, or to another
+  // Sarv API it must not reach.
+  it.each([
+    'https://reputation.sarv.test.evil.example',
+    'https://reputation.sarv.test@evil.example',
+    'https://evilsarv.com',
+    'https://sarv.com',
+    'https://x.reputation.sarv.test',
+    'https://reputation.sarv.test..',
+    'https://reputation-sarv.com',
+    'https://reputat\u0456on.sarv.com', // Cyrillic і: WHATWG makes it xn--reputaton-19h.sarv.com
+    'https://xn--reputaton-19h.sarv.com',
+    'https://ai.sarv.com',
+    'https://oauth.sarv.com',
+    'https://jpr1-ai-edge.sarv.com',
+  ])('refuses the lookalike or other Sarv host %j', (url) => {
+    expect(sarvReputationOrigin(url)).toBeNull();
+  });
+
+  // Breaks: the token goes out in the clear, to another service on the same
+  // host, with credentials carried in the URL (whose origin equals the allowed
+  // one), or to a path that is not the reputation API.
+  it.each([
+    'http://reputation.sarv.test',
+    'https://reputation.sarv.test:8443',
+    'https://user:pw@reputation.sarv.test',
+    'https://user@reputation.sarv.test',
+    'https://:pw@reputation.sarv.test',
+    'https://reputation.sarv.test/v1',
+    'https://reputation.sarv.test/v1/reputation/lookup',
+    'https://reputation.sarv.test/../admin',
+    'https://reputation.sarv.test/%2e%2e/admin',
+    'https://reputation.sarv.test?x=1',
+    'https://reputation.sarv.test#f',
+    'ftp://reputation.sarv.test',
+    'not a url',
+    '',
+    '   ',
+  ])('refuses the wrong transport or shape %j', (url) => {
+    expect(sarvReputationOrigin(url)).toBeNull();
+  });
+
+  // Breaks: a value that is not even a string (a hand-edited settings blob)
+  // throws on the ingest path, or passes.
+  it.each([undefined, null, 42, {}, ['https://reputation.sarv.test'], new URL('https://reputation.sarv.test')])(
+    'refuses the non-string %p',
+    (value) => {
+      expect(sarvReputationOrigin(value)).toBeNull();
+    },
+  );
+
+  // Breaks: a dev build cannot reach a local reputation service, or the dev
+  // override widens into a neighbouring origin (or keeps production allowed).
+  it('allows the configured dev origin exactly and nothing near it', () => {
+    setSarvBaseUrl({ reputationBase: 'http://localhost:8787' });
+    expect(allowedSarvReputationOrigin()).toBe('http://localhost:8787');
+    expect(sarvReputationOrigin('http://localhost:8787')).toBe('http://localhost:8787');
+    expect(sarvReputationOrigin('http://LOCALHOST:8787/')).toBe('http://localhost:8787');
+    expect(sarvReputationOrigin('http://localhost:8788')).toBeNull();
+    expect(sarvReputationOrigin('http://127.0.0.1:8787')).toBeNull();
+    expect(sarvReputationOrigin('https://localhost:8787')).toBeNull();
+    expect(sarvReputationOrigin(PRODUCTION)).toBeNull();
+  });
+
+  // Breaks: a malformed configured base (a path, credentials, another scheme)
+  // matches something, or the settings screen names it as Sarv's address.
+  it.each([
+    'http://localhost:8787/rep',
+    'http://user:pw@localhost:8787',
+    'file:///tmp/rep',
+    'not a url',
+  ])('allows nothing when the configured base %j is not a bare origin', (base) => {
+    setSarvBaseUrl({ reputationBase: base });
+    expect(allowedSarvReputationOrigin()).toBeNull();
+    expect(sarvReputationOrigin(base)).toBeNull();
+    expect(sarvReputationOrigin('http://localhost:8787')).toBeNull();
+  });
+
+  // Breaks: a build sends the Sarv bearer to a reputation address while Sarv
+  // runs no such service, whatever the settings name (the made-up default this
+  // replaced had no DNS record, so anyone who registered it got the token).
+  it('allows nothing once no origin is configured, which is how every build ships', () => {
+    setSarvBaseUrl({ reputationBase: '' });
+    expect(allowedSarvReputationOrigin()).toBeNull();
+    expect(sarvReputationOrigin(PRODUCTION)).toBeNull();
+    expect(sarvReputationOrigin('https://reputation.sarv.com')).toBeNull();
+    expect(sarvReputationOrigin('')).toBeNull();
+  });
+});
+
+describe('matchReputationOrigin — the same rule against an origin main reported', () => {
+  const REPORTED = 'https://rep.dev.example';
+
+  // Breaks: the Blocklists tab warns about the right address in another legal
+  // spelling, or calls a lookalike Sarv's (main would refuse it, so the user
+  // would believe blocklists are on while nothing is asked).
+  it('accepts the reported origin in any legal spelling and answers it canonically', () => {
+    for (const url of [REPORTED, 'https://REP.dev.example/', ' https://rep.dev.example.:443 ']) {
+      expect(matchReputationOrigin(url, REPORTED)).toBe(REPORTED);
+    }
+  });
+
+  it.each([
+    'https://rep.dev.example.evil.example',
+    'https://x.rep.dev.example',
+    'http://rep.dev.example',
+    'https://rep.dev.example:8443',
+    'https://user:pw@rep.dev.example',
+    'https://rep.dev.example/v1',
+  ])('refuses %j', (url) => {
+    expect(matchReputationOrigin(url, REPORTED)).toBeNull();
+  });
+
+  // Breaks: with no origin reported (the shipped state, or main could not be
+  // asked) the tab treats some typed address as Sarv's.
+  it.each([null, undefined, '', 'not a url', 'https://rep.dev.example/path', 42])(
+    'allows nothing when the reported origin is %j',
+    (allowed) => {
+      expect(matchReputationOrigin(REPORTED, allowed)).toBeNull();
+    },
+  );
+
+  it('refuses a typed value that is not a string', () => {
+    expect(matchReputationOrigin(42, REPORTED)).toBeNull();
+    expect(matchReputationOrigin(new URL(REPORTED), REPORTED)).toBeNull();
+  });
+});
+
+describe('describeEndpointOrigin — a refused destination in a log line', () => {
+  // Breaks: app.log records credentials typed into the URL, the path or query
+  // (which may carry anything), or a forged line from a raw value.
+  it('keeps the origin and drops credentials, path, query and fragment', () => {
+    expect(describeEndpointOrigin('https://user:secret@evil.example:8443/a/b?token=x#f')).toBe('https://evil.example:8443');
+    expect(describeEndpointOrigin(' https://Evil.Example/ ')).toBe('https://evil.example');
+  });
+
+  // Breaks: a missing or garbled address is logged raw, or throws.
+  it('names a missing or unparseable value without quoting it', () => {
+    expect(describeEndpointOrigin(undefined)).toBe('(none)');
+    expect(describeEndpointOrigin('  ')).toBe('(none)');
+    expect(describeEndpointOrigin(42)).toBe('(none)');
+    expect(describeEndpointOrigin('not a url\nFAKE LOG LINE')).toBe('(not a URL)');
   });
 });

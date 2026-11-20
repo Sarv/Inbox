@@ -27,7 +27,7 @@ import type { ExtensionContextImpl } from '../extension-api';
 import type { AntivirusScanSubmitOptions, ExtensionUINotification } from '../types';
 
 import { createFloodBudget, type FloodBudget } from './flood-budget';
-import { createLogBudget, MAX_EXTENSION_LOG_LINE, type LogBudget } from './log-budget';
+import { createLogBudget, writeExtensionLog, type LogBudget } from './log-budget';
 import {
   deserializeError,
   serializeError,
@@ -367,7 +367,12 @@ export class ExtensionBridge {
         this.queueHostCall(message.requestId, message.method, message.args);
         break;
       case 'log':
-        this.writeExtensionLog(message.level, message.message);
+        // Re-emitted through the app's logger, tagged with the channel's
+        // extension (never the one the message claims), so app.log carries one
+        // stream and a misbehaving extension is attributable. Budgeted and
+        // capped, since each line is a synchronous write on main; info lines
+        // stay out of a release log, since an extension is handed mail.
+        writeExtensionLog(logger, this.logBudget, { extensionId: this.extensionId, level: message.level, message: message.message, source: 'log' });
         break;
       case 'unsupported-api':
         if (isKnownNodeApi(message.api)) this.hooks.onUnsupportedApi?.(this.extensionId, message.api);
@@ -455,27 +460,6 @@ export class ExtensionBridge {
       ok: false,
       error: { name: 'Error', message: 'A sandbox can only call for its own extension' },
     });
-  }
-
-  /**
-   * Extension logs are re-emitted through the app's logger, tagged with the
-   * extension they came from, so `app.log` carries one stream rather than two
-   * and a misbehaving extension is attributable.
-   *
-   * Budgeted and capped: each line is a synchronous write on the main thread,
-   * and a loop in an extension must not be able to spend main's time.
-   */
-  private writeExtensionLog(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
-    const verdict = this.logBudget.take();
-    if (verdict.dropped > 0) {
-      logger.warn(`[Extension:${this.extensionId}] ${verdict.dropped} log lines dropped: too many`);
-    }
-    if (!verdict.allowed) return;
-    const line = `[Extension:${this.extensionId}] ${String(message).slice(0, MAX_EXTENSION_LOG_LINE)}`;
-    if (level === 'error') logger.error(line);
-    else if (level === 'warn') logger.warn(line);
-    else if (level === 'info') logger.info(line);
-    else logger.debug(line);
   }
 
   /**

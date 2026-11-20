@@ -1,5 +1,10 @@
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
+import { createLogger } from '@sarvinbox/core/logger';
+
 import { parseAttachments } from '../components/email-detail/utils';
 import type { AttachmentFile } from '../components/useCompose';
+
+const log = createLogger('ComposeAttachments');
 
 /** A composer attachment as `drafts.save` takes it: name, base64 bytes, type. */
 export interface DraftAttachmentPayload {
@@ -66,7 +71,9 @@ export async function loadEmailAttachments(email: AttachmentSource, options: { r
         };
       } catch (err) {
         if (options.requireAll) throw err;
-        console.error(`Failed to load attachment ${name}:`, err);
+        // The email id, not the file name: a name is the sender's (or the
+        // user's) words, and the error is described by what it was.
+        log.error(`failed to load an attachment of email ${email.id}`, errorDiagnostic(err));
         return null;
       }
     }),

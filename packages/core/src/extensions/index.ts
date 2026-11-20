@@ -229,9 +229,12 @@ export {
 
 export {
   createLogBudget,
+  extensionDebugEnabled,
   LOG_LINES_PER_WINDOW,
   LOG_WINDOW_MS,
   MAX_EXTENSION_LOG_LINE,
+  writeExtensionLog,
+  type ExtensionLogLevel,
   type LogBudget,
   type LogBudgetVerdict,
 } from './runtime/log-budget';

@@ -1,4 +1,4 @@
-import { lookupBimi as realLookupBimi, setLogSink, type BimiLookup, type FaviconResult, type LogLevel } from '@sarvinbox/core';
+import { getLogLevel, lookupBimi as realLookupBimi, setLogLevel, setLogSink, type BimiLookup, type FaviconResult, type LogLevel } from '@sarvinbox/core';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -27,6 +27,7 @@ vi.mock('@sarvinbox/core', async (importOriginal) => ({
   vmcVerifierUnavailable: () => h.probe(),
 }));
 
+import { captureLogs, type CapturedLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import { VMC_DOMAIN, VMC_VERIFIED, vmcLookupOptions } from '../../../../../../packages/core/test/unit/utils/fixtures/bimi/vmc-fixture';
 import { DomainIdentityStore } from '../../../../electron/services/domain-identity-store';
 import {
@@ -374,6 +375,49 @@ describe('senderIdentityTick', () => {
     h.runtimes = [['acct-1', { storage: { getRecentSenderDomains: async () => ['a.example'] }, syncEngine: null, smtpClient: null }]];
     expect(await senderIdentityTick(svc)).toBe(0);
     expect(lookupBimi).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The domains are the user's correspondents: a line per verified domain (with
+ * the certificate's organization) told app.log which bank, shop or service
+ * writes to the user. The tick's count line stays; nothing names a domain.
+ */
+describe('sender identity — what reaches the log', () => {
+  let logs: CapturedLogs;
+  beforeEach(() => { logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }); });
+  afterEach(() => { logs.stop(); });
+
+  // Breaks: '[SenderIdentity] <domain>: BIMI verified (<organization>)' is
+  // written for each sender domain, across every account's senders.
+  it('logs a tick across accounts as a count, naming no domain or organization', async () => {
+    const { svc, lookupBimi } = harness();
+    lookupBimi.mockImplementation(async (domain: string) => ({
+      ...verified(), organization: `SENTINEL Org of ${domain}`, recordDomain: domain,
+    }));
+    h.runtimes = [
+      ['acct-1', { storage: { getRecentSenderDomains: async () => ['sentinel-bank.example'] }, syncEngine: null, smtpClient: null }],
+      ['acct-2', { storage: { getRecentSenderDomains: async () => ['sentinel-shop.example'] }, syncEngine: null, smtpClient: null }],
+    ];
+
+    expect(await senderIdentityTick(svc)).toBe(2);
+    // The lookups ran and were cached as verified, as before.
+    expect(svc.getForAddress('a@sentinel-bank.example')).toMatchObject({ pending: false, bimi: { status: 'verified' } });
+
+    expect(logs.containing('sentinel-')).toEqual([]);
+    expect(logs.containing('SENTINEL')).toEqual([]);
+    expect(logs.containing('[SenderIdentity] refreshed 2 domain(s)')).toHaveLength(1);
+  });
+
+  // Breaks: a logo-only answer (status 'logo') still gets a per-domain line.
+  it('logs nothing per domain for a logo-only answer either', async () => {
+    const { svc, lookupBimi } = harness();
+    lookupBimi.mockResolvedValue({ ...verified(), status: 'logo', organization: 'SENTINEL Org' });
+
+    await svc.refresh('sentinel-brand.example', { bimi: true });
+
+    expect(logs.containing('sentinel-')).toEqual([]);
+    expect(logs.containing('SENTINEL')).toEqual([]);
   });
 });
 

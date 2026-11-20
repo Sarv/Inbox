@@ -3,10 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  allowedSarvReputationOrigin,
   getOAuthProvider,
   isOAuthProviderConfigured,
   isSarvAIEndpointAllowed,
   SARV_PRODUCTION_CLIENT_ID,
+  sarvReputationOrigin,
   setOAuthClientId,
   setOAuthClientSecret,
   setSarvBaseUrl,
@@ -61,6 +63,7 @@ const SARV_ENV_KEYS = [
   'SARVINBOX_SARV_OAUTH_BASE_URL',
   'SARVINBOX_SARV_API_BASE_URL',
   'SARVINBOX_SARV_EDGE_BASE_URL',
+  'SARVINBOX_SARV_REPUTATION_BASE_URL',
 ] as const;
 type SarvEnvKey = (typeof SARV_ENV_KEYS)[number];
 
@@ -93,6 +96,8 @@ afterEach(() => {
     oauthBase: coreDefaultSarv.authEndpoint.replace(/\/api\/oauth\/authorize$/, ''),
     apiBase: coreDefaultSarv.apiBaseUrl,
     edgeBase: coreDefaultSarv.edgeBaseUrl,
+    // Unset in every build; '' clears it ('undefined' would keep a test's override).
+    reputationBase: coreDefaultSarv.reputationBaseUrl ?? '',
   });
 });
 
@@ -179,6 +184,7 @@ const HOSTILE: Record<SarvEnvKey, string> = {
   SARVINBOX_SARV_OAUTH_BASE_URL: 'https://login.evil.example',
   SARVINBOX_SARV_API_BASE_URL: 'https://api.evil.example',
   SARVINBOX_SARV_EDGE_BASE_URL: 'https://edge.evil.example',
+  SARVINBOX_SARV_REPUTATION_BASE_URL: 'https://reputation.evil.example',
   SARVINBOX_SARV_CLIENT_ID: 'client_attacker_registration',
   SARVINBOX_SARV_CLIENT_SECRET: 'attacker-secret-value',
 };
@@ -196,6 +202,7 @@ const sarvDestinations = () => {
     apiBaseUrl: p.apiBaseUrl,
     edgeBaseUrl: p.edgeBaseUrl,
     llmBaseUrl: p.llmBaseUrl,
+    reputationBaseUrl: p.reputationBaseUrl,
     clientId: p.clientId,
     clientSecret: p.clientSecret,
   };
@@ -223,12 +230,19 @@ describe('initializeOAuth — Sarv environment overrides in a release build', ()
       apiBaseUrl: coreDefaultSarv.apiBaseUrl,
       edgeBaseUrl: coreDefaultSarv.edgeBaseUrl,
       llmBaseUrl: coreDefaultSarv.llmBaseUrl,
+      reputationBaseUrl: undefined,
       clientId: SARV_PRODUCTION_CLIENT_ID,
       clientSecret: coreDefaultSarv.clientSecret,
     });
     expect(coreDefaultSarv.authEndpoint).toMatch(/^https:\/\/oauth\.sarv\.com\//);
     expect(isSarvAIEndpointAllowed(`${HOSTILE.SARVINBOX_SARV_EDGE_BASE_URL}/edge/v1/llm`)).toBe(false);
     expect(isSarvAIEndpointAllowed(HOSTILE.SARVINBOX_SARV_API_BASE_URL)).toBe(false);
+    // Breaks: an environment variable on a user's machine redirects the Sarv
+    // token (with every arriving sender) to its own reputation "service".
+    // A release build has no reputation origin at all (Sarv runs no such
+    // service yet), so no address, theirs or any other, is allowed.
+    expect(sarvReputationOrigin(HOSTILE.SARVINBOX_SARV_REPUTATION_BASE_URL)).toBeNull();
+    expect(allowedSarvReputationOrigin()).toBeNull();
   });
 
   // Breaks: an ignored override goes unnoticed (someone debugging "my staging
@@ -272,6 +286,8 @@ describe('initializeOAuth — Sarv environment overrides in a dev build', () => 
     expect(sarv.authEndpoint).toBe(`${HOSTILE.SARVINBOX_SARV_OAUTH_BASE_URL}/api/oauth/authorize`);
     expect(sarv.apiBaseUrl).toBe(HOSTILE.SARVINBOX_SARV_API_BASE_URL);
     expect(sarv.edgeBaseUrl).toBe(HOSTILE.SARVINBOX_SARV_EDGE_BASE_URL);
+    expect(sarv.reputationBaseUrl).toBe(HOSTILE.SARVINBOX_SARV_REPUTATION_BASE_URL);
+    expect(sarvReputationOrigin(HOSTILE.SARVINBOX_SARV_REPUTATION_BASE_URL)).toBe(HOSTILE.SARVINBOX_SARV_REPUTATION_BASE_URL);
     expect(sarv.clientId).toBe(HOSTILE.SARVINBOX_SARV_CLIENT_ID);
     expect(sarv.clientSecret).toBe(HOSTILE.SARVINBOX_SARV_CLIENT_SECRET);
     expect(h.logged.filter((l) => l.level === 'warn')).toEqual([]);

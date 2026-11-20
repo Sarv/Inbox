@@ -1106,7 +1106,9 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
           // inside the serialized block so record-then-check can't interleave.
           const sib = findSiblingCategories(email.messageId, storage);
           if (sib) {
-            logger.info(`[Pipeline:P2] ${emailId} reusing categories from a linked account (same Message-ID) — no AI call: [${sib.join(',')}]`);
+            // How many, never the slugs: a custom category's slug is made from
+            // the name the user typed, and this line repeats per email.
+            logger.info(`[Pipeline:P2] ${emailId} reusing categories from a linked account (same Message-ID) — no AI call: cats=${sib.length}`);
             return { categories: sib, executed: false, proposed: false, fromSibling: true } as any;
           }
           activeProcessingStorage = storage;
@@ -1298,7 +1300,9 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
     // so keep it to trace — otherwise it prints per email every drain and reads
     // as "the AI pipeline is churning" when nothing AI is happening.
     if (aiConfig) {
-      logger.info(`[Pipeline:P2] ✓ ${emailId} score=${priorityScore} tier=${priorityTier} cats=[${categories.join(',')}] action=${recommendedAction || 'none'} exec=${executed} prop=${proposed}`);
+      // `cats=<count>`, never the slugs: a custom category's slug is made from
+      // the name the user typed, and this line is written for every email.
+      logger.info(`[Pipeline:P2] ✓ ${emailId} score=${priorityScore} tier=${priorityTier} cats=${categories.length} action=${recommendedAction || 'none'} exec=${executed} prop=${proposed}`);
     } else if (traceEnabled()) {
       logger.trace(`[Pipeline:P2] ✓ (local-only) ${emailId} score=${priorityScore} tier=${priorityTier} action=${recommendedAction || 'none'}`);
     }
@@ -1975,6 +1979,18 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
 }
 
 /**
+ * Whether the drafter's reasoning marks a salvage body (`ReplyDrafter` writes
+ * "Direct draft (JSON parse failed)" or "Draft skipped — …" when the model's
+ * answer could not be parsed), as a fixed label for the log; null otherwise.
+ * Exported for tests.
+ */
+export function drafterFallbackLabel(reasoning: string): 'parse-failed' | 'skipped' | null {
+  if (/JSON parse failed/i.test(reasoning)) return 'parse-failed';
+  if (/Draft skipped/i.test(reasoning)) return 'skipped';
+  return null;
+}
+
+/**
  * Attempt to actually SEND a drafted reply via SMTP (config.autoReply = true
  * auto-send). Returns true only when the reply was sent and the decision was
  * resolved — the caller then skips the Drafts append. Returns false for ANY
@@ -2017,8 +2033,11 @@ async function tryAutoSendReply(params: {
   // Never send a salvage body. The drafter falls back to dumping the cleaned
   // LLM text into `body` when JSON parsing fails ("Direct draft (JSON parse
   // failed)") — fine to park in Drafts for human eyes, never fine to send.
-  if (/JSON parse failed|Draft skipped/i.test(draftReasoning)) {
-    logger.info(`[Pipeline] Auto-send skipped for ${emailId} — drafter signaled fallback ("${draftReasoning}")`);
+  const fallback = drafterFallbackLabel(draftReasoning);
+  if (fallback) {
+    // A fixed label, not the reasoning: when the model wrote it, it is the
+    // model's account of the email being answered.
+    logger.info(`[Pipeline] Auto-send skipped for ${emailId} — drafter signaled fallback (${fallback})`);
     return false;
   }
   if (!draftBody.trim()) return false; // caller already guards; belt-and-braces

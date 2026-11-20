@@ -107,7 +107,7 @@ const PROTECTIONS: Array<{ title: string; detail: string }> = [
   { title: 'Sender authentication', detail: 'SPF, DKIM and DMARC verdicts are read from the receiving server’s Authentication-Results header and shown on the shield beside each sender.' },
   { title: 'Impersonation checks', detail: 'A display name that names one domain while the message came from another, and links whose text says one domain while pointing to another, are flagged.' },
   { title: 'Brand verification (BIMI)', detail: 'A sender domain’s published logo is shown only on mail that passed DMARC, and the blue verified tick only when its Verified Mark Certificate chains to a pinned Mark Verifying Authority for that exact logo and domain. Details per domain under Sender identity.' },
-  { title: 'Sender reputation', detail: 'As a message arrives, its sending server’s address and its sender domains are checked against spam blocklists — through this computer’s DNS, or Sarv’s reputation service with your own sign-in — and a listing adds to the spam score before the message is filed. The domains a message links to can be checked too, and how recently its domains were registered. All of it under Security → Blocklists.' },
+  { title: 'Sender reputation', detail: 'As a message arrives, its sending server’s address and its sender domains are checked against spam blocklists through this computer’s DNS, and a listing adds to the spam score before the message is filed. The domains a message links to can be checked too, and how recently its domains were registered. All of it under Security → Blocklists.' },
   { title: 'Spam filter', detail: 'Every arriving message is scored from its headers before the AI sees it — failed authentication, a spoofed sender name, a forged reply, missing or mis-dated headers, bulk mail with no unsubscribe, your mail server’s own spam verdict, and senders you have reported. A message over the line is filed as spam with its reasons shown on the shield.' },
   { title: 'Verified TLS to your mail server', detail: 'Certificates are verified and TLS 1.2 is the floor, unless you explicitly allow a self-signed server per account.' },
 ];
@@ -191,7 +191,7 @@ function ReputationStatus() {
             {state.linkProvider ? ', and about the domains a message links to once its body is downloaded' : ''}.
           </p>
         ) : (
-          <p>Blocklists are off, or the Sarv service address is not set — senders are judged from their headers alone. Change this under Security → Blocklists.</p>
+          <p>Blocklists are off, or set to Sarv&rsquo;s reputation service, which is not available yet or has an address that is not Sarv&rsquo;s — senders are judged from their headers alone. Change this under Security → Blocklists.</p>
         )}
         {background && (
           <p className="text-muted-foreground">

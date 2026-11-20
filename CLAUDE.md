@@ -48,14 +48,25 @@ lands in `app.log` consistently:
   for a component-scoped logger). Re-exported from the core barrel.
 - `logger.info` / `logger.warn` / `logger.error` / `logger.debug`.
 - **HOT-PATH / per-item logs** (per-email, per-query, per-IDLE-event): `logger.debug`
-  is NOT level-gated — it always writes, and each write is a synchronous
-  main-thread cost. So gate them behind an env flag AND use the logger:
-  `if (DEBUG_X) logger.debug(...)`. A per-item log that fires thousands of times
+  and `logger.trace` are level-gated in main (a release runs at `info`, so they
+  are dropped there; in the renderer they still run, and a release only declines
+  to forward them to app.log), but a dev run and any `SARV_LOG_LEVEL=debug` run
+  write every one, and each write is a synchronous main-thread cost. So gate them behind an
+  env flag AND use the logger: `if (DEBUG_X) logger.debug(...)`. A per-item log that fires thousands of times
   on a large/first sync will stall the event loop — this is a real perf bug, not
   just noise. Prefer aggregated summaries (see the IDLE-event aggregation in
   `sync-handlers.ts`) over per-item lines.
 - Raw `console.*` reaches `app.log` via the dev tee but UNSTRUCTURED — don't rely
   on it. Migrate any `console.*` you touch to the logger.
+- **Never log mail or user text.** A release `app.log` gets main's
+  info/warn/error AND the renderer's log/info/warn/error (forwarded over IPC);
+  the user attaches it to bug reports, and opted-in crash reports carry recent
+  lines. So no subjects, bodies, HTML, snippets, AI prompts or answers built
+  from mail or drafts, search text, attachment names, URLs from mail, display
+  names, or a whole options/record object. Log counts, lengths, booleans, ids,
+  field NAMES (`setFieldNamesForLog`), a URL's scheme (`urlSchemeForLog`) and
+  `errorDiagnostic(error)` instead of the error, whose message can quote any of
+  those. Prove it with a sentinel test (`captureLogs`).
 
 ## Native modules: better-sqlite3 has TWO ABIs — never flip it by hand
 
@@ -224,9 +235,13 @@ Established shared helpers (extend this list as you add more):
   IMAP/SMTP connection is secured: 'ssl' | 'starttls' (upgrade REQUIRED) | 'none'
   (explicit opt-out); legacy configs resolve from `secure`, OAuth never to 'none'.
   Use it in clients and account forms instead of reading `secure`.
-- `createLogBudget()` — `packages/core/src/extensions/runtime/log-budget.ts`. How
-  many lines a stranger's code may have the main process write. Use it for any
-  new path from extension code into the logger, which is a synchronous write.
+- `createLogBudget()` / `writeExtensionLog(logger, budget, line)` /
+  `extensionDebugEnabled()` — `packages/core/src/extensions/runtime/log-budget.ts`.
+  How many lines a stranger's code may have the main process write, and the one
+  writer for them: capped, budgeted, and an extension's info/debug lines only at
+  debug level unless `SARV_DEBUG_EXTENSIONS=1` (they can carry mail the
+  extension was given). Use it for any new path from extension code into the
+  logger, which is a synchronous write.
 - `readOsSandboxState(probe)` — `apps/desktop/electron/services/os-sandbox-state.ts`.
   Whether a renderer really is in the OS sandbox: `sandbox: true` keeps reading true
   under `--no-sandbox`. Use it before trusting that layer, and treat anything but
@@ -353,6 +368,38 @@ Established shared helpers (extend this list as you add more):
   working on. Use it at any `catch` whose record outlives the request (a saved
   diagnostics object, a log line) instead of keeping or logging `error.message`,
   which can quote query words, mail text or a provider's response body.
+  Renderer: `@sarvinbox/core/error-diagnostic`.
+- `urlSchemeForLog(url)` / `setFieldNamesForLog(value)` / `fieldSizesForLog(value)` /
+  `valueShapeForLog(value)` — `packages/core/src/utils/log-text.ts` (renderer:
+  `@sarvinbox/core/log-text`). What a log line may say about a URL from mail (its
+  scheme), a query or options object (the names of its set fields, or of its
+  fields with their sizes) and any value (its type and size), never the text
+  itself.
+- `captureLogs(controls)` — `packages/core/src/test-support/log-capture.ts`. Every
+  logger line AND raw `console.*` call a test's code makes, as app.log would get
+  it. Use it for a sentinel test that mail or typed text never reaches the log.
+- `parseLLMJsonArray(raw)` / `salvageDiagnosticsSummary(d)` —
+  `packages/core/src/agent/llm-json-array.ts` (agent barrel). The categorizers' three-pass parse
+  of a model's JSON array, and a log summary of how it went that quotes nothing.
+- `sarvReputationOrigin(url)` / `allowedSarvReputationOrigin()` /
+  `matchReputationOrigin(url, allowed)` / `describeEndpointOrigin(url)` —
+  `packages/core/src/oauth/token-destinations.ts` (renderer:
+  `@sarvinbox/core/token-destinations`). The one origin a Sarv token may go to for
+  reputation lookups (exact host, no userinfo, path, query or other port; none at
+  all until the service runs), the same rule against an origin main reported (the
+  renderer's registry never sees a dev override), and an endpoint's origin alone
+  for a log line. Use the same pattern, checked in main before any token is read,
+  for any new Sarv-token destination.
+- `onSarvBaseUrlChanged(listener)` — `packages/core/src/oauth/providers.ts`. Called
+  after `setSarvBaseUrl` re-points the Sarv registry; anything that captured a
+  Sarv address when it was built rebuilds on it.
+- `failureCause(error)` — `packages/core/src/utils/error-diagnostic.ts` (renderer:
+  `@sarvinbox/core/error-diagnostic`). One word for a failure in a log line or
+  note: its code, Chromium's `net::ERR_*` name, its HTTP status, or its class.
+- `bareHttpOrigin(value)` / `isBareOrigin(url)` — `packages/core/src/utils/bare-origin.ts`.
+  An http(s) address that is an origin and nothing else (no userinfo, path, query
+  or fragment). The Sarv reputation rule and the scanner origin are built on it;
+  use it for any setting that must name a service origin.
 - `createAssistantHarness()` — `apps/desktop/test/helpers/assistant-harness.ts`.
   The real Inbox Agent end to end for tests (real databases, history store and
   provider call path; scripted network). Use it instead of hand-wiring

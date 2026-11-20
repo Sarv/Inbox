@@ -306,10 +306,9 @@ export class SenderIdentityService {
         dmarcPolicy: null, recordDomain: null, detail: `Lookup failed: ${(e as Error)?.message ?? String(e)}`,
       };
     }
+    // No per-domain line: the domains are the user's correspondents (which bank
+    // or shop writes to them). senderIdentityTick logs how many it refreshed.
     this.deps.store.upsertBimi(domain, result, this.deps.now());
-    if (result.status === 'verified' || result.status === 'logo') {
-      logger.info(`[SenderIdentity] ${domain}: BIMI ${result.status}${result.organization ? ` (${result.organization})` : ''}`);
-    }
   }
 
   private async refreshFavicon(domain: string): Promise<void> {

@@ -221,7 +221,9 @@ export class SMTPClient {
     }
 
     try {
-      logger.info('[SMTPClient] Sending email to:', options.to.join(', '));
+      // Counts only: a recipient's display name survives the release log's
+      // address redaction, and names the people the user writes to.
+      logger.info(`[SMTPClient] Sending email: to=${options.to.length} cc=${options.cc?.length ?? 0} bcc=${options.bcc?.length ?? 0} recipient(s)`);
 
       // Header From: a chosen identity/alias (options.from) wins, else the
       // account default. The SMTP envelope sender stays the AUTHENTICATED account

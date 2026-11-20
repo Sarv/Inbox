@@ -11,13 +11,14 @@
  * Best effort by design: marking never throws and never meaningfully delays a
  * save (bounded by MARK_TIMEOUT_MS). A failure — FAT/exFAT or a network share
  * with no alternate streams, a missing `xattr` — is one warning line carrying
- * the platform and an error CODE only. Node's error MESSAGES embed the path, and
- * the path is the attachment's name, which is mail data.
+ * the platform and one word for the failure (core `failureCause`: its code, or
+ * `timeout`, or its class). Node's error MESSAGES embed the path, and the path
+ * is the attachment's name, which is mail data.
  */
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 
-import { createLogger, isTimeoutError, withTimeout } from '@sarvinbox/core';
+import { createLogger, failureCause, withTimeout } from '@sarvinbox/core';
 
 const logger = createLogger('mark-downloaded');
 
@@ -79,12 +80,6 @@ function runXattr(run: ExecFileFn, args: string[], timeout: number): Promise<voi
   });
 }
 
-function failureCode(error: unknown): string {
-  if (isTimeoutError(error)) return 'timeout';
-  const code = (error as { code?: unknown })?.code;
-  return typeof code === 'string' || typeof code === 'number' ? String(code) : 'error';
-}
-
 /**
  * Mark `filePath` as downloaded from the internet. Resolves in every case.
  * Linux: there is no standard. freedesktop's `user.xdg.origin.url` xattr is
@@ -112,6 +107,6 @@ export async function markDownloadedFromInternet(
     }
     await withTimeout(mark, timeoutMs, 'Marking the saved file timed out');
   } catch (error) {
-    logger.warn(`Could not mark a saved attachment as downloaded from the internet (${platform}, ${failureCode(error)}); the OS will not warn when it is opened`);
+    logger.warn(`Could not mark a saved attachment as downloaded from the internet (${platform}, ${failureCause(error)}); the OS will not warn when it is opened`);
   }
 }

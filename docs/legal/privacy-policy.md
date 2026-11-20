@@ -29,7 +29,7 @@ compare the policy against the app, and a mismatch fails verification.
 
 # Sarv Inbox Privacy Policy
 
-**Effective date:** 12 October 2026
+**Effective date:** 20 November 2026
 
 Sarv Inbox ("the app") is a desktop email client for macOS, Windows and Linux,
 published by Sarv Webs Private Limited ("Sarv", "we", "us"), IT-10, EPIP RIICO
@@ -68,10 +68,12 @@ password.
   you open are kept in an encrypted cache in the app's data folder (up to
   500 MB). When you open one in another program, the app writes a temporary,
   unencrypted copy for that program and deletes it shortly after. The app also
-  keeps a diagnostic log file there, readable only by your user account, that
-  can include message subjects; in released versions email addresses are
-  removed from it. Neither the cache nor the log leaves your device unless you
-  send it to us.
+  keeps a diagnostic log file there, readable only by your user account. It
+  records what the app did (counts, sizes, the kind of a failure), not the
+  text of your mail, and in released versions email addresses are removed from
+  it. Neither the cache nor the log leaves your device unless you send it to
+  us; if you turn on crash reports, each report carries a trail of recent app
+  activity (see 4.2).
 - **With your email provider.** Your mail stays on your provider's servers as
   usual. Changes you make in the app (reading, moving, deleting, sending,
   drafts, labels) are made on the provider's servers. By default the app also
@@ -192,10 +194,13 @@ each domain's top-level domain). These lookups include IP addresses and domain
 names, never the message itself. They can be turned off in Settings → Security →
 Blocklists.
 
-If you choose the optional **Sarv reputation service**, those IP addresses and
-domains are sent to Sarv instead, with your Sarv sign-in. If you also turn on
-**spam reports**, the domain and IP of messages you mark as spam or not spam are
-shared with Sarv to improve protection for all users. Both are off by default.
+Sarv's own reputation service, which would answer these lookups instead of the
+list operators, is not available yet, and the app does not offer it. Your Sarv
+sign-in is not sent to any reputation service. If you chose that service in an
+earlier version, no blocklist lookup is made at all (not to Sarv and not to the
+list operators) until you choose another option in Settings → Security →
+Blocklists. Registration-date lookups still go to the registries as described
+above.
 
 ### 4.4 Sender pictures and logos
 

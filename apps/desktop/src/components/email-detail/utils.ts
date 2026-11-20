@@ -1,4 +1,6 @@
 import { parseAttachmentNames } from '@sarvinbox/core/attachment-kind';
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
+import { createLogger } from '@sarvinbox/core/logger';
 import { format, differenceInCalendarDays, differenceInHours, differenceInMinutes, isToday } from 'date-fns';
 import {
   FileText,
@@ -12,6 +14,7 @@ import {
 } from 'lucide-react';
 import * as React from 'react';
 
+const log = createLogger('EmailDetail');
 
 // Get file icon based on extension
 export function getFileIcon(filename: string) {
@@ -264,7 +267,6 @@ export function stripSignatureFromHtml(body: string): { newContent: string; hasS
       try {
         const elements = doc.querySelectorAll(selector);
         if (elements.length > 0) {
-          console.log(`[Signature Strip] Found ${elements.length} element(s) matching "${selector}"`);
           elements.forEach(el => el.remove());
           totalRemoved += elements.length;
         }
@@ -274,14 +276,13 @@ export function stripSignatureFromHtml(body: string): { newContent: string; hasS
     }
 
     if (totalRemoved > 0) {
-      console.log(`[Signature Strip] Total removed: ${totalRemoved} signature element(s)`);
       return {
         newContent: doc.body.innerHTML,
         hasSignature: true,
       };
     }
   } catch (error) {
-    console.error('[EmailDetail] Failed to strip signatures:', error);
+    log.error('failed to strip signatures', errorDiagnostic(error));
   }
 
   return { newContent: body, hasSignature: false };

@@ -91,7 +91,13 @@
       "@sarvinbox/core/logger": ["../../packages/core/src/utils/logger.ts"],
       // Same: pure OpenPGP preference reader, shared so the Encryption tab
       // shows exactly which lookups main makes.
-      "@sarvinbox/core/pgp-prefs": ["../../packages/core/src/pgp/prefs.ts"]
+      "@sarvinbox/core/pgp-prefs": ["../../packages/core/src/pgp/prefs.ts"],
+      // Same: what a failure was, without the text its message quotes.
+      "@sarvinbox/core/error-diagnostic": ["../../packages/core/src/utils/error-diagnostic.ts"],
+      // Same: where a Sarv token may be sent (the Blocklists tab's reputation warning).
+      "@sarvinbox/core/token-destinations": ["../../packages/core/src/oauth/token-destinations.ts"],
+      // Same: what a log line may say about text that is not ours (field names, sizes, a URL's scheme).
+      "@sarvinbox/core/log-text": ["../../packages/core/src/utils/log-text.ts"]
     }
   },
   "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],
