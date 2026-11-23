@@ -15,6 +15,7 @@
 // incremental path — never duplicate the windowing.
 
 import type { FetchOptions, IIMAPClient, IMAPMessage } from '../types/imap';
+import { failureCause } from '../utils/error-diagnostic';
 import { logger } from '../utils/logger';
 
 // ── Pacing ──────────────────────────────────────────────────────────────────
@@ -144,7 +145,7 @@ function createWindowRun(windowOptions: WindowedFetchOptions | undefined) {
  * how a slow server became "no new mail at all".
  */
 function keepPartial(collected: number, error: unknown): void {
-  logger.warn(`New-mail fetch stopped early with ${collected} message(s) kept: ${(error as Error)?.message ?? error}`);
+  logger.warn(`New-mail fetch stopped early with ${collected} message(s) kept: ${failureCause(error)}`);
 }
 
 /**

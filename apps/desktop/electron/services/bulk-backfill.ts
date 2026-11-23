@@ -14,7 +14,7 @@
  * conversations (tagging prevents FUTURE mis-merges; it doesn't retroactively split).
  */
 
-import { addTag, createLogger } from '@sarvinbox/core';
+import { accountLogLabel, addTag, createLogger } from '@sarvinbox/core';
 
 import { getMeta, setMeta } from './core-db';
 
@@ -98,9 +98,9 @@ export async function maybeBackfillBulk(storage: any, engine: any, accountId: st
     // Mark done only on a clean full pass — a mid-run disconnect throws and leaves
     // the flag unset so it resumes (re-classifying is idempotent) next launch.
     setMeta(key, String(Date.now()));
-    logger.info(`[BulkBackfill] ${accountId}: done — scanned ${scanned}, tagged ${tagged} bulk in ${Date.now() - t0}ms`);
+    logger.info(`[BulkBackfill] ${accountLogLabel(accountId)}: done — scanned ${scanned}, tagged ${tagged} bulk in ${Date.now() - t0}ms`);
   } catch (e) {
-    logger.warn(`[BulkBackfill] ${accountId}: interrupted (scanned ${scanned}, tagged ${tagged}) — will resume: ${(e as Error).message}`);
+    logger.warn(`[BulkBackfill] ${accountLogLabel(accountId)}: interrupted (scanned ${scanned}, tagged ${tagged}) — will resume: ${(e as Error).message}`);
   } finally {
     inFlight.delete(accountId);
   }

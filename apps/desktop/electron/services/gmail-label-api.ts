@@ -1,4 +1,4 @@
-import { createLogger } from '@sarvinbox/core';
+import { failureCause, labelLogLabel, createLogger } from '@sarvinbox/core';
 const logger = createLogger('gmail-label-api');
 /**
  * Gmail label COLOR via the Gmail REST API. Used ONLY for Gmail accounts
@@ -112,22 +112,22 @@ export async function ensureGmailLabelColor(token: string, name: string, hex?: s
       // Gmail API calls when provisioning runs more than once.
       const cur = existing.color || {};
       if (cur.backgroundColor === color.backgroundColor && cur.textColor === color.textColor) return false;
-      try { await api(token, 'PATCH', `/${existing.id}`, { color }); logger.info(`[GmailLabels] colored "${name}"`); return true; }
-      catch (e) { logger.warn(`[GmailLabels] color PATCH "${name}" failed:`, (e as Error).message); return false; }
+      try { await api(token, 'PATCH', `/${existing.id}`, { color }); logger.info(`[GmailLabels] colored ${labelLogLabel(name)}`); return true; }
+      catch (e) { logger.warn(`[GmailLabels] color PATCH ${labelLogLabel(name)} failed:`, failureCause(e)); return false; }
     }
 
     const base = { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' };
     try {
       await api(token, 'POST', '', color ? { ...base, color } : base);
-      logger.info(`[GmailLabels] created "${name}"${color ? ' (colored)' : ''}`);
+      logger.info(`[GmailLabels] created ${labelLogLabel(name)}${color ? ' (colored)' : ''}`);
       return true;
     } catch (e) {
-      logger.warn(`[GmailLabels] create "${name}" with color failed:`, (e as Error).message);
-      try { await api(token, 'POST', '', base); logger.info(`[GmailLabels] created "${name}" (plain — color rejected)`); return true; }
-      catch (e2) { logger.warn(`[GmailLabels] create "${name}" plain failed:`, (e2 as Error).message); return false; }
+      logger.warn(`[GmailLabels] create ${labelLogLabel(name)} with color failed:`, failureCause(e));
+      try { await api(token, 'POST', '', base); logger.info(`[GmailLabels] created ${labelLogLabel(name)} (plain — color rejected)`); return true; }
+      catch (e2) { logger.warn(`[GmailLabels] create ${labelLogLabel(name)} plain failed:`, failureCause(e2)); return false; }
     }
   } catch (e) {
-    logger.warn(`[GmailLabels] ensure "${name}" failed:`, (e as Error).message);
+    logger.warn(`[GmailLabels] ensure ${labelLogLabel(name)} failed:`, failureCause(e));
     return false;
   }
 }
@@ -141,7 +141,7 @@ export async function renameGmailLabel(token: string, oldName: string, newName: 
     if (!existing) return;
     await api(token, 'PATCH', `/${existing.id}`, { name: newName }).catch(() => { /* target may already exist */ });
   } catch (e) {
-    logger.warn('[GmailLabels] rename best-effort failed:', (e as Error).message);
+    logger.warn('[GmailLabels] rename best-effort failed:', failureCause(e));
   }
 }
 
@@ -161,7 +161,7 @@ export async function deleteGmailLabelsUnder(token: string, prefix: string): Pro
     }
     return n;
   } catch (e) {
-    logger.warn('[GmailLabels] delete-under best-effort failed:', (e as Error).message);
+    logger.warn('[GmailLabels] delete-under best-effort failed:', failureCause(e));
     return 0;
   }
 }

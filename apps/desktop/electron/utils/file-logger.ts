@@ -5,9 +5,11 @@
  * dir (next to sarvinbox.db), capped at 20 MB — once past the cap the oldest
  * half is dropped so it never grows unbounded. Enabled in BOTH dev and packaged
  * builds so a shipped release has a log to attach to bug reports; safe to ship
- * because every line is run through redactSecrets() first (no passwords/tokens),
- * and in a release run through redactEmailAddresses() too (CASA L-7: account
- * and sender addresses are mailbox data). Dev keeps the addresses — the
+ * because every line is run through redactSecrets() first (no passwords/tokens)
+ * and has the home folder written as `~` (an absolute path names the user), and
+ * in a release run through redactEmailAddresses() and redactAccountIds() too
+ * (CASA L-7: account and sender addresses are mailbox data, and an account id
+ * spells out its owner's address). Dev keeps the addresses and ids — the
  * developer debugs from the dev app.log. The file (and its rotated sibling) is
  * readable by the owner only (0600).
  *
@@ -18,10 +20,11 @@
  */
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, renameSync, statSync, unlinkSync } from 'fs';
+import { homedir } from 'os';
 import { dirname, join } from 'path';
 import { inspect } from 'util';
 
-import { isLogLevel, redactEmailAddresses, redactSecrets, toOneLine } from '@sarvinbox/core';
+import { isLogLevel, redactAccountIds, redactEmailAddresses, redactHomeDir, redactSecrets, toOneLine } from '@sarvinbox/core';
 import { app } from 'electron';
 import pino from 'pino';
 
@@ -74,8 +77,10 @@ const LEVEL_BY_METHOD: Record<string, string> = {
 let active = false;
 let logPath = '';
 let bytesWritten = 0;
-// Release runs: also redact email addresses from every line (set at init).
+// Release runs: also redact email addresses and account ids from every line (set at init).
 let redactAddresses = false;
+// The user's home folder, written as `~` in every line (read once at init).
+let home: string | undefined;
 // pino's async file destination (sonic-boom): buffered, NON-blocking writes on
 // a background flush, with a reliable flushSync on exit. Replaces the old
 // synchronous appendFileSync, which stalled the main-process event loop on every
@@ -110,11 +115,11 @@ function render(arg: unknown): string {
   return inspect(arg, { depth: 4, breakLength: Infinity });
 }
 
-/** The redaction every line gets before it is written: secrets always, email
- *  addresses too in a release run. */
+/** The redaction every line gets before it is written: secrets and the home
+ *  folder always, email addresses and account ids too in a release run. */
 function scrub(text: string): string {
-  const safe = redactSecrets(text);
-  return redactAddresses ? redactEmailAddresses(safe) : safe;
+  const safe = redactHomeDir(redactSecrets(text), home);
+  return redactAddresses ? redactAccountIds(redactEmailAddresses(safe)) : safe;
 }
 
 /**
@@ -184,7 +189,9 @@ function write(method: string, args: unknown[]): void {
     // fall back to the console method for raw console.* calls.
     const prefix = LOGGER_PREFIX.exec(raw);
     const level = prefix?.[1] ?? LEVEL_BY_METHOD[method] ?? method.toUpperCase();
-    const name = prefix?.[2];
+    // The name is scrubbed like the text: a backfill's names its database
+    // file, and a legacy file name is built from the account's address.
+    const name = prefix?.[2] ? scrub(prefix[2]) : undefined;
     const message = scrub(raw.replace(LOGGER_PREFIX, ''));
     const line = `[${timestamp()}] [${level}] ${name ? `[${name}] ` : ''}${message}\n`;
     stream.write(line);
@@ -235,9 +242,9 @@ export function appendExternalLog(source: string, level: unknown, name: unknown,
 
 export interface FileLoggerOptions {
   /**
-   * Redact email addresses from every line. main.ts passes `!isDev`: a
-   * release's app.log must not name the user's accounts or correspondents,
-   * while the dev log keeps them for debugging. Decided by `isDevBuild()`, not
+   * Redact email addresses and account ids from every line. main.ts passes
+   * `!isDev`: a release's app.log must not name the user's accounts or
+   * correspondents, while the dev log keeps them for debugging. Decided by `isDevBuild()`, not
    * `app.isPackaged`, which misreports in dev (see the header).
    */
   redactAddresses?: boolean;
@@ -251,6 +258,7 @@ export function initFileLogger(options: FileLoggerOptions = {}): string | null {
   if (active) return logPath;
 
   redactAddresses = options.redactAddresses === true;
+  try { home = homedir(); } catch { home = undefined; }
   logPath = join(app.getPath('userData'), 'app.log');
   try { mkdirSync(dirname(logPath), { recursive: true }); } catch { /* dir exists */ }
   bytesWritten = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -282,7 +290,8 @@ export function initFileLogger(options: FileLoggerOptions = {}): string | null {
     process.on('exit', flushFileLogger);
   } catch { /* ignore */ }
 
-  console.log(`[file-logger] writing local logs to ${logPath} (cap ${MAX_BYTES / (1024 * 1024)} MB)`);
+  // Where the file is, without the absolute path: the home folder names the user.
+  console.log(`[file-logger] writing local logs to <userData>/app.log (cap ${MAX_BYTES / (1024 * 1024)} MB)`);
   // Flush the first line immediately so app.log proves itself on startup rather
   // than depending on the 1s timer / a later burst.
   flushFileLogger();

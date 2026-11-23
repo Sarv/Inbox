@@ -1,6 +1,8 @@
 import type { RealtimeEvent } from '@sarvinbox/core';
 import { sentFolderPathsOf } from '@sarvinbox/core/conversation-membership';
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
 import { isSentMailFolder } from '@sarvinbox/core/folder-mapping';
+import { folderLogLabel } from '@sarvinbox/core/log-labels';
 import { createLogger } from '@sarvinbox/core/logger';
 import pLimit from 'p-limit';
 
@@ -178,7 +180,7 @@ export async function refreshVisibleViewForFolder(
       // AI-categorized view (Needs Response, Reminders, etc.). Never the
       // slug: a custom category's slug is made from the name the user typed,
       // and this branch only runs with one set.
-      log.info(`[Store] refreshView: re-fetching AI category (aiCategory=set) after ${folderPath} sync`);
+      log.info(`[Store] refreshView: re-fetching AI category (aiCategory=set) after ${folderLogLabel(folderPath)} sync`);
       await state.loadAICategoryEmails?.(state.viewingAICategory);
     } else if (
       isCurrentFolder &&
@@ -189,7 +191,7 @@ export async function refreshVisibleViewForFolder(
       // SECTIONED INBOX. Visible data lives in `sectionData`, not
       // `emails` — a plain mergeNewEmails would update the wrong
       // store slot and look like a no-op to the user.
-      console.log(`[Store] refreshView: reloading sections for ${folderPath}`);
+      console.log(`[Store] refreshView: reloading sections for ${folderLogLabel(folderPath)}`);
       await state.loadAllSections?.(folderPath);
     } else if (isCurrentFolder) {
       // Flat folder view — diff against `emails` and prepend new rows.
@@ -203,7 +205,7 @@ export async function refreshVisibleViewForFolder(
     // view not matching the folder): leave the list alone, only the
     // sidebar badge updates via loadFolders elsewhere.
   } catch (err) {
-    console.warn(`[Store] refreshVisibleViewForFolder failed for ${folderPath}:`, err);
+    console.warn(`[Store] refreshVisibleViewForFolder failed for ${folderLogLabel(folderPath)}:`, errorDiagnostic(err));
   }
 }
 
@@ -720,11 +722,11 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
   syncSingleFolder: async (folderPath) => {
     // Only allow one sync operation at a time — avoids connection pool exhaustion
     if (get().syncing || get().syncingFolders.size > 0) {
-      console.log(`[Store] syncSingleFolder: Skipping ${folderPath} — another sync in progress`);
+      console.log(`[Store] syncSingleFolder: Skipping ${folderLogLabel(folderPath)} — another sync in progress`);
       return;
     }
 
-    console.log(`[Store] syncSingleFolder: Starting sync for ${folderPath}`);
+    console.log(`[Store] syncSingleFolder: Starting sync for ${folderLogLabel(folderPath)}`);
 
     const newSyncingFolders = new Map(get().syncingFolders);
     newSyncingFolders.set(folderPath, Date.now());
@@ -740,7 +742,8 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
         skipUnchanged: false,
       });
 
-      console.log(`[Store] syncSingleFolder: ${folderPath} sync result:`, result.success ? 'success' : result.error);
+      // Not the error text: a server's message can quote the folder's name.
+      console.log(`[Store] syncSingleFolder: ${folderLogLabel(folderPath)} sync result:`, result.success ? 'success' : 'failed');
 
       if (result.success) {
         get().noteSyncOk();
@@ -751,14 +754,14 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
         get().noteSyncFailure(result.error);
       }
     } catch (error) {
-      console.error(`[Store] syncSingleFolder: Failed to sync ${folderPath}:`, error);
+      console.error(`[Store] syncSingleFolder: Failed to sync ${folderLogLabel(folderPath)}:`, errorDiagnostic(error));
       get().noteSyncFailure(error);
     } finally {
       const currentSyncingFolders = get().syncingFolders;
       const updatedSyncingFolders = new Map(currentSyncingFolders);
       updatedSyncingFolders.delete(folderPath);
       set({ syncingFolders: updatedSyncingFolders });
-      console.log(`[Store] syncSingleFolder: ${folderPath} sync complete`);
+      console.log(`[Store] syncSingleFolder: ${folderLogLabel(folderPath)} sync complete`);
     }
   },
 
@@ -843,7 +846,7 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
       // Remove any existing listener first to prevent accumulation
       window.electronAPI.imap.removeRealtimeEventListener();
 
-      console.log('[Store] Setting up IDLE event listener for folder:', folderPath);
+      console.log('[Store] Setting up IDLE event listener for folder:', folderLogLabel(folderPath));
       // No logging in this callback: it fires once per message, so a flag
       // reconcile would emit hundreds of console writes on the UI thread.
       // The coalescer logs one aggregate line per flush instead.

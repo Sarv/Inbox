@@ -4,7 +4,9 @@ import { BACKFILL_UID_SPAN } from '../config/sync';
 import type { IIMAPClient, IMAPFolder, FolderStatus } from '../types/imap';
 import type { FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
+import { errorDiagnostic, failureCause } from '../utils/error-diagnostic';
 import { generateFolderId } from '../utils/id';
+import { folderLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 import { isWatermarkImpossible } from '../utils/sync-watermark';
 
@@ -273,7 +275,7 @@ export class FolderSyncer {
       const storedFolder = await storage.getFolderByPath(folder.path);
 
       if (!storedFolder) {
-        logger.warn(`Folder ${folder.path} not found in storage`);
+        logger.warn(`Folder ${folderLogLabel(folder.path)} not found in storage`);
         result.error = new Error(`Folder not found: ${folder.path}`);
         return result;
       }
@@ -316,7 +318,7 @@ export class FolderSyncer {
       });
       if (watermarkImpossible) {
         logger.warn(
-          `[watermark] ${folder.path}: stored lastSyncUid ${storedFolder.lastSyncUid} is above server UIDNEXT `
+          `[watermark] ${folderLogLabel(folder.path)}: stored lastSyncUid ${storedFolder.lastSyncUid} is above server UIDNEXT `
           + `${boxStatus.uidNext} (server holds ${serverCount}) — impossible, so incremental sync has been a no-op. `
           + `Discarding it and forcing a full re-sync.`,
         );
@@ -325,7 +327,7 @@ export class FolderSyncer {
       }
 
       if (needsRecoverySync) {
-        logger.info(`Recovery sync needed for ${folder.path}: local=${localCount}, expected at least ${expectedMinCount}, server=${serverCount}`);
+        logger.info(`Recovery sync needed for ${folderLogLabel(folder.path)}: local=${localCount}, expected at least ${expectedMinCount}, server=${serverCount}`);
         // Reset lastSyncUid to force full sync
         await storage.updateFolder(storedFolder.id, {
           lastSyncUid: null,
@@ -394,7 +396,7 @@ export class FolderSyncer {
       result.success = true;
       return result;
     } catch (error) {
-      logger.error(`Failed to sync folder ${folder.path}:`, error);
+      logger.error(`Failed to sync folder ${folderLogLabel(folder.path)}:`, errorDiagnostic(error));
       result.error = error as Error;
       return result;
     }
@@ -418,7 +420,7 @@ export class FolderSyncer {
       folder.uidValidity !== null && folder.uidValidity !== serverV;
 
     if (uidValidityChanged) {
-      logger.warn(`UIDVALIDITY changed for ${folder.path}: ${folder.uidValidity} -> ${serverV}`);
+      logger.warn(`UIDVALIDITY changed for ${folderLogLabel(folder.path)}: ${folder.uidValidity} -> ${serverV}`);
 
       // Re-key the folder NON-DESTRUCTIVELY. Every local uid here is now stale, but
       // a blind `deleteEmailsByFolder` (DELETE by tag) also destroyed multi-folder
@@ -428,7 +430,7 @@ export class FolderSyncer {
       // folder. The folder then re-syncs from scratch and re-links with fresh uids.
       if (typeof storage.invalidateFolderMembership === 'function') {
         const r = await storage.invalidateFolderMembership(folder.id);
-        logger.info(`UIDVALIDITY re-key for ${folder.path}: ${r.unlinked} unlinked (kept in other folders), ${r.deleted} deleted`);
+        logger.info(`UIDVALIDITY re-key for ${folderLogLabel(folder.path)}: ${r.unlinked} unlinked (kept in other folders), ${r.deleted} deleted`);
       } else {
         await storage.deleteEmailsByFolder(folder.id);
       }
@@ -487,7 +489,7 @@ export class FolderSyncer {
     const fetchCount = Math.min(options.maxMessages, boxStatus.messages);
     const startSeq = Math.max(1, boxStatus.messages - fetchCount + 1);
 
-    logger.info(`Full sync ${folder.path}: fetching ${startSeq}:${boxStatus.messages} (${fetchCount} messages) in batches of ${FULL_SYNC_BATCH}`);
+    logger.info(`Full sync ${folderLogLabel(folder.path)}: fetching ${startSeq}:${boxStatus.messages} (${fetchCount} messages) in batches of ${FULL_SYNC_BATCH}`);
 
     let inserted = 0;
     let updated = 0;
@@ -518,7 +520,7 @@ export class FolderSyncer {
         // A single batch failing (timeout on a heavy chunk) must not abort the
         // whole sync — log it and keep going so the rest of the inbox still lands.
         failedBatches++;
-        logger.warn(`Full sync ${folder.path}: batch ${range} failed: ${(err as Error)?.message ?? err}; continuing`);
+        logger.warn(`Full sync ${folderLogLabel(folder.path)}: batch ${range} failed: ${failureCause(err)}; continuing`);
         continue;
       }
 
@@ -548,7 +550,7 @@ export class FolderSyncer {
     }
 
     if (failedBatches > 0) {
-      logger.warn(`Full sync ${folder.path}: ${failedBatches} batch(es) failed; stored ${inserted + updated} of ${fetchCount}`);
+      logger.warn(`Full sync ${folderLogLabel(folder.path)}: ${failedBatches} batch(es) failed; stored ${inserted + updated} of ${fetchCount}`);
     }
 
     return {
@@ -581,7 +583,7 @@ export class FolderSyncer {
     // (Observed: a Gmail INBOX pinned at "from UID 59804" for nine days while the
     // server's own EXISTS climbed by 144 — every sync reported "No new messages".)
     logger.info(
-      `Incremental sync ${folder.path}: from UID ${lastUID} `
+      `Incremental sync ${folderLogLabel(folder.path)}: from UID ${lastUID} `
       + `(server uidNext ${boxStatus.uidNext}, exists ${boxStatus.messages})`,
     );
 
@@ -607,7 +609,7 @@ export class FolderSyncer {
 
     // Check for new messages
     if (boxStatus.uidNext <= lastUID + 1) {
-      logger.info(`No new messages in ${folder.path}`);
+      logger.info(`No new messages in ${folderLogLabel(folder.path)}`);
       return {
         success: true,
         messagesProcessed: 0,
@@ -750,7 +752,7 @@ export class FolderSyncer {
     if (typeof client.fetchMessagesByUidRange !== 'function') {
       // Client can't page by UID range — don't spin; mark done so the scheduler
       // stops selecting this folder (search still works over whatever synced).
-      logger.warn(`Backfill ${folder.path}: client lacks fetchMessagesByUidRange — skipping backfill`);
+      logger.warn(`Backfill ${folderLogLabel(folder.path)}: client lacks fetchMessagesByUidRange — skipping backfill`);
       await storage.updateFolder(folder.id, { backfillComplete: true });
       return { ...noop, loUid, hiUid, done: true };
     }
@@ -779,7 +781,7 @@ export class FolderSyncer {
     });
 
     logger.info(
-      `Backfill ${folder.path}: UID ${loUid}:${hiUid} → ${messages.length} fetched, ${inserted} new`
+      `Backfill ${folderLogLabel(folder.path)}: UID ${loUid}:${hiUid} → ${messages.length} fetched, ${inserted} new`
       + `${done ? ' — COMPLETE (reached bottom)' : ` (next floor ${loUid})`}`,
     );
 

@@ -8,6 +8,8 @@ import {
 } from '../../../src/oauth/token-refresher';
 import { OAuthError } from '../../../src/oauth/types';
 import type { OAuthProviderConfig } from '../../../src/oauth/types';
+import { captureLogs } from '../../../src/test-support/log-capture';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 // This module is the single point every signed-in account passes through on
 // every token expiry. A regression here logs EVERY user out: a wrong
@@ -348,7 +350,11 @@ describe('refreshAccessToken — retryable vs terminal', () => {
   // CLASSIFIED OAuthError, not a raw SyntaxError: callers branch on `err.code`
   // (isTerminalOAuthError), and an unclassified throw reads as neither terminal
   // nor transient — so a network-level fault got treated as a dead token.
-  it('a non-JSON 200 body rejects as a classified OAuthError carrying the body', async () => {
+  // Changed deliberately (log privacy): the body moved from the MESSAGE to
+  // `detail` only. The message is logged by callers, and a non-JSON body can be
+  // a token response in another encoding; it now names the content type and
+  // size. Classification reads `detail`, so it is unchanged.
+  it('a non-JSON 200 body rejects as a classified OAuthError carrying the body on detail only', async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
@@ -362,7 +368,61 @@ describe('refreshAccessToken — retryable vs terminal', () => {
 
     expect(err).toBeInstanceOf(OAuthError);
     expect(err.code).toBe('TOKEN_REFRESH_INVALID_RESPONSE');
-    expect(err.message).toContain('captive portal');
+    expect(err.detail).toContain('captive portal');
+    expect(err.message).not.toContain('captive portal');
+    expect(err.message).toContain('27 characters of unknown type');
+  });
+
+  // Regression: a token endpoint answering 200 with a form-encoded token
+  // (`access_token=…&refresh_token=…`) wrote 200 characters of it to app.log.
+  it('logs only the content type and length of a non-JSON body, never its text', async () => {
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/x-www-form-urlencoded; charset=utf-8' }),
+        json: vi.fn(),
+        text: vi.fn(async () => 'access_token=ya29.SENTINEL-AT&refresh_token=1//SENTINEL-RT&expires_in=3599'),
+      } as unknown as Response);
+
+      const err = await refreshAccessToken({ provider: FORM_PROVIDER, refreshToken: 'rt' }).catch((e) => e);
+
+      expect(err.code).toBe('TOKEN_REFRESH_INVALID_RESPONSE');
+      expect(err.message).toBe('Token refresh returned a non-JSON body (200): 74 characters of application/x-www-form-urlencoded');
+      expect(logs.containing('SENTINEL')).toEqual([]);
+      expect(logs.containing('74 characters of application/x-www-form-urlencoded')).toHaveLength(1);
+    } finally {
+      logs.stop();
+    }
+  });
+
+  // Regression: an empty or prose content type is written as "unknown type", never echoed.
+  it('names an empty body, and never writes a content type that is not a media type', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/html please-log-me' }),
+      json: vi.fn(),
+      text: vi.fn(async () => ''),
+    } as unknown as Response);
+
+    const err = await refreshAccessToken({ provider: FORM_PROVIDER, refreshToken: 'rt' }).catch((e) => e);
+
+    expect(err.message).toBe('Token refresh returned a non-JSON body (200): empty body, unknown type');
+  });
+
+  // Regression: a 307/308 from the token endpoint made fetch re-POST the
+  // refresh token to whatever the Location named.
+  it('never follows a redirect, and classifies a refused one as a transient network error', async () => {
+    fetchMock.mockRejectedValue(Object.assign(new TypeError('fetch failed'), { cause: new Error('unexpected redirect') }));
+
+    const err = await refreshAccessToken({ provider: FORM_PROVIDER, refreshToken: 'rt' }).catch((e) => e);
+
+    expect(lastCall(fetchMock).init.redirect).toBe('error');
+    expect(err).toBeInstanceOf(OAuthError);
+    expect(err.code).toBe('TOKEN_REFRESH_NETWORK_ERROR');
+    expect(err.message).toContain('answered with a redirect, which is not followed');
   });
 });
 

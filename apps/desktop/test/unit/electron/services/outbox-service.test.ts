@@ -73,6 +73,8 @@ const h = vi.hoisted(() => {
 });
 
 vi.mock('@sarvinbox/core', async () => ({
+  // The real log helpers (see the helper): product log lines go through them.
+  ...(await import('../../../helpers/core-log-helpers')),
   SendQueue: h.FakeSendQueue,
   // The REAL due-time helper: the wake-up timer's whole job is to honour it, so
   // a stub here would make these tests agree with themselves and nothing else.

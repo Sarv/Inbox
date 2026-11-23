@@ -1,6 +1,8 @@
 import type { IIMAPClient } from '../types/imap';
 import type { FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
+import { failureCause } from '../utils/error-diagnostic';
+import { folderLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 
 // Resolve/apply VANISHED in chunks so a huge backlog (e.g. a folder that drifted
@@ -52,7 +54,7 @@ export async function applyQresyncVanished(
       folder.path, folder.uidValidity, folder.highestModseq,
     ));
   } catch (err) {
-    logger.warn(`QRESYNC resync SELECT failed for ${folder.path}, skipping VANISHED reconcile: ${(err as Error).message}`);
+    logger.warn(`QRESYNC resync SELECT failed for ${folderLogLabel(folder.path)}, skipping VANISHED reconcile: ${failureCause(err)}`);
     return { selected: false, removed: 0 };
   }
 
@@ -69,7 +71,7 @@ export async function applyQresyncVanished(
   const rawValidity = Number(status?.uidValidity);
   const seenValidity = Number.isFinite(rawValidity) ? rawValidity : undefined;
   if (seenValidity !== undefined && seenValidity !== folder.uidValidity) {
-    logger.warn(`QRESYNC ${folder.path}: UIDVALIDITY changed (${folder.uidValidity} -> ${seenValidity}) — skipping VANISHED, deferring to the re-key path`);
+    logger.warn(`QRESYNC ${folderLogLabel(folder.path)}: UIDVALIDITY changed (${folder.uidValidity} -> ${seenValidity}) — skipping VANISHED, deferring to the re-key path`);
     return { selected: true, removed: 0 };
   }
 
@@ -90,11 +92,11 @@ export async function applyQresyncVanished(
   }
 
   if (removed > 0) {
-    logger.info(`QRESYNC ${folder.path}: applied ${vanishedUids.length} VANISHED (${removed} local rows reconciled)`);
+    logger.info(`QRESYNC ${folderLogLabel(folder.path)}: applied ${vanishedUids.length} VANISHED (${removed} local rows reconciled)`);
     try {
       await storage.recalculateFolderCounts([folder.path]);
     } catch (err) {
-      logger.warn(`QRESYNC ${folder.path}: recount after VANISHED failed: ${(err as Error).message}`);
+      logger.warn(`QRESYNC ${folderLogLabel(folder.path)}: recount after VANISHED failed: ${(err as Error).message}`);
     }
   }
   return { selected: true, removed };

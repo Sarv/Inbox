@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **The log file no longer names your accounts, folders or user folder.**
+  Every line about an account carried its internal id, which spells out the
+  email address, and lines about syncing named your folders, labels and AI
+  categories. These are now written as short codes (system folders such as
+  Inbox and Sent keep their names), file locations are written without your
+  home folder, and failures that could quote mail or a server's answer are
+  recorded by their kind only.
+- **Crash reports carry less about you.** A report no longer identifies you by
+  a shortened hash of your email address, which anyone guessing your address
+  could confirm; it uses a random code made on your computer instead. Web
+  requests in a report no longer keep their query string (which can hold keys
+  and search words), and sign-in codes, keys, passphrases and `Basic`
+  passwords are removed from reports and the log file wherever they appear.
+- **Sign-in tokens are never resent to a redirected address.** If an email
+  provider's token service answered a refresh with a redirect, the app would
+  have sent your refresh token again to wherever it pointed. It now refuses
+  the redirect and retries later, and the same goes for fetching your profile
+  after sign-in.
+
 ## [1.4.12] - 2026-11-24
 
 ### Fixed

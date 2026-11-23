@@ -25,6 +25,7 @@
  */
 
 import {
+  accountLogLabel,
   createLoopYielder,
   createLogger,
   extensionDebugEnabled,
@@ -162,7 +163,7 @@ async function runOne(message: QueuedMessage): Promise<void> {
 
   if (DEBUG_RUNNER) {
     logger.debug(
-      `${message.stage} ${email.id} acct=${getAccountIdForStorage(storage) ?? 'active'} ` +
+      `${message.stage} ${email.id} acct=${accountLogLabel(getAccountIdForStorage(storage), 'active')} ` +
         `workflows=${results.size} tags=${plan.changed ? plan.tags : 'unchanged'}`
     );
   }

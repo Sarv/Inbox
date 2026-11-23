@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 // The job reads first-email facts (a DOM split) and the settings in localStorage.
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { setLogLevel } from '@sarvinbox/core/logger';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -361,7 +362,8 @@ describe('the job queue', () => {
     bridge.seed('acct-a', 't4', singleQuote());
     job.enqueue([ref('t4')]);
     await job.idle();
-    expect(debug.mock.calls.some((call) => String(call[0]).includes('[TRACE] [FirstSplitJob] thread acct=acct-a thread=t4 -> skipped'))).toBe(true);
+    // Changed deliberately (log privacy): the account id is written as its label.
+    expect(debug.mock.calls.some((call) => String(call[0]).includes(`[TRACE] [FirstSplitJob] thread acct=${accountLogLabel('acct-a')} thread=t4 -> skipped`))).toBe(true);
   });
 
   it('counts a thread whose processing threw as an error and carries on', async () => {

@@ -7,7 +7,7 @@
  * just the active one, so a reminder on a background account still fires.
  */
 
-import { createLogger, type FollowUp, type FollowUpStatus } from '@sarvinbox/core';
+import { accountLogLabel, createLogger, type FollowUp, type FollowUpStatus } from '@sarvinbox/core';
 
 import { getAllAccountIds, getMainWindow, getStorage, getStorageFor } from '../shared';
 
@@ -59,7 +59,7 @@ export async function checkFollowUpsForAccount(
       else replied += 1;
     }
   } catch (error) {
-    logger.warn(`[FollowUp] Check failed for account ${accountId}:`, error);
+    logger.warn(`[FollowUp] Check failed for account ${accountLogLabel(accountId)}:`, error);
   }
   return { due, replied };
 }

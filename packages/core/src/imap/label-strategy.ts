@@ -30,6 +30,7 @@
 // the caller additionally guards re-runs with a local "mirrored" marker.
 import { IMAPError, type IIMAPClient } from '../types/imap';
 import { mapGmailLabels } from '../utils/gmail-labels';
+import { categoryLogLabel, folderLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 import { detectProvider } from '../utils/provider';
 import { trimChars } from '../utils/trim-chars';
@@ -202,7 +203,7 @@ class KeywordStrategy implements LabelStrategy {
     if (this.delimiter === undefined) this.delimiter = (await this.client.getHierarchyDelimiter?.()) ?? '/';
     const nested = folderPathForCategory(cat, this.delimiter);
     if (await deleteIfEmpty(this.client, nested)) {
-      logger.info(`[LabelStrategy] removed nested label "${nested}" (keyword labels need no folder)`);
+      logger.info(`[LabelStrategy] removed nested label "${folderLogLabel(nested)}" (keyword labels need no folder)`);
     }
     // The parent goes only once nothing is left under it — CHECKED, not assumed.
     // Plenty of servers will happily DELETE a mailbox that still has inferiors
@@ -330,7 +331,7 @@ class FolderStrategy implements LabelStrategy {
     const dest = await this.path(cat);
     // Provisioning path (once per category per account per session) — log the
     // exact CREATE commands we send so the Sarv/IMAP label setup is visible.
-    logger.info(`[LabelStrategy] Sarv IMAP ensure — CREATE "${SARV_LABEL_PARENT}"; CREATE "${dest}" (category "${cat.slug}")`);
+    logger.info(`[LabelStrategy] Sarv IMAP ensure — CREATE "${SARV_LABEL_PARENT}"; CREATE "${folderLogLabel(dest)}" (category ${categoryLogLabel(cat.slug, false)})`);
     await this.client.createMailbox(SARV_LABEL_PARENT);
     await this.client.createMailbox(dest);
   }

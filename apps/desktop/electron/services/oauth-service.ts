@@ -1184,6 +1184,9 @@ async function fetchUserInfo(
 ): Promise<OAuthUserInfo> {
   const res = await fetch(provider.userInfoEndpoint, {
     headers: { Authorization: `Bearer ${accessToken}` },
+    // Never followed: the access token rides on the request, and a redirect
+    // is not where the provider said its user-info endpoint is.
+    redirect: 'error',
   });
   if (!res.ok) {
     throw new OAuthError(`userinfo failed (${res.status})`, 'USERINFO_FAILED');

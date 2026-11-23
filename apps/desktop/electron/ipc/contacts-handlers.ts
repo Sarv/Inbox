@@ -4,7 +4,7 @@
  * Handles contact management operations.
  */
 
-import { classifyDomainPhones, classifyDomainUrls, htmlMiningWindow, htmlToPlainText, isSentMailFolder, mineAttributedPhones, mineContactSignals, phoneDomainOf, parseAddresses, type SenderPhones, type SenderUrls, createLogger } from '@sarvinbox/core';
+import { folderLogLabel, accountLogLabel, classifyDomainPhones, classifyDomainUrls, htmlMiningWindow, htmlToPlainText, isSentMailFolder, mineAttributedPhones, mineContactSignals, phoneDomainOf, parseAddresses, type SenderPhones, type SenderUrls, createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { refreshContactClassifications } from '../services/contact-classification-service';
@@ -447,7 +447,7 @@ async function scanMailbox(
 
     // Report what was actually read, not the paging offset — a folder holding
     // one email used to log "500 emails" because `offset` jumps by batchSize.
-    logger.info(`[Contacts] ${label}: scanned folder "${folder.name}": ${inFolder} emails (${direction})`);
+    logger.info(`[Contacts] ${label}: scanned folder ${folderLogLabel(folder.path || folder.name)}: ${inFolder} emails (${direction})`);
   }
 
   // Write the tallied totals absolutely, so re-scanning converges instead of
@@ -680,7 +680,7 @@ export function registerContactsHandlers(): void {
         } catch (err) {
           // One mailbox failing (a locked DB mid-sync, usually transient) must
           // not cost the scan every OTHER account's contacts.
-          logger.error(`[Contacts] Scan skipped mailbox ${accountId}:`, err);
+          logger.error(`[Contacts] Scan skipped mailbox ${accountLogLabel(accountId)}:`, err);
         }
       }
 

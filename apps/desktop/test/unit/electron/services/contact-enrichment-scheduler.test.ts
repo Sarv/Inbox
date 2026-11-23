@@ -41,10 +41,14 @@ vi.mock('../../../../electron/shared', () => ({
       : null,
 }));
 
-vi.mock('@sarvinbox/core', () => ({
-  createLogger: () => ({
-    info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
-  }),
+const logLines = vi.hoisted(() => [] as string[]);
+vi.mock('@sarvinbox/core', async () => ({
+  // The real log helpers (see the helper): product log lines go through them.
+  ...(await import('../../../helpers/core-log-helpers')),
+  createLogger: () => {
+    const record = (...args: unknown[]) => { logLines.push(args.map(String).join(' ')); };
+    return { info: record, warn: record, error: record, debug: record, trace: record };
+  },
   getEventBus: () => ({
     on: (event: string, cb: (e: unknown) => void) => {
       if (h.busThrows) throw new Error('bus unavailable');
@@ -302,6 +306,24 @@ describe('the single-batch lock', () => {
     const svc = await load();
     await expect(svc.triggerEnrichmentNow()).resolves.toBe(1);
     expect(dispatched()[0].payload).toMatchObject({ accountId: 'acct-ok' });
+  });
+
+  // Regression: '(acct=<id>)' on the dispatch and failure lines wrote the
+  // account id, which spells out the owner's address, every six hours.
+  it('names each account by its label in the log, while the batch keeps the real id', async () => {
+    const { accountLogLabel } = await import('../../../helpers/core-log-helpers');
+    const brokenId = 'acct-owner-sentinel-example-com--imap-example-com';
+    const okId = 'acct-other-sentinel-example-org--imap-example-org';
+    h.runtimes = [[brokenId, runtime(makeAccount(['x'], { throws: true }).storage)], [okId, runtime(makeAccount(['c1']).storage)]];
+    logLines.length = 0;
+    const svc = await load();
+
+    await expect(svc.triggerEnrichmentNow()).resolves.toBe(1);
+
+    expect(dispatched()[0].payload).toMatchObject({ accountId: okId });
+    expect(logLines.filter((l) => l.includes('sentinel'))).toEqual([]);
+    expect(logLines.some((l) => l.includes(`list candidates failed (acct=${accountLogLabel(brokenId)})`))).toBe(true);
+    expect(logLines.some((l) => l.includes(`dispatching batch of 1 contacts (acct=${accountLogLabel(okId)})`))).toBe(true);
   });
 
   it('skips a runtime with no storage', async () => {

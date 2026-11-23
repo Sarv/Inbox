@@ -70,9 +70,11 @@ password.
   unencrypted copy for that program and deletes it shortly after. The app also
   keeps a diagnostic log file there, readable only by your user account. It
   records what the app did (counts, sizes, the kind of a failure), not the
-  text of your mail, and in released versions email addresses are removed from
-  it. Neither the cache nor the log leaves your device unless you send it to
-  us; if you turn on crash reports, each report carries a trail of recent app
+  text of your mail. It names your accounts, and the folders, labels and AI
+  categories you created, only by short codes, and file locations without your
+  user folder; in released versions email addresses are removed from it too.
+  Neither the cache nor the log leaves your device unless you send it to us;
+  if you turn on crash reports, each report carries a trail of recent app
   activity (see 4.2).
 - **With your email provider.** Your mail stays on your provider's servers as
   usual. Changes you make in the app (reading, moving, deleting, sending,
@@ -169,14 +171,16 @@ answering, the app asks again the next time it starts. A report can contain:
 - the error and where it happened;
 - your app version, operating system and language;
 - your mail server's host name;
-- a shortened one-way hash of your email address, to group reports from the
-  same installation;
-- a trail of recent app activity, such as connection and sync steps, which can
-  include the names of your mail folders.
+- a random identifier created by the app on your computer, to group reports
+  from the same installation (it is not derived from your email address or
+  anything else about you);
+- a trail of recent app activity, such as connection and sync steps. Folders,
+  labels and AI categories you created appear in it only as short codes, not
+  by name.
 
 Email addresses are removed from reports before they leave your device, and so
-are passwords and access tokens wherever the app can recognise them; web
-addresses are sent without their query strings. Reports do not include message
+are passwords, access tokens, sign-in codes and keys wherever the app can
+recognise them; web addresses are sent without their query strings. Reports do not include message
 bodies, attachments or memory dumps (snapshots of the app's memory).
 
 You can change your answer at any time in Settings → General → Send crash

@@ -39,6 +39,7 @@ import {
   type FirstSplitSaveRequest,
   type FirstSplitSaveResult,
 } from '@sarvinbox/core/first-split';
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { createLogger } from '@sarvinbox/core/logger';
 import { createSingleFlight } from '@sarvinbox/core/single-flight';
 
@@ -212,7 +213,8 @@ async function run(
   if (!got) {
     const answer = await bridge.get(ref.accountId, ref.threadId, { withSource: true });
     if (!answer.success || !answer.data) {
-      log.warn(`split acct=${ref.accountId} thread=${ref.threadId} get failed: ${answer.error ?? 'no data'}`);
+      // Whether main said why, not what it said: its error text can quote the stored record.
+      log.warn(`split acct=${accountLogLabel(ref.accountId)} thread=${ref.threadId} get failed: ${answer.error ? 'error' : 'no data'}`);
       return { state: 'error', error: answer.error ?? 'no data' };
     }
     got = answer.data;
@@ -221,7 +223,7 @@ async function run(
   if (!current || !source || !(source.rawBody ?? '').trim()) return { state: 'unknown' };
   // Main hands back its own first member; a record that is not it cannot be split under this key.
   if (firstMemberKeyOf(source) !== current.firstKey) {
-    log.warn(`split acct=${ref.accountId} thread=${ref.threadId} source is not the first member — not run`);
+    log.warn(`split acct=${accountLogLabel(ref.accountId)} thread=${ref.threadId} source is not the first member — not run`);
     return { state: 'unknown' };
   }
   if (!force && isUsableSplit(row, current)) return { state: 'usable', current, row: row! };
@@ -271,7 +273,7 @@ async function splitAndSave(
     hub.publish({ running: false, status: null });
   }
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
-  const line = `split acct=${ref.accountId} thread=${ref.threadId} trigger=${options.trigger} ${countsOf(outcome)}`;
+  const line = `split acct=${accountLogLabel(ref.accountId)} thread=${ref.threadId} trigger=${options.trigger} ${countsOf(outcome)}`;
 
   if (outcome.status === 'provider') {
     log.warn(`${line} status=provider (nothing saved) ${seconds}s: ${outcome.reason ?? ''}`);
@@ -288,7 +290,7 @@ async function splitAndSave(
   };
   const saved = await bridge.save(ref.accountId, request);
   if (!saved.success || !saved.data) {
-    log.warn(`${line} status=${outcome.status} save failed ${seconds}s: ${saved.error ?? 'no data'}`);
+    log.warn(`${line} status=${outcome.status} save failed ${seconds}s: ${saved.error ? 'error' : 'no data'}`);
     return { state: 'error', error: saved.error ?? 'no data' };
   }
   const result = saved.data.applied ? `saved=${saved.data.status ?? outcome.status}` : `not-saved=${saved.data.reason}`;
@@ -314,7 +316,7 @@ export function runFirstSplit(
       const message = error instanceof Error ? error.message : String(error);
       // By class, code and status: the message of a split that threw can quote
       // the email it was splitting, or a provider's response body.
-      log.warn(`split acct=${ref.accountId} thread=${ref.threadId} threw`, errorDiagnostic(error));
+      log.warn(`split acct=${accountLogLabel(ref.accountId)} thread=${ref.threadId} threw`, errorDiagnostic(error));
       return { state: 'error', error: message };
     }
   });

@@ -5,6 +5,8 @@ import {
   isDraftRow,
   isExcludedFolderCopy,
 } from '@sarvinbox/core/conversation-membership';
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
+import { accountLogLabel, folderLogLabel } from '@sarvinbox/core/log-labels';
 import { createLogger } from '@sarvinbox/core/logger';
 
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
@@ -458,7 +460,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
 
     clearCategoryBadgeCache();
     const selectedFolder = get().folders.find(f => f.id === folderId);
-    console.log(`[View] Selected folder: ${selectedFolder?.path || selectedFolder?.name || folderId} (inboxType=${get().inboxType})`);
+    console.log(`[View] Selected folder: ${folderLogLabel(selectedFolder?.path || selectedFolder?.name || folderId)} (inboxType=${get().inboxType})`);
     // NOTE: sectionData is intentionally NOT cleared here. It only ever
     // holds INBOX section data and is only rendered in the INBOX sectioned
     // view, so keeping it cached lets a return to INBOX show the previous
@@ -490,9 +492,9 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     if (folder && !get().syncing && get().connectionStatus !== 'disconnected') {
       const { syncingFolders } = get();
       if (syncingFolders.has(folder.path)) {
-        console.log(`[Store] Skipping sync for ${folder.path} - this folder already syncing`);
+        console.log(`[Store] Skipping sync for ${folderLogLabel(folder.path)} - this folder already syncing`);
       } else {
-        console.log(`[Store] Starting background sync for folder: ${folder.path}`);
+        console.log(`[Store] Starting background sync for folder: ${folderLogLabel(folder.path)}`);
         // syncSingleFolder now owns the post-sync view-refresh routing
         // (AI-category → loadAICategoryEmails, sectioned INBOX →
         // loadAllSections, flat → mergeNewEmails, virtual-all/starred
@@ -501,7 +503,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         // callers of syncSingleFolder (ensureConnectionAndSync's
         // periodic poll, etc.) missed the section/AI-category refresh.
         get().syncSingleFolder(folder.path).catch((err) => {
-          console.error(`[Store] Sync failed for ${folder.path}:`, err);
+          console.error(`[Store] Sync failed for ${folderLogLabel(folder.path)}:`, errorDiagnostic(err));
         });
       }
     }
@@ -545,7 +547,8 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     const folderName = selectedFolderId ? folders.find(f => f.id === selectedFolderId)?.path : null;
     // `AI:category`, never the slug: a custom category's slug is made from the
     // name the user typed. Built-in views (virtual folders, snoozed) are ours.
-    const view = viewingAICategory ? 'AI:category' : selectedVirtualFolder || (viewingSnoozed ? 'snoozed' : folderName || 'unknown');
+    // A folder the user named is written as its label (folderLogLabel).
+    const view = viewingAICategory ? 'AI:category' : selectedVirtualFolder || (viewingSnoozed ? 'snoozed' : folderName ? folderLogLabel(folderName) : 'unknown');
     // `search=set`, never the query: it is what the user typed, and this line
     // repeats on every email opened while a search is active.
     log.info(`[View] selectEmail id=${emailId ? emailId.substring(0, 12) + '...' : 'null'}, view=${view}${searchQuery ? ', search=set' : ''}, pool=${get().emails.length} emails`);
@@ -722,7 +725,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         // (`maxMessages: localTotal + PAGE_SIZE` grew every scroll). The backfill
         // scheduler also runs continuously, so most scrolls are already covered —
         // this just nudges it — and it yields to any in-flight foreground sync.
-        console.log(`[Store] loadMoreEmails: local exhausted (${localTotal}), server has ${serverTotal} — nudging backfill for ${selectedFolder.path}`);
+        console.log(`[Store] loadMoreEmails: local exhausted (${localTotal}), server has ${serverTotal} — nudging backfill for ${folderLogLabel(selectedFolder.path)}`);
         const res = await window.electronAPI.imap.backfillChunk(selectedFolder.path);
         const inserted = res?.success ? (res.data?.inserted ?? 0) : 0;
 
@@ -1403,19 +1406,19 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     if (targets.length === 0) return;
 
     bgSyncRunning = true;
-    console.log('[TierB] cycle start — targets:', targets.map((a) => `${a.email}@${a.imapConfig?.host}`));
+    console.log('[TierB] cycle start — targets:', targets.map((a) => accountLogLabel(a.id)));
     try {
       // Serial: one account at a time to avoid a connection storm (up to 10
       // accounts). Each is isolated so one failure never stops the rest.
       for (const acct of targets) {
         try {
           const res = await window.electronAPI.accounts.backgroundSync({ accountId: acct.id, config: acct.imapConfig });
-          console.log('[TierB] backgroundSync result for', acct.email, '@', acct.imapConfig?.host, '→', res);
+          console.log('[TierB] backgroundSync result for', accountLogLabel(acct.id), '→', res);
           if (res?.success && res.data) {
             set({ accountUnread: { ...get().accountUnread, [acct.id]: res.data.unread } });
           }
         } catch (e) {
-          console.warn('[TierB] backgroundSync failed for', acct.id, (e as Error)?.message);
+          console.warn('[TierB] backgroundSync failed for', accountLogLabel(acct.id), (e as Error)?.message);
         }
       }
       // If the merged view is open, refresh it so newly-synced mail appears.
@@ -1611,7 +1614,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     // (5/10/25/50; default 25). Clicking the count opens the full paginated page.
     const section = get().inboxSections.find((s) => s.id === sectionId);
     const pageSize = section?.maxItems && section.maxItems > 0 ? section.maxItems : 25;
-    console.log(`[View] loadSectionEmails section=${sectionId}, filter=${filter}, folderPath=${folderPath || 'all'}, pageSize=${pageSize}`);
+    console.log(`[View] loadSectionEmails section=${sectionId}, filter=${filter}, folderPath=${folderPath ? folderLogLabel(folderPath) : 'all'}, pageSize=${pageSize}`);
 
     // Mark section loading
     const newLoading = new Set(get().sectionLoading);

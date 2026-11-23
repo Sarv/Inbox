@@ -353,6 +353,37 @@ describe('auto-draft and auto-send — the sender stays out of the log', () => {
   });
 });
 
+describe('autoDraftReply — failures, as logged', () => {
+  // Breaks: "IMAP draft save error for <id>:" logged the whole error, whose
+  // message quotes the server's APPEND answer (the Drafts folder's name, the
+  // draft text) — the error's kind is all that may reach app.log.
+  it('logs a Drafts save that throws by its kind and code, never its text', async () => {
+    await replyWorthy('e4');
+    h.draftAnswer = JSON.stringify({ subject: 'Re: Budget', body: 'Approved.', suggestedCc: [], reasoning: 'Direct ask' });
+    h.saveError = Object.assign(new Error(`APPEND "Clients/${SENTINEL}" refused: ${SENTINEL}`), { code: 'EAPPEND' });
+
+    await autoDraftReply('e4', account.storage);
+
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    const line = logs.containing('IMAP draft save error for e4:');
+    expect(line).toHaveLength(1);
+    expect(line[0]).toContain("code: 'EAPPEND'");
+  });
+
+  // Breaks: a failed save's returned error text (which can carry the
+  // encryption library's message) is written after our own words.
+  it('logs a refused Drafts save by the words before its detail only', async () => {
+    await replyWorthy('e5');
+    h.draftAnswer = JSON.stringify({ subject: 'Re: Budget', body: 'Approved.', suggestedCc: [], reasoning: 'Direct ask' });
+    h.saveResult = { success: false, error: `The draft could not be encrypted, so it was not saved: key for ${SENTINEL} expired` };
+
+    await autoDraftReply('e5', account.storage);
+
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    expect(logs.containing('IMAP draft save failed for e5: The draft could not be encrypted, so it was not saved')).toHaveLength(1);
+  });
+});
+
 describe('drafterFallbackLabel', () => {
   // Breaks: the gate stops recognising either fallback ReplyDrafter writes, or
   // starts flagging an ordinary reasoning as one.

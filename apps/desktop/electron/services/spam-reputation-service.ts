@@ -39,6 +39,8 @@ import {
   type RdapBootstrap,
 } from '@sarv-in/mailguard';
 import {
+  failureCause,
+  folderLogLabel,
   SPAM_THRESHOLD,
   addTag,
   computeFilterActionResult,
@@ -486,7 +488,7 @@ async function judgeRows<R extends JudgeableRow>(
       await target.storage.updateEmail(row.id, { tags: moved.tags, folderId: moved.folderId });
       if (moved.changed && target.engine) {
         target.engine.moveToSpam(row.folderPath, row.uid).catch((err: unknown) => {
-          logger.warn(`[Reputation] server-side move failed for uid ${row.uid} in ${row.folderPath}: ${(err as Error)?.message ?? err}`);
+          logger.warn(`[Reputation] server-side move failed for uid ${row.uid} in ${folderLogLabel(row.folderPath)}: ${failureCause(err)}`);
         });
       }
       summary.filed += 1;

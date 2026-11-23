@@ -1,6 +1,7 @@
 // IMAP Connection Pool for parallel folder sync
 
 import type { IMAPConfig, IIMAPClient } from '../types/imap';
+import { errorDiagnostic } from '../utils/error-diagnostic';
 import { logger } from '../utils/logger';
 import { isTimeoutError, withTimeout } from '../utils/timeout';
 
@@ -623,7 +624,7 @@ export class IMAPConnectionPool {
           taskQueue.length = 0; // cancel the rest of this run
           return;
         }
-        logger.error(`Pool: parallel task ${index} failed:`, error);
+        logger.error(`Pool: parallel task ${index} failed:`, errorDiagnostic(error));
         errors.push(error as Error);
         // Don't throw - continue with other tasks
       }

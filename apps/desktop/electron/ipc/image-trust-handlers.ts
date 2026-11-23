@@ -11,7 +11,7 @@
  * A named account is therefore resolved strictly (an unknown one is an error
  * the renderer sees and retries); no id means the active account, as before.
  */
-import { createLogger } from '@sarvinbox/core';
+import { accountLogLabel, createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { requireNamedOrActiveStorage } from '../services/account-target';
@@ -27,7 +27,7 @@ export function registerImageTrustHandlers(): void {
       await (await requireNamedOrActiveStorage(accountId)).allowSenderImages(address);
       return { success: true };
     } catch (error) {
-      logger.warn(`images:allowSender failed for account ${accountId ?? '(active)'}: ${(error as Error)?.message ?? error}`);
+      logger.warn(`images:allowSender failed for account ${accountLogLabel(accountId, '(active)')}: ${(error as Error)?.message ?? error}`);
       return fail(error);
     }
   });

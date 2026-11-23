@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { parseLLMJsonArray, valueShapeForLog, cleanEmailHtmlForLLM, errorDiagnostic, failureCause, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail, formatSenderBehaviorFacts, SENDER_BEHAVIOR_UNAVAILABLE } from '@sarvinbox/core';
+import { categoryLogLabel, parseLLMJsonArray, valueShapeForLog, cleanEmailHtmlForLLM, errorDiagnostic, failureCause, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail, formatSenderBehaviorFacts, SENDER_BEHAVIOR_UNAVAILABLE } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext, SenderSignals } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -186,6 +186,8 @@ export class AICategorizationService {
   private skipRead: boolean = true;
   private categoryDefs: LoadedCategoryDef[] = [];
   private categorySlugs: Set<string> = new Set();
+  /** The built-in categories' slugs: logged as written; the user's own are logged as labels. */
+  private systemCategorySlugs: Set<string> = new Set(['spam']);
   private autoTimer: ReturnType<typeof setInterval> | null = null;
   private autoConfig: AIProviderConfig | null = null;
   private autoOptions: { userEmail?: string; maxEmails?: number; skipRead?: boolean } = {};
@@ -265,6 +267,7 @@ export class AICategorizationService {
       const defs = storage.getEnabledCategoryDefinitions();
       this.categoryDefs = defs.map(d => ({ slug: d.slug, name: d.name, prompt: d.prompt }));
       this.categorySlugs = new Set(defs.map(d => d.slug));
+      this.systemCategorySlugs = new Set(['spam', ...defs.filter(d => d.isSystem).map(d => d.slug)]);
       logger.info(`[AICategorizationService] Starting in ${mode} mode (skipRead=${this.skipRead}, maxEmails=${this.maxEmails}, categories=${this.categoryDefs.length})`);
       if (mode === 'bulk') {
         await this.processBulk(run);
@@ -1171,7 +1174,8 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
       for (const c of r.categories) acc[c] = (acc[c] || 0) + 1;
       return acc;
     }, {} as Record<string, number>);
-    const categorySummary = Object.entries(categoryCounts).map(([k, v]) => `${k}:${v}`).join(' ') || 'none';
+    // A category the user created is named after what they typed: its label, never its slug.
+    const categorySummary = Object.entries(categoryCounts).map(([k, v]) => `${categoryLogLabel(k, this.systemCategorySlugs)}:${v}`).join(' ') || 'none';
     this.emitLog('info', `Saved ${saved} categorizations (${categorySummary})`);
 
     // Update progress with category breakdown and recent activity

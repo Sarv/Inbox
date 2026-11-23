@@ -26,7 +26,9 @@ const h = vi.hoisted(() => ({
 vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
 }));
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
+  // The real log helpers (see the helper): product log lines go through them.
+  ...(await import('../../../helpers/core-log-helpers')),
   createLogger: () => ({ info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {} }),
   SyncEngine: class {},
 }));

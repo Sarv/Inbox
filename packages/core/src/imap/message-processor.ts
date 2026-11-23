@@ -23,12 +23,13 @@ import type { IEmailStorage } from '../types/storage';
 import { hasCalendarMimePart, sanitizeIcsText } from '../utils/calendar';
 import { hasCidRefs, resolveCidImages, type CidImagePart } from '../utils/cid-images';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
-import { errorDiagnostic } from '../utils/error-diagnostic';
+import { errorDiagnostic, failureCause } from '../utils/error-diagnostic';
 import { collectFilterActions, computeFilterActionResult } from '../utils/filters';
 import { refreshCountsForFolders } from '../utils/folder-counts';
 import { mapGmailLabels, matchKnownCategory, type GmailFolderRole, type KnownCategory } from '../utils/gmail-labels';
 import { htmlToPlainText } from '../utils/html-text';
 import { emailContentHash, generateId, generateThreadId, synthesizedMessageId } from '../utils/id';
+import { folderLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import {
@@ -368,7 +369,7 @@ export class MessageProcessor {
     const fn = this.serverActions[action] as ((...a: Parameters<IngestServerActions[K]>) => Promise<unknown>) | undefined;
     if (!fn || !(uid > 0)) return false;
     fn(...args).catch((err: unknown) => {
-      logger.warn(`[Ingest] Server-side ${action} failed for uid ${uid} in ${String(args[0])}: ${(err as Error)?.message ?? err}`);
+      logger.warn(`[Ingest] Server-side ${action} failed for uid ${uid} in ${folderLogLabel(args[0])}: ${failureCause(err)}`);
     });
     return true;
   }
@@ -464,7 +465,7 @@ export class MessageProcessor {
       // past it, or the sync re-fetches the same broken message forever.
       const usable = batch.filter((message) => {
         if (message.envelope) return true;
-        logger.error(`Skipping message UID ${message.uid} in ${folderPath}: no ENVELOPE`);
+        logger.error(`Skipping message UID ${message.uid} in ${folderLogLabel(folderPath)}: no ENVELOPE`);
         result.maxUid = Math.max(result.maxUid, message.uid);
         result.errors++;
         return false;
@@ -962,7 +963,7 @@ export class MessageProcessor {
     }
     const changed = new Set([...updates.map((update) => update.id), ...classificationUpdates.map((update) => update.id)]);
     logger.info(
-      `[GmailLabels] ${folder.path}: repaired folder membership for ${updates.length} of ${labelRows.length} message(s)`,
+      `[GmailLabels] ${folderLogLabel(folder.path)}: repaired folder membership for ${updates.length} of ${labelRows.length} message(s)`,
     );
     return { scanned: labelRows.length, updated: changed.size };
   }
@@ -1600,8 +1601,8 @@ export class MessageProcessor {
     if ((!message || wrongMessage) && target?.messageId) {
       logger.trace(
         wrongMessage
-          ? `Body fetch identity mismatch for ${emailId} (UID ${uid} in ${folderPath}): expected ${target.messageId}, server returned ${message?.envelope?.messageId}`
-          : `Body fetch: no message at UID ${uid || '(none)'} for ${emailId} in ${folderPath} — resolving by message-id`,
+          ? `Body fetch identity mismatch for ${emailId} (UID ${uid} in ${folderLogLabel(folderPath)}): expected ${target.messageId}, server returned ${message?.envelope?.messageId}`
+          : `Body fetch: no message at UID ${uid || '(none)'} for ${emailId} in ${folderLogLabel(folderPath)} — resolving by message-id`,
       );
       // HEADER search is matched without angle brackets because servers
       // substring-match the raw header value; a bracketed query misses on some.
@@ -1618,7 +1619,7 @@ export class MessageProcessor {
         // is evidence about the CONNECTION, not about the message — returning
         // null here made the prefetcher read "server has no such message" and
         // retire perfectly live mail. Defer instead; the next tick asks again.
-        logger.warn(`HEADER Message-ID search failed in ${folderPath}: ${(err as Error).message}`);
+        logger.warn(`HEADER Message-ID search failed in ${folderLogLabel(folderPath)}: ${failureCause(err)}`);
         throw createDeferredFetchError(`message-id search failed in "${folderPath}"`);
       }
       if (correctedUid === undefined) {
@@ -1629,7 +1630,7 @@ export class MessageProcessor {
         if (hitCount > 0) {
           throw createDeferredFetchError(`UID ${uid} disagrees with the message-id search in "${folderPath}"`);
         }
-        logger.trace(`Could not re-resolve ${emailId} by message-id in ${folderPath} — leaving body empty`);
+        logger.trace(`Could not re-resolve ${emailId} by message-id in ${folderLogLabel(folderPath)} — leaving body empty`);
         return null;
       }
       const corrected = await fetchOne(correctedUid);
@@ -1640,7 +1641,7 @@ export class MessageProcessor {
         logger.warn(`Re-resolved UID ${correctedUid} for ${emailId} still does not match — will retry`);
         throw createDeferredFetchError(`re-resolved UID ${correctedUid} did not match in "${folderPath}"`);
       }
-      logger.info(`Repaired ${uid ? 'stale' : 'missing'} UID for ${emailId} in ${folderPath}: ${uid || '(none)'} -> ${correctedUid}`);
+      logger.info(`Repaired ${uid ? 'stale' : 'missing'} UID for ${emailId} in ${folderLogLabel(folderPath)}: ${uid || '(none)'} -> ${correctedUid}`);
       await storage.updateEmail(emailId, { uid: correctedUid });
       message = corrected;
     }
@@ -1649,7 +1650,7 @@ export class MessageProcessor {
       // No uid AND no message-id to resolve by (or an expunged slot). Return a
       // VERDICT: body-prefetch counts a null as "unavailable" and, after a few
       // strikes, tags the row so it stops being re-seeded every tick.
-      logger.trace(`No message found for ${emailId} (UID ${uid || '(none)'} in ${folderPath})`);
+      logger.trace(`No message found for ${emailId} (UID ${uid || '(none)'} in ${folderLogLabel(folderPath)})`);
       return null;
     }
 
@@ -1657,7 +1658,7 @@ export class MessageProcessor {
       // Identified the message, and the server handed back no source for it. A
       // verdict (there is nothing to download), but log it: this path was silent,
       // so an email stuck here looked identical in the log to one never tried.
-      logger.warn(`Body fetch: message for ${emailId} (UID ${message.uid || uid} in ${folderPath}) carries no source`);
+      logger.warn(`Body fetch: message for ${emailId} (UID ${message.uid || uid} in ${folderLogLabel(folderPath)}) carries no source`);
       return null;
     }
 
@@ -1889,7 +1890,7 @@ export class MessageProcessor {
       try {
         serverFlags = await client.fetchAllFlags(folder.path);
       } catch (err) {
-        logger.warn(`Failed to fetch flags from server for ${folder.path}, skipping flag sync: ${(err as Error)?.message ?? err}`);
+        logger.warn(`Failed to fetch flags from server for ${folderLogLabel(folder.path)}, skipping flag sync: ${failureCause(err)}`);
         return false;
       }
       for (const sf of serverFlags) {
@@ -1954,17 +1955,17 @@ export class MessageProcessor {
             const flags = await client.fetchFlagsOnly(allUids, touch, folder.path);
             for (const f of flags) setServerFlags(f);
           } catch (err) {
-            logger.warn(`Batched flag fetch failed for ${folder.path}: ${(err as Error).message}`);
+            logger.warn(`Batched flag fetch failed for ${folderLogLabel(folder.path)}: ${failureCause(err)}`);
           }
         }
 
         logger.info(
-          `syncFlags ${folder.path}: ${reason} — reconciling via SEARCH ALL `
+          `syncFlags ${folderLogLabel(folder.path)}: ${reason} — reconciling via SEARCH ALL `
           + `(${allUids.length} server uids, flags for ${serverFlagsMap.size})`,
         );
         return true;
       } catch (err) {
-        logger.warn(`fetchAllUIDs deletion fallback failed for ${folder.path}: ${(err as Error).message}`);
+        logger.warn(`fetchAllUIDs deletion fallback failed for ${folderLogLabel(folder.path)}: ${failureCause(err)}`);
         return false;
       }
     };
@@ -2002,17 +2003,17 @@ export class MessageProcessor {
             const flags = await client.fetchFlagsOnly(windowUids, touch, folder.path);
             for (const f of flags) setServerFlags(f);
           } catch (err) {
-            logger.warn(`Windowed flag fetch failed for ${folder.path}: ${(err as Error).message}`);
+            logger.warn(`Windowed flag fetch failed for ${folderLogLabel(folder.path)}: ${failureCause(err)}`);
           }
         }
         logger.info(
-          `syncFlags ${folder.path}: ${reason} — WINDOWED reconcile `
+          `syncFlags ${folderLogLabel(folder.path)}: ${reason} — WINDOWED reconcile `
           + `(${windowUids.length} uids in last ${SYNC_RECENT_WINDOW_DAYS}d, flags for ${serverFlagsMap.size}); `
           + `whole-folder deletion deferred to background backfill`,
         );
         return true;
       } catch (err) {
-        logger.warn(`Windowed UID search failed for ${folder.path}: ${(err as Error).message}`);
+        logger.warn(`Windowed UID search failed for ${folderLogLabel(folder.path)}: ${failureCause(err)}`);
         return false;
       }
     };
@@ -2029,7 +2030,7 @@ export class MessageProcessor {
     // against the wrong mailbox. Refuse to reconcile on a mismatch.
     if (currentState?.path && currentState.path !== folder.path) {
       logger.warn(
-        `[syncFlags] ${folder.path}: ABORTED — connection has "${currentState.path}" selected, not "${folder.path}" (folder-selection race). Skipping to avoid cross-folder flag/deletion corruption.`,
+        `[syncFlags] ${folderLogLabel(folder.path)}: ABORTED — connection has "${folderLogLabel(currentState.path)}" selected, not "${folderLogLabel(folder.path)}" (folder-selection race). Skipping to avoid cross-folder flag/deletion corruption.`,
       );
       return result;
     }
@@ -2049,7 +2050,7 @@ export class MessageProcessor {
         Number.isFinite(currentUidValidity) && currentUidValidity > 0 &&
         folder.uidValidity !== currentUidValidity) {
       logger.warn(
-        `[syncFlags] ${folder.path}: UIDVALIDITY changed (${folder.uidValidity} -> ${currentUidValidity}) — `
+        `[syncFlags] ${folderLogLabel(folder.path)}: UIDVALIDITY changed (${folder.uidValidity} -> ${currentUidValidity}) — `
         + `skipping flag/deletion reconcile; folder-sync will re-key and re-sync`,
       );
       return result;
@@ -2070,7 +2071,7 @@ export class MessageProcessor {
     // even on a large mailbox (acceptable off the hot path, in the background).
     const windowed = isLargeMailbox && options?.fullReconcile !== true;
     logger.info(
-      `[syncFlags] ${folder.path}: entering — server EXISTS=${serverExists ?? '?'}${windowed ? ' (LARGE — windowed reconcile)' : isLargeMailbox ? ' (LARGE — FULL background reconcile)' : ''}, condstore=${client.supportsCondstore()}, storedModseq=${folder.highestModseq ?? 0}, currentModseq=${currentModseq ?? '?'}`,
+      `[syncFlags] ${folderLogLabel(folder.path)}: entering — server EXISTS=${serverExists ?? '?'}${windowed ? ' (LARGE — windowed reconcile)' : isLargeMailbox ? ' (LARGE — FULL background reconcile)' : ''}, condstore=${client.supportsCondstore()}, storedModseq=${folder.highestModseq ?? 0}, currentModseq=${currentModseq ?? '?'}`,
     );
     const storedModseq = folder.highestModseq ?? 0;
 
@@ -2121,7 +2122,7 @@ export class MessageProcessor {
             await loadWindowedFlags(`CONDSTORE large-mailbox reconcile (${changed.length} delta changes)`);
           } else {
             logger.debug(
-              `syncFlags delta ${folder.path}: ${changed.length} changed since modseq ${storedModseq} (large mailbox — windowed flag re-read throttled, whole-folder deletion deferred)`,
+              `syncFlags delta ${folderLogLabel(folder.path)}: ${changed.length} changed since modseq ${storedModseq} (large mailbox — windowed flag re-read throttled, whole-folder deletion deferred)`,
             );
           }
         } else if (dueForDeletion) {
@@ -2178,26 +2179,26 @@ export class MessageProcessor {
                 const allFlags = await client.fetchFlagsOnly(allUids, touch, folder.path);
                 for (const f of allFlags) setServerFlags(f);
               } catch (err) {
-                logger.warn(`Full flag reconcile failed for ${folder.path}: ${(err as Error).message}`);
+                logger.warn(`Full flag reconcile failed for ${folderLogLabel(folder.path)}: ${failureCause(err)}`);
               }
             }
           }
 
           logger.info(
-            `syncFlags ${folder.path}: reconcile — ${changed.length} changed since modseq ${storedModseq}, `
+            `syncFlags ${folderLogLabel(folder.path)}: reconcile — ${changed.length} changed since modseq ${storedModseq}, `
             + `${allUids.length} server uids, flags for ${serverFlagsMap.size}`
             + `${dueForFlagReconcile ? ' (full flag re-read)' : ''}`,
           );
         } else {
           logger.debug(
-            `syncFlags delta ${folder.path}: ${changed.length} changed since modseq ${storedModseq} (deletion reconcile throttled)`,
+            `syncFlags delta ${folderLogLabel(folder.path)}: ${changed.length} changed since modseq ${storedModseq} (deletion reconcile throttled)`,
           );
         }
       } catch (err) {
         // HARD FALLBACK: any delta error → discard partial maps and take the
         // proven full path. Correctness must never depend on the delta working.
         logger.warn(
-          `CONDSTORE delta flag sync failed for ${folder.path}, falling back to full fetch: ${(err as Error).message}`,
+          `CONDSTORE delta flag sync failed for ${folderLogLabel(folder.path)}, falling back to full fetch: ${failureCause(err)}`,
         );
         serverUidsSet.clear();
         serverFlagsMap.clear();
@@ -2324,7 +2325,7 @@ export class MessageProcessor {
             // at the head of a newest-first rotation and re-request it forever.
             for (const uid of selection.uids) checked.add(uid);
             logger.info(
-              `[syncFlags] ${folder.path}: stale-flag sweep — re-read ${staleFlags.length}/${selection.uids.length} `
+              `[syncFlags] ${folderLogLabel(folder.path)}: stale-flag sweep — re-read ${staleFlags.length}/${selection.uids.length} `
               + `old unread/starred uid(s) outside the ${SYNC_RECENT_WINDOW_DAYS}d window`
               + `${selection.remaining > 0 ? ` (${selection.remaining} more next sweep)` : ''}`
               + `${selection.wrapped ? ' [rotation restarted]' : ''}`,
@@ -2332,7 +2333,7 @@ export class MessageProcessor {
           } catch (err) {
             // TRANSIENT: mark nothing, so the same UIDs are retried next sweep
             // rather than suppressed for the session on one flaky response.
-            logger.warn(`[syncFlags] ${folder.path}: stale-flag sweep failed: ${(err as Error).message}`);
+            logger.warn(`[syncFlags] ${folderLogLabel(folder.path)}: stale-flag sweep failed: ${failureCause(err)}`);
           }
         }
         // Same bound as the addition reconcile's tried-set: clearing only costs a
@@ -2353,7 +2354,7 @@ export class MessageProcessor {
     // source (serverUidsSet) and is unaffected by this skip.
     const shouldRunPhase1 = serverFlagsMap.size > 0;
     if (!shouldRunPhase1) {
-      logger.debug(`[syncFlags] ${folder.path}: Phase-1 skipped — server reported no flags this cycle`);
+      logger.debug(`[syncFlags] ${folderLogLabel(folder.path)}: Phase-1 skipped — server reported no flags this cycle`);
     }
     // Collected per page and written with one chunked, yielding bulk statement
     // instead of an awaited updateEmail per row (each of which re-SELECTs the
@@ -2501,7 +2502,7 @@ export class MessageProcessor {
       try {
         await storage.updateFolder(folder.id, folderUpdate);
       } catch (err) {
-        logger.warn(`Failed to persist highestModseq for ${folder.path}: ${(err as Error).message}`);
+        logger.warn(`Failed to persist highestModseq for ${folderLogLabel(folder.path)}: ${(err as Error).message}`);
       }
     }
 
@@ -2530,7 +2531,7 @@ export class MessageProcessor {
     const additionOnly = !deletionSetReady && windowSetReady && options?.skipDeletion !== true;
     if (options?.skipDeletion || (!deletionSetReady && !additionOnly)) {
       logger.info(
-        `[syncFlags] ${folder.path}: Phase-2 deletion SKIPPED — skipDeletion=${options?.skipDeletion === true}, deletionSetReady=${deletionSetReady}, condstore=${client.supportsCondstore()}, force=${options?.forceDeletion === true}, serverUids=${serverUidsSet.size}`,
+        `[syncFlags] ${folderLogLabel(folder.path)}: Phase-2 deletion SKIPPED — skipDeletion=${options?.skipDeletion === true}, deletionSetReady=${deletionSetReady}, condstore=${client.supportsCondstore()}, force=${options?.forceDeletion === true}, serverUids=${serverUidsSet.size}`,
       );
       return result;
     }
@@ -2564,7 +2565,7 @@ export class MessageProcessor {
     // the deletion diff below simply finds nothing to delete, which is correct:
     // there is nothing in this folder's uid space to delete.
     if (localUids.length === 0) {
-      logger.debug(`[syncFlags] ${folder.path}: no rows in this folder's own UID space — deletion diff is a no-op, addition reconcile still runs`);
+      logger.debug(`[syncFlags] ${folderLogLabel(folder.path)}: no rows in this folder's own UID space — deletion diff is a no-op, addition reconcile still runs`);
     }
 
     // Completeness guard for whole-folder detection: a `1:* FLAGS` fetch / SEARCH
@@ -2606,14 +2607,14 @@ export class MessageProcessor {
     const serverUidNext = typeof currentState?.uidNext === 'number' ? currentState.uidNext : null;
     if (serverUidNext != null && serverMaxUid >= serverUidNext) {
       logger.error(
-        `[syncFlags] ${folder.path}: ABORTED — server UID list contains UID ${serverMaxUid} at/above this folder's UIDNEXT ${serverUidNext}; the list is not this mailbox's. Skipping flag/deletion reconcile.`,
+        `[syncFlags] ${folderLogLabel(folder.path)}: ABORTED — server UID list contains UID ${serverMaxUid} at/above this folder's UIDNEXT ${serverUidNext}; the list is not this mailbox's. Skipping flag/deletion reconcile.`,
       );
       return result;
     }
     const EXISTS_OVERSHOOT_SLACK = 100;
     if (serverExists != null && serverUidsSet.size > serverExists * 2 + EXISTS_OVERSHOOT_SLACK) {
       logger.error(
-        `[syncFlags] ${folder.path}: ABORTED — server UID list has ${serverUidsSet.size} UIDs but the mailbox reports EXISTS=${serverExists}; the list is not this mailbox's. Skipping flag/deletion reconcile.`,
+        `[syncFlags] ${folderLogLabel(folder.path)}: ABORTED — server UID list has ${serverUidsSet.size} UIDs but the mailbox reports EXISTS=${serverExists}; the list is not this mailbox's. Skipping flag/deletion reconcile.`,
       );
       return result;
     }
@@ -2634,11 +2635,11 @@ export class MessageProcessor {
     // number is the tag count, which the addition reconcile below logs as
     // `tagged` — the two are different questions and must not look alike.
     logger.info(
-      `[syncFlags] ${folder.path}: Phase-2 running — localUidSpace=${localUids.length} (max ${localMaxUid}; rows primary to this folder — NOT comparable to server total), server=${serverUidsSet.size} (max ${serverMaxUid}, exists ${serverExists ?? '?'}), complete=${serverListComplete}`
+      `[syncFlags] ${folderLogLabel(folder.path)}: Phase-2 running — localUidSpace=${localUids.length} (max ${localMaxUid}; rows primary to this folder — NOT comparable to server total), server=${serverUidsSet.size} (max ${serverMaxUid}, exists ${serverExists ?? '?'}), complete=${serverListComplete}`
       + `${additionOnly ? `, ADDITION-ONLY from ${windowedUidsSet.size}-uid recent window${additionFromWindow ? '' : ' (skipped — no rows in this folder\'s own UID space)'}` : ''}`,
     );
     if (serverMaxUid > 0 && localMaxUid > serverMaxUid && !serverListComplete) {
-      logger.warn(`Deletion detection for ${folder.path}: local max UID ${localMaxUid} > server max ${serverMaxUid} (server has ${serverUidsSet.size}, exists ${serverExists ?? '?'}), server list may be partial — skipping`);
+      logger.warn(`Deletion detection for ${folderLogLabel(folder.path)}: local max UID ${localMaxUid} > server max ${serverMaxUid} (server has ${serverUidsSet.size}, exists ${serverExists ?? '?'}), server list may be partial — skipping`);
       return result;
     }
 
@@ -2700,13 +2701,13 @@ export class MessageProcessor {
         // the drain, which clears on convergence) so it doesn't hold UIDs for the
         // session after the gap is closed.
         this.reconcileTriedUids.delete(folder.path);
-        logger.debug(`[syncFlags] ${folder.path}: ${missingFromLocal.length} UID(s) outside folder_id space already present by tag (${tagCount}/${serverExists}) — nothing to reconcile`);
+        logger.debug(`[syncFlags] ${folderLogLabel(folder.path)}: ${missingFromLocal.length} UID(s) outside folder_id space already present by tag (${tagCount}/${serverExists}) — nothing to reconcile`);
       } else if (genuinelyMissing > 0 && drainable.length === 0) {
         // Every candidate has been fetched once already this session; the residual
         // gap is messages this pass can't resolve (present-elsewhere, or a count
         // artefact). Re-fetching them would just re-loop — wait for a restart /
         // the downward backfill instead of hammering the same no-ops.
-        logger.debug(`[syncFlags] ${folder.path}: ${genuinelyMissing} still unaccounted but all ${missingFromLocal.length} candidate UID(s) already tried this session — not re-fetching`);
+        logger.debug(`[syncFlags] ${folderLogLabel(folder.path)}: ${genuinelyMissing} still unaccounted but all ${missingFromLocal.length} candidate UID(s) already tried this session — not re-fetching`);
       } else if (genuinelyMissing > 0) {
         // DRAIN, don't defer: fetch up to ADDITION_RECONCILE_MAX of the missing UIDs
         // THIS sync; a larger gap fills across successive syncs. (Previously a gap >
@@ -2718,7 +2719,7 @@ export class MessageProcessor {
         const ordered = drainable.slice().sort((a, b) => b - a);
         const toFetch = ordered.slice(0, ADDITION_RECONCILE_MAX);
         const remaining = ordered.length - toFetch.length;
-        logger.info(`[syncFlags] ${folder.path}: addition reconcile — ${genuinelyMissing} genuinely missing (server ${serverExists ?? '?'}, tagged ${tagCount ?? '?'}); fetching ${toFetch.length} of ${drainable.length} untried this sync${remaining > 0 ? ` (${remaining} remaining next sync)` : ''}`);
+        logger.info(`[syncFlags] ${folderLogLabel(folder.path)}: addition reconcile — ${genuinelyMissing} genuinely missing (server ${serverExists ?? '?'}, tagged ${tagCount ?? '?'}); fetching ${toFetch.length} of ${drainable.length} untried this sync${remaining > 0 ? ` (${remaining} remaining next sync)` : ''}`);
         // Fetch in small sub-batches: one giant UID FETCH times out on a slow server and
         // inserts nothing (all-or-nothing). Sub-batching keeps each FETCH under the op
         // timeout and makes partial progress durable — if a later sub-batch fails, the
@@ -2762,7 +2763,7 @@ export class MessageProcessor {
             // keeps its connection.
             touch?.();
           } catch (e) {
-            logger.warn(`[syncFlags] ${folder.path}: addition reconcile sub-batch failed (${inserted} inserted so far, rest next sync): ${(e as Error).message}`);
+            logger.warn(`[syncFlags] ${folderLogLabel(folder.path)}: addition reconcile sub-batch failed (${inserted} inserted so far, rest next sync): ${failureCause(e)}`);
             break; // keep what stuck; the remainder drains on the next sync
           }
         }
@@ -2777,7 +2778,7 @@ export class MessageProcessor {
         // read as progress. `unchanged` is that case, named.
         if (attempted > 0) {
           logger.info(
-            `[syncFlags] ${folder.path}: addition reconcile inserted ${inserted}, linked ${linked}, `
+            `[syncFlags] ${folderLogLabel(folder.path)}: addition reconcile inserted ${inserted}, linked ${linked}, `
             + `unchanged ${unchanged}, of ${attempted} attempted`
             + `${inserted + linked === 0 ? ' — NO PROGRESS: every message was already present' : ''}`,
           );
@@ -2842,7 +2843,7 @@ export class MessageProcessor {
       if (serverUidsSet.size === 0 && localUids.length > 5) {
         if (!this.foldersSeenEmpty.has(folder.id)) {
           this.foldersSeenEmpty.add(folder.id);
-          logger.warn(`Server returned 0 UIDs but we have ${localUids.length} local emails in ${folder.path} — deferring deletion until a second confirming empty read (possible transient)`);
+          logger.warn(`Server returned 0 UIDs but we have ${localUids.length} local emails in ${folderLogLabel(folder.path)} — deferring deletion until a second confirming empty read (possible transient)`);
           return result;
         }
         // Only claim we're applying when we actually will: a truly-empty folder has
@@ -2850,7 +2851,7 @@ export class MessageProcessor {
         // it through. If serverExists is unknown (null), serverListComplete is false
         // and Safety check 2 defers anyway, so don't log a misleading "applying".
         if (serverListComplete) {
-          logger.info(`${folder.path}: server empty on two consecutive reads — applying deletion of ${localUids.length} local row(s)`);
+          logger.info(`${folderLogLabel(folder.path)}: server empty on two consecutive reads — applying deletion of ${localUids.length} local row(s)`);
         }
       }
 
@@ -2868,10 +2869,10 @@ export class MessageProcessor {
         return result;
       }
       if (missingRatio > 0.5 && missingUids.length > 5) {
-        logger.info(`[syncFlags] ${folder.path}: applying large deletion — ${missingUids.length}/${localUids.length} missing but server list is COMPLETE (${serverUidsSet.size}>=${serverExists}), so these are genuine expiries`);
+        logger.info(`[syncFlags] ${folderLogLabel(folder.path)}: applying large deletion — ${missingUids.length}/${localUids.length} missing but server list is COMPLETE (${serverUidsSet.size}>=${serverExists}), so these are genuine expiries`);
       }
 
-      logger.info(`Syncing ${missingUids.length} deleted emails in ${folder.path} (server has ${serverUidsSet.size}, local has ${localUids.length})`);
+      logger.info(`Syncing ${missingUids.length} deleted emails in ${folderLogLabel(folder.path)} (server has ${serverUidsSet.size}, local has ${localUids.length})`);
 
       // Unlink-or-delete rather than a blind bulk delete: a message that VANISHED
       // from THIS folder but still carries another folder's tag (a webmail move
@@ -2897,7 +2898,7 @@ export class MessageProcessor {
       }
       result.deleted = doomed.length;
       if (!emitPerRow) {
-        logger.info(`[syncFlags] ${folder.path}: ${doomed.length} rows reconciled (bulk — per-row UI events skipped; folder reloads fresh on open)`);
+        logger.info(`[syncFlags] ${folderLogLabel(folder.path)}: ${doomed.length} rows reconciled (bulk — per-row UI events skipped; folder reloads fresh on open)`);
       }
     }
 
@@ -2920,7 +2921,7 @@ export class MessageProcessor {
       } catch (err) {
         // A failed sweep leaves stale tags in place until the next sync — a
         // cosmetic lag, never worth failing the flag sync over.
-        logger.warn(`[syncFlags] ${folder.path}: stale-membership sweep failed: ${(err as Error).message}`);
+        logger.warn(`[syncFlags] ${folderLogLabel(folder.path)}: stale-membership sweep failed: ${failureCause(err)}`);
       }
     }
 
@@ -3012,7 +3013,7 @@ export class MessageProcessor {
       } catch (err) {
         // The SEARCH failed: evidence about the CONNECTION, not the message. Stop
         // the sweep here (nothing unlinked on a guess); the next sync asks again.
-        logger.warn(`[syncFlags] ${folder.path}: stale-membership HEADER search failed after ${searched - 1} check(s): ${(err as Error).message}`);
+        logger.warn(`[syncFlags] ${folderLogLabel(folder.path)}: stale-membership HEADER search failed after ${searched - 1} check(s): ${failureCause(err)}`);
         stoppedEarly = true;
         break;
       }
@@ -3035,7 +3036,7 @@ export class MessageProcessor {
     // sweep exists to fix, reintroduced by its own rate limit.
     if (!stoppedEarly) this.staleSweepLastRun.set(folder.path, Date.now());
     if (unlinked > 0) {
-      logger.info(`[syncFlags] ${folder.path}: stale-membership sweep unlinked ${unlinked} tag-only member(s) no longer on the server (${searched} searched, ${members.length} tag-only, ${unaccounted} unaccounted)`);
+      logger.info(`[syncFlags] ${folderLogLabel(folder.path)}: stale-membership sweep unlinked ${unlinked} tag-only member(s) no longer on the server (${searched} searched, ${members.length} tag-only, ${unaccounted} unaccounted)`);
     }
     return unlinked;
   }

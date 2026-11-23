@@ -40,7 +40,7 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/contact-enrichment/index.ts',
     ),
-    // Pure (zero imports) — same reasoning.
+    // Pure (only log-labels, itself pure) — same reasoning.
     '@sarvinbox/core/folder-mapping': resolve(
       desktopDir,
       '../../packages/core/src/config/folder-mapping.ts',
@@ -135,7 +135,7 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/sender-identity-policy.ts',
     ),
-    // Pure (folder-mapping + message-id, both zero-import) — which rows of a
+    // Pure (folder-mapping + message-id, and log-labels/fnv1a under them) — which rows of a
     // thread ARE the conversation, and in what order. The thread view, the
     // message list and the AI view must answer with the SAME predicate main
     // counts, drafts and schedules by, or a draft renders as a sent message in
@@ -203,6 +203,9 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
     // ours (field names, sizes, a URL's scheme), so renderer lines describe a
     // search or a model's answer by the same rules as main's.
     '@sarvinbox/core/log-text': resolve(desktopDir, '../../packages/core/src/utils/log-text.ts'),
+    // Pure (fnv1a only) — the stand-ins a log line uses for the account, a
+    // user-named folder, label or AI category, the same hash main writes.
+    '@sarvinbox/core/log-labels': resolve(desktopDir, '../../packages/core/src/utils/log-labels.ts'),
   };
 }
 

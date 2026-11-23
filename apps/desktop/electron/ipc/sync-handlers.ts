@@ -5,7 +5,7 @@
  */
 
 import type { IMAPConfig, SyncEngineOptions } from '@sarvinbox/core';
-import { withTimeout, transportOptInsOf, limitTransport, ImapFlowClient, isAuthError, isQuotaError, isStartTlsUnavailableError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift, STARTTLS_UNAVAILABLE } from '@sarvinbox/core';
+import { failureCause, folderLogLabel, accountLogLabel, withTimeout, transportOptInsOf, limitTransport, ImapFlowClient, isAuthError, isQuotaError, isStartTlsUnavailableError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift, STARTTLS_UNAVAILABLE } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { identifyClient } from '../sentry';
@@ -259,14 +259,14 @@ async function reconcileFolderDrift(
         : polled;
       if (plan.reconcileFlags) {
         logger.info(
-          `[Accounts] flag drift in ${f.path} (server unseen ${st.unseen ?? 0}, ` +
+          `[Accounts] flag drift in ${folderLogLabel(f.path)} (server unseen ${st.unseen ?? 0}, ` +
           `modseq ${st.highestModseq ?? '-'} vs synced ${f.highestModseq ?? '-'}) — reconciling`,
         );
       } else if (plan.recountFromRows) {
         // Named in the log: a badge that outlived its mail is invisible from the
         // outside, and this line is the only place it leaves a trace.
         logger.info(
-          `[Accounts] unread badge for ${f.path} disagrees with the server ` +
+          `[Accounts] unread badge for ${folderLogLabel(f.path)} disagrees with the server ` +
           `(stored ${f.unreadCount ?? 0} thread(s) vs server unseen ${st.unseen ?? 0}) — recounting from rows`,
         );
       }
@@ -297,7 +297,7 @@ async function reconcileFolderDrift(
         // renderer re-runs that folder's list query, not just the badges.
         notify: (path) => sendToWindow('folders:updated', { accountId, folderPath: path }),
         onError: (stage, path, error) =>
-          logger.warn(`[Accounts] ${stage} reconcile failed for`, path, error.message),
+          logger.warn(`[Accounts] ${stage} reconcile failed for`, folderLogLabel(path), failureCause(error)),
       });
     } catch { /* skip this folder */ }
   }
@@ -394,7 +394,7 @@ export function registerSyncHandlers(): void {
       if (!getSyncEngine() && accountId && accountDbExists(accountId)) {
         await ensureAccountRuntime(accountId);
         setCurrentAccount(accountId);
-        logger.info(`[Main] imap:connect self-activated account ${accountId} (storage was uninitialized)`);
+        logger.info(`[Main] imap:connect self-activated account ${accountLogLabel(accountId)} (storage was uninitialized)`);
       }
       const syncEngine = requireSyncEngine();
       const storage = getStorage();
@@ -416,7 +416,6 @@ export function registerSyncHandlers(): void {
       // Attribute every subsequent error/breadcrumb to this client + mailbox.
       // Set BEFORE connecting so a failed connect is also attributed correctly.
       identifyClient({
-        email: config.username,
         provider: config.oauthProvider ?? 'imap',
         host: config.host,
         port: config.port,
@@ -892,7 +891,7 @@ export function registerSyncHandlers(): void {
       const activeId = getCurrentAccountId();
       const parkedMs = quotaBackoff.remainingMs(activeId);
       if (parkedMs > 0) {
-        logger.info(`[Main] resetAndReconnect skipped — quota back-off active for ${activeId} (server connection cap); ${Math.round(parkedMs / 1000)}s left`);
+        logger.info(`[Main] resetAndReconnect skipped — quota back-off active for ${accountLogLabel(activeId)} (server connection cap); ${Math.round(parkedMs / 1000)}s left`);
         return { success: true, data: { connected: syncEngine.isConnected() } };
       }
 
@@ -1196,7 +1195,7 @@ export function registerSyncHandlers(): void {
       const mode = await syncEngine.startRealTime(folderPath);
 
       if (mode) {
-        logger.info(`[Main] Real-time sync started using: ${mode} for ${folderPath}`);
+        logger.info(`[Main] Real-time sync started using: ${mode} for ${folderLogLabel(folderPath)}`);
       }
 
       return { success: true, data: !!mode, mode };
@@ -1345,9 +1344,9 @@ export function registerSyncHandlers(): void {
         registerIdleBridges(accountId, engine);
         try {
           const mode = await engine.startRealTime('INBOX');
-          logger.info('[IDLE] backgroundSync re-armed IDLE (socket alive) for', accountId, '→', mode);
+          logger.info('[IDLE] backgroundSync re-armed IDLE (socket alive) for', accountLogLabel(accountId), '→', mode);
         } catch (e) {
-          logger.warn('[IDLE] backgroundSync IDLE re-arm failed for', accountId, (e as Error).message);
+          logger.warn('[IDLE] backgroundSync IDLE re-arm failed for', accountLogLabel(accountId), (e as Error).message);
         }
         return { success: true, data: { unread: await totalUnread(rt.storage), live: true, reidled: true } };
       }
@@ -1382,7 +1381,7 @@ export function registerSyncHandlers(): void {
         // that config for auto-reconnect to hammer). Skip this cycle; the next
         // background tick retries once the vault is readable.
         if (cfg.authMethod !== 'oauth2' && !cfg.password) {
-          logger.warn(`[Accounts] backgroundSync: no password available yet for ${accountId} — skipping connect this cycle`);
+          logger.warn(`[Accounts] backgroundSync: no password available yet for ${accountLogLabel(accountId)} — skipping connect this cycle`);
           return { success: false, error: 'Credentials not ready', retryable: true };
         }
         const dialConfig = attachImapBearer(cfg);
@@ -1414,7 +1413,7 @@ export function registerSyncHandlers(): void {
           'Background sync timed out',
         );
       } catch (e) {
-        logger.warn('[Accounts] background INBOX catch-up sync failed (going LIVE anyway) for', accountId, (e as Error).message);
+        logger.warn('[Accounts] background INBOX catch-up sync failed (going LIVE anyway) for', accountLogLabel(accountId), (e as Error).message);
       }
 
       // STATUS-then-reconcile sweep across this account's non-INBOX folders (fresh
@@ -1423,7 +1422,7 @@ export function registerSyncHandlers(): void {
       try {
         await reconcileFolderDrift(engine, rt.storage, accountId);
       } catch (e) {
-        logger.warn('[Accounts] STATUS sweep failed for', accountId, (e as Error).message);
+        logger.warn('[Accounts] STATUS sweep failed for', accountLogLabel(accountId), (e as Error).message);
       }
 
       // Go LIVE: tagged IDLE bridges + real-time push. Idempotent.
@@ -1434,9 +1433,9 @@ export function registerSyncHandlers(): void {
       retryPipelineInitOnConnect();
       try {
         const mode = await engine.startRealTime('INBOX');
-        logger.info('[IDLE] backgroundSync startRealTime for', accountId, '→ mode:', mode);
+        logger.info('[IDLE] backgroundSync startRealTime for', accountLogLabel(accountId), '→ mode:', mode);
       } catch (e) {
-        logger.warn('[IDLE] startRealTime FAILED for', accountId, (e as Error).message);
+        logger.warn('[IDLE] startRealTime FAILED for', accountLogLabel(accountId), (e as Error).message);
       }
 
       return { success: true, data: { unread: await totalUnread(rt.storage) } };
@@ -1455,14 +1454,14 @@ export function registerSyncHandlers(): void {
       // saturated cap, which prolongs the lockout and risks a real rate-limit.
       const parked = quotaBackoff.parkOnError(accountId, error);
       if (parked.reason === 'quota') {
-        logger.warn(`[Accounts] backgroundSync: quota hit for ${accountId} (too many connections) — backing off ${Math.round(parked.backoffMs / 1000)}s (attempt ${parked.attempt})`);
+        logger.warn(`[Accounts] backgroundSync: quota hit for ${accountLogLabel(accountId)} (too many connections) — backing off ${Math.round(parked.backoffMs / 1000)}s (attempt ${parked.attempt})`);
         return { success: false, error: (error as Error).message, quotaExceeded: true };
       }
       if (parked.reason === 'timeout') {
-        logger.warn(`[Accounts] backgroundSync: connect timed out for ${accountId} — backing off ${Math.round(parked.backoffMs / 60000)}m`);
+        logger.warn(`[Accounts] backgroundSync: connect timed out for ${accountLogLabel(accountId)} — backing off ${Math.round(parked.backoffMs / 60000)}m`);
         return { success: false, error: (error as Error).message };
       }
-      logger.warn('[Accounts] backgroundSync failed for', accountId, (error as Error).message);
+      logger.warn('[Accounts] backgroundSync failed for', accountLogLabel(accountId), (error as Error).message);
       return { success: false, error: (error as Error).message };
     }
   });

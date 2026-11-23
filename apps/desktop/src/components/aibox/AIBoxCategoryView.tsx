@@ -1,4 +1,5 @@
 import type { EmailRecord } from '@sarvinbox/core';
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
 import { Loader2 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
@@ -69,7 +70,7 @@ export function AIBoxCategoryView({
             setEmails(result.data);
           }
         } catch (error) {
-          console.error('Failed to load AI category emails:', error);
+          console.error('Failed to load AI category emails:', errorDiagnostic(error));
         } finally {
           setLoadingAICategoryEmails(false);
         }

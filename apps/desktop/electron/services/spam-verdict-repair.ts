@@ -36,6 +36,9 @@
  * every later launch a single empty SELECT.
  */
 import {
+  failureCause,
+  folderLogLabel,
+  accountLogLabel,
   bodyStage,
   createLogger,
   hasTag,
@@ -135,7 +138,7 @@ export async function repairMessage(
   // move lands, and the queue persists it across a disconnect.
   if (moved && queue && email.uid > 0) {
     queue.move(moved.sourcePath, email.uid, moved.destPath).catch((err: unknown) => {
-      logger.warn(`[SpamRepair] server move failed for uid ${email.uid} in ${moved!.sourcePath}: ${(err as Error)?.message ?? err}`);
+      logger.warn(`[SpamRepair] server move failed for uid ${email.uid} in ${folderLogLabel(moved!.sourcePath)}: ${failureCause(err)}`);
     });
   }
   return { rescored: update.spamScore !== undefined, unfiled };
@@ -197,7 +200,7 @@ async function run(): Promise<void> {
     try {
       await repairAccount(storage, queue, accountId);
     } catch (e) {
-      logger.warn(`[SpamRepair] ${accountId}: repair failed (isolated): ${(e as Error).message}`);
+      logger.warn(`[SpamRepair] ${accountLogLabel(accountId)}: repair failed (isolated): ${(e as Error).message}`);
     }
   }
 }

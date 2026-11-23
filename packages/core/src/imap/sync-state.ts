@@ -2,6 +2,7 @@
 
 import { EventEmitter } from 'events';
 
+import { folderLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 
 /**
@@ -122,7 +123,7 @@ export class SyncStateManager extends EventEmitter {
     if (state.lastSyncTime) {
       const age = Date.now() - state.lastSyncTime;
       if (age > SyncStateManager.STALE_SYNC_TIMEOUT_MS) {
-        logger.warn(`Stale sync detected for ${folderPath}, marking as error`);
+        logger.warn(`Stale sync detected for ${folderLogLabel(folderPath)}, marking as error`);
         this.setFolderError(folderPath, new Error('Sync timeout'));
         return false;
       }

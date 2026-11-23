@@ -24,6 +24,7 @@
 //  * OPTIMISTIC WRITES THAT CAN FAIL. A write shows immediately, survives a load
 //    that races it, and is rolled back if the main process refuses it.
 
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { createLogger } from '@sarvinbox/core/logger';
 
 const log = createLogger('AccountScopedCache');
@@ -148,7 +149,8 @@ export function createAccountScopedCache<T>(options: AccountScopedCacheOptions<T
 
   const keyFor = (accountId?: string | null): string => accountId || activeAccount || UNKNOWN_ACTIVE;
   const argFor = (key: string): string | undefined => (key === UNKNOWN_ACTIVE ? undefined : key);
-  const label = (key: string) => (key === UNKNOWN_ACTIVE ? 'the active account' : key);
+  // An account id spells out the address it was built from: written as its label.
+  const label = (key: string) => (key === UNKNOWN_ACTIVE ? 'the active account' : accountLogLabel(key));
 
   const entryFor = (key: string): Entry<T> => {
     let entry = entries.get(key);

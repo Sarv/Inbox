@@ -105,6 +105,10 @@ vi.mock('@sarvinbox/core', async () => {
     },
     withTimeout: timeout.withTimeout,
     isTimeoutError: timeout.isTimeoutError,
+    // The real path helpers: the updater's own log goes through them.
+    ...(await vi.importActual<typeof import('../../../../../../packages/core/src/utils/log-paths')>(
+      '../../../../../../packages/core/src/utils/log-paths',
+    )),
   };
 });
 
@@ -1537,5 +1541,23 @@ describe('signed update manifest (CASA M-3)', () => {
     h.updater.emit('update-downloaded', { version: '1.3.0', files });
     expect(service.getUpdateState().phase).toBe('downloaded');
     service.stopUpdateService();
+  });
+});
+
+describe("electron-updater's own log", () => {
+  // Breaks if the updater's lines ("downloaded to /Users/<name>/Library/
+  // Caches/…", an error's stack) write the user's home folder, and with it
+  // their name, into app.log.
+  it('writes the home folder as ~ in a message and in an error stack', async () => {
+    const { homedir } = await import('os');
+    const home = homedir();
+    const { describeUpdaterMessage } = await load();
+    const cache = join(home, 'Library', 'Caches', 'sarv-inbox-updater', 'pending', 'Sarv-Inbox.zip');
+
+    expect(describeUpdaterMessage(`Update downloaded to ${cache}`)).not.toContain(home);
+    expect(describeUpdaterMessage(`Update downloaded to ${cache}`)).toContain('downloaded to ~');
+    const error = new Error(`ENOENT: no such file, open '${cache}'`);
+    error.stack = `Error: ENOENT: no such file, open '${cache}'\n    at ${join(home, 'app', 'main.js')}:1:1`;
+    expect(describeUpdaterMessage(error)).not.toContain(home);
   });
 });

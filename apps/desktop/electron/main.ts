@@ -17,7 +17,7 @@ import netModule from 'net';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 
-import { SyncEngine, ExtensionManager, createLogger, errorDiagnostic, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
+import { accountLogLabel, SyncEngine, ExtensionManager, createLogger, errorDiagnostic, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
 import { app, BrowserWindow, Menu, dialog, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
 
@@ -158,6 +158,7 @@ import { devServerUrlFor, isDevBuild, isReleaseBundle } from './utils/dev-mode';
 import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
 import { installIpcSenderGuard } from './utils/ipc-sender-guard';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
+import { logPath } from './utils/log-path';
 import { mainWindowWebPreferences } from './utils/main-window-preferences';
 import { installNavigationGuards } from './utils/navigation-guards';
 import { installPermissionPolicy } from './utils/permission-policy';
@@ -638,7 +639,7 @@ async function initializeStorage(): Promise<void> {
     send: sendToWindow,
     accountId: () => getAccountIdForStorage(storage),
   });
-  logger.info('[Main] Storage initialized:', dbPath);
+  logger.info('[Main] Storage initialized:', logPath(dbPath));
 }
 
 /**
@@ -754,14 +755,14 @@ async function initializeAccountRegistry(): Promise<void> {
     // mailbox for an id whose data isn't on disk.
     const isPrimary = loadPrimaryAccountId() === activeId && legacyDbExists();
     if (!isPrimary && !accountDbExists(activeId)) {
-      logger.info('[Main] Persisted active account has no DB yet — deferring to renderer:', activeId);
+      logger.info('[Main] Persisted active account has no DB yet — deferring to renderer:', accountLogLabel(activeId));
       return;
     }
 
     setCurrentAccount(activeId);
     if (!hasAccountRuntime(activeId)) await ensureAccountRuntime(activeId);
     rebindOutboxStorage();
-    logger.info('[Main] Auto-activated persisted account:', activeId);
+    logger.info('[Main] Auto-activated persisted account:', accountLogLabel(activeId));
   } catch (e) {
     logger.warn('[Main] Auto-activate persisted account failed:', (e as Error)?.message);
   }

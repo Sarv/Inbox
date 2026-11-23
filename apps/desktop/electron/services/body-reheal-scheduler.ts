@@ -28,7 +28,7 @@
  * entirely (never downloaded — the body-prefetch's job) and are dropped by a
  * cheap probe rather than spending the repair budget; see drainEmptyBodies.
  */
-import { createLogger, createLoopYielder, isDeferredFetchError, isFirstSplitCurrent, repairedCleanBody } from '@sarvinbox/core';
+import { accountLogLabel, createLogger, createLoopYielder, isDeferredFetchError, isFirstSplitCurrent, repairedCleanBody } from '@sarvinbox/core';
 import { areBodyLengthsReady, cleanBodyExpression, rawBodyExpression, rawBodyLengthExpression } from '@sarvinbox/storage-node';
 
 import { getAllAccountRuntimes } from '../shared';
@@ -115,8 +115,8 @@ async function scanAccount(accountId: string, storage: any): Promise<void> {
   queues.set(accountId, q);
   emptyQueues.set(accountId, emptyIds);
   scanned.add(accountId);
-  if (q.length > 0) logger.info(`Body re-heal: queued ${q.length} corrupted bodies for ${accountId}`);
-  if (emptyIds.length > 0) logger.info(`Body re-heal: queued ${emptyIds.length} empty clean bodies for local repair for ${accountId}`);
+  if (q.length > 0) logger.info(`Body re-heal: queued ${q.length} corrupted bodies for ${accountLogLabel(accountId)}`);
+  if (emptyIds.length > 0) logger.info(`Body re-heal: queued ${emptyIds.length} empty clean bodies for local repair for ${accountLogLabel(accountId)}`);
 }
 
 /**
@@ -308,7 +308,7 @@ async function tick(): Promise<void> {
           // stuck — never reached app.log. One line per account per 3 minutes,
           // and only when there was work, so it costs nothing and goes quiet.
           logger.info(
-            `Body re-heal ${accountId}: repaired ${repaired}, failed ${failed}, ${remaining} queued` +
+            `Body re-heal ${accountLogLabel(accountId)}: repaired ${repaired}, failed ${failed}, ${remaining} queued` +
             (skippedOffline ? ` (SKIPPED — account offline, ${skippedOffline} waiting)` : '') +
             ` | local rebuild ${local.repaired} repaired, ${local.skipped} unrepairable, ` +
             `${local.notDownloaded} body not downloaded yet, ${localRemaining} queued`,
@@ -318,7 +318,7 @@ async function tick(): Promise<void> {
         // Isolate one account's failure so the loop still covers the rest — at
         // WARN, because at debug a permanently-failing account looked identical
         // to one with nothing to do.
-        logger.warn(`Body re-heal: account ${accountId} tick failed: ${(error as Error).message}`);
+        logger.warn(`Body re-heal: account ${accountLogLabel(accountId)} tick failed: ${(error as Error).message}`);
       }
     }
   } catch (error) {

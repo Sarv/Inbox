@@ -46,13 +46,17 @@ vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
 }));
 
+const logLines = vi.hoisted(() => [] as string[]);
 vi.mock('@sarvinbox/core', async () => ({
+  // The real log helpers (see the helper): product log lines go through them.
+  ...(await import('../../../helpers/core-log-helpers')),
   // The real reader of the blocklist settings: pure, and what decides whether
   // the stage below is built at all.
   readBlocklistPrefs: (await import('../../../../../../packages/core/src/utils/blocklist-prefs')).readBlocklistPrefs,
-  createLogger: () => ({
-    info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
-  }),
+  createLogger: () => {
+    const record = (...args: unknown[]) => { logLines.push(args.map(String).join(' ')); };
+    return { info: record, warn: record, error: record, debug: record, trace: record };
+  },
   SyncEngine: class {
     storage: unknown;
     // Recorded, not ignored: every account's engine must be handed the shared
@@ -814,6 +818,32 @@ describe('cleanupOrphanedAccountDbs', () => {
     age(orphan, 24 * 60 * 60 * 1000);
     expect(cleanupOrphanedAccountDbs({ keepAccountIds: ['acct-kept'], staleAfterMs: 0 })).toEqual([orphan]);
     expect(existsSync(join(h.userData, kept))).toBe(true);
+  });
+
+  // Regression: '[Accounts] removed legacy … DB: <file>' wrote the file name,
+  // and a legacy name IS the account id (the owner's address, normalised).
+  it('logs a removed legacy DB by its account label, never its name', async () => {
+    const { accountLogLabel } = await import('../../../helpers/core-log-helpers');
+    logLines.length = 0;
+    touch('sarvinbox-acct-owner-sentinel-example-com.db');
+    touch('acct-other-sentinel-example-com', SQLITE_MAGIC);
+
+    expect(cleanupOrphanedAccountDbs()).toEqual(
+      expect.arrayContaining(['sarvinbox-acct-owner-sentinel-example-com.db', 'acct-other-sentinel-example-com']),
+    );
+
+    expect(logLines.filter((l) => l.includes('sentinel'))).toEqual([]);
+    expect(logLines).toContain(`[Accounts] removed orphaned legacy DB: sarvinbox-${accountLogLabel('acct-owner-sentinel-example-com')}.db`);
+    expect(logLines).toContain(`[Accounts] removed legacy plaintext account DB: ${accountLogLabel('acct-other-sentinel-example-com')}`);
+  });
+
+  // Regression: '[Accounts] Created runtime -> <path>' wrote the absolute DB
+  // path, which names the user through their home folder.
+  it('logs a new runtime\'s database relative to userData', async () => {
+    logLines.length = 0;
+    await createAccountRuntime('sarvinbox-abc.db');
+    expect(logLines).toContain('[Accounts] Created runtime -> <userData>/sarvinbox-abc.db');
+    expect(logLines.filter((l) => l.includes(h.userData))).toEqual([]);
   });
 
   it('removes an oldest-scheme plaintext `acct-*` DB only when it really is SQLite', () => {

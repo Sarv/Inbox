@@ -24,6 +24,7 @@
  */
 
 import {
+  failureCause,
   createLogger,
   DEFAULT_SENDER_IDENTITY_POLICY,
   discoverFavicon,
@@ -85,7 +86,7 @@ export function setSenderIdentityPolicy(raw: unknown): SenderIdentityPolicy {
   try {
     setBlob(POLICY_BLOB_KEY, Buffer.from(JSON.stringify(cachedPolicy), 'utf8'));
   } catch (e) {
-    logger.warn(`[SenderIdentity] policy not persisted: ${(e as Error).message}`);
+    logger.warn(`[SenderIdentity] policy not persisted: ${failureCause(e)}`);
   }
   return cachedPolicy;
 }
@@ -388,14 +389,14 @@ export async function senderIdentityTick(svc: SenderIdentityService = getSenderI
       try {
         domains.push(...(await storage.getRecentSenderDomains(DOMAINS_PER_ACCOUNT)));
       } catch (e) {
-        logger.warn(`[SenderIdentity] could not list sender domains: ${(e as Error).message}`);
+        logger.warn(`[SenderIdentity] could not list sender domains: ${failureCause(e)}`);
       }
     }
     const refreshed = await svc.refreshStale(domains, REFRESH_PER_TICK);
     if (refreshed > 0) logger.info(`[SenderIdentity] refreshed ${refreshed} domain(s)`);
     return refreshed;
   } catch (e) {
-    logger.warn(`[SenderIdentity] tick failed: ${(e as Error).message}`);
+    logger.warn(`[SenderIdentity] tick failed: ${failureCause(e)}`);
     return 0;
   } finally {
     ticking = false;
