@@ -41,10 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were working on. Draft subjects, attachment names, links from mail that the
   app blocked, recipients' names, the domains and organisation names of
   verified senders, the AI's reasoning when it skipped an auto-send,
-  spam-report senders and blocklist lookups were written there too. These
-  lines now record only what happened (counts, sizes, yes/no, the kind of
-  failure), never the text. Extensions' own informational lines are no longer
-  recorded either (developers can turn them back on with
+  spam-report senders, blocklist lookups, the addresses of senders that the
+  spam filter, your filters, Autocrypt, automatic replies and **Load images**
+  acted on, and the mail server's reply when a send failed (which can name
+  the recipients) were written there too. These lines now record only what
+  happened (counts, sizes, yes/no, the kind of failure), never the text.
+  Extensions' own informational lines are no longer recorded either
+  (developers can turn them back on with
   `SARV_DEBUG_EXTENSIONS=1`); their warnings and errors still are. The app
   never uploads the log file, but you may attach it to a bug report, and if
   you turned on crash reports the most recent lines go with each report, so it

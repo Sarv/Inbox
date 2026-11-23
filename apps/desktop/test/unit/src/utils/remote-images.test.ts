@@ -1,5 +1,7 @@
+import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core/logger';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { captureLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import { getCachedCategorySlugs, warmCategoryDefs } from '../../../../src/components/email-list/CategoryBadges';
 import { SETTINGS_WRITTEN_EVENT } from '../../../../src/config/inbox-types';
 import { setActiveCacheAccount } from '../../../../src/utils/account-scoped-cache';
@@ -598,6 +600,33 @@ describe('per-sender image allowlist', () => {
     await vi.advanceTimersByTimeAsync(PERSIST_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
     expect(api.emails.allowImagesForSender).toHaveBeenCalledTimes(1 + PERSIST_RETRY_DELAYS_MS.length);
     expect(isSenderImagesAllowed('a@x.com')).toBe(false);
+  });
+
+  // Breaks: "Image allowance for <sender or domain> was not saved (<error>)" —
+  // the renderer forwards its warnings to app.log, a release build included,
+  // and the redaction misses a dotless address and every bare domain. The
+  // line names the entry's kind and the failure's kind; the allowance is
+  // still withdrawn.
+  it('logs an allowance that never lands by its kind, not the sender, the domain or the error', async () => {
+    vi.useFakeTimers();
+    const SENTINEL = 'sentinel-img';
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      api.emails.allowImagesForSender.mockRejectedValue(new Error(`No handler for ${SENTINEL}@localhost`));
+      rememberSenderImagesAllowed(message({ fromAddress: `${SENTINEL}@localhost` }));
+      await vi.advanceTimersByTimeAsync(PERSIST_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
+
+      api.emails.allowImagesForSender.mockResolvedValue({ success: false, error: `Storage busy writing @${SENTINEL}.example` });
+      rememberImagesAllowed(`@${SENTINEL}.example`);
+      await vi.advanceTimersByTimeAsync(PERSIST_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
+
+      expect(isSenderImagesAllowed(`${SENTINEL}@localhost`)).toBe(false);
+      expect(logs.containing(SENTINEL)).toEqual([]);
+      expect(logs.containing('Image allowance (sender) was not saved after 3 tries (Error); it no longer applies')).toHaveLength(1);
+      expect(logs.containing('Image allowance (domain) was not saved after 3 tries (refused); it no longer applies')).toHaveLength(1);
+    } finally {
+      logs.stop();
+    }
   });
 
   // Idempotent re-run: a blip on the first attempt is recovered by the retry,

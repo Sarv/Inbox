@@ -23,6 +23,7 @@ import type { IEmailStorage } from '../types/storage';
 import { hasCalendarMimePart, sanitizeIcsText } from '../utils/calendar';
 import { hasCidRefs, resolveCidImages, type CidImagePart } from '../utils/cid-images';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
+import { errorDiagnostic } from '../utils/error-diagnostic';
 import { collectFilterActions, computeFilterActionResult } from '../utils/filters';
 import { refreshCountsForFolders } from '../utils/folder-counts';
 import { mapGmailLabels, matchKnownCategory, type GmailFolderRole, type KnownCategory } from '../utils/gmail-labels';
@@ -501,6 +502,11 @@ export class MessageProcessor {
           .map((e) => [e.messageId, e]),
       );
 
+      // Sender lookups (spammer list, trusted senders) that failed in this
+      // sub-batch, logged ONCE after it: a store that is unreadable mid-sync
+      // fails every message's lookup, and the line names no sender.
+      const lookupFailures = { spammer: 0, trusted: 0, first: undefined as unknown };
+
       for (const message of usable) {
         try {
           result.maxUid = Math.max(result.maxUid, message.uid);
@@ -597,12 +603,14 @@ export class MessageProcessor {
             try {
               knownSpammer = await storage.isSpammer(fromAddress);
             } catch (err) {
-              logger.error(`[AutoSpam] Check failed for ${fromAddress}:`, err);
+              lookupFailures.spammer += 1;
+              lookupFailures.first ??= err;
             }
             try {
               trustedSender = await storage.isTrustedSender(fromAddress);
             } catch (err) {
-              logger.error(`[AutoSpam] Trust check failed for ${fromAddress}:`, err);
+              lookupFailures.trusted += 1;
+              lookupFailures.first ??= err;
             }
           }
 
@@ -635,6 +643,12 @@ export class MessageProcessor {
           // "tried" and suppress a message that was never actually stored.
           result.erroredUids.push(message.uid);
         }
+      }
+      if (lookupFailures.spammer > 0 || lookupFailures.trusted > 0) {
+        logger.error(
+          `[AutoSpam] Sender lookups failed (spammer list: ${lookupFailures.spammer}, trusted senders: ${lookupFailures.trusted}); a failed lookup counts as not reported and not trusted:`,
+          errorDiagnostic(lookupFailures.first),
+        );
       }
 
       // Insert batch
@@ -688,7 +702,7 @@ export class MessageProcessor {
               filed += 1;
             } catch (err) {
               // Non-fatal — a failed re-file must not break the sync.
-              logger.error(`[AutoSpam] Re-file failed for ${email.fromAddress}:`, err);
+              logger.error(`[AutoSpam] Re-file failed for ${email.id}:`, errorDiagnostic(err));
             }
           }
           if (filed > 0) logger.info(`[AutoSpam] Filed ${filed} message(s) into the spam folder`);
@@ -711,6 +725,10 @@ export class MessageProcessor {
         }
         if (filterRules.length > 0) {
           const folders = await getAllFolders();
+          // One summary per batch, as the spam re-file above: a line per
+          // message would name every matched sender on a first sync.
+          let filteredMessages = 0;
+          let appliedActions = 0;
           for (const email of emailRecords) {
             try {
               const actions = collectFilterActions(email, filterRules);
@@ -741,12 +759,14 @@ export class MessageProcessor {
               // Keep the in-memory record current for the email:synced event.
               email.tags = tags;
               email.folderId = folderId;
-              logger.info(`[Filters] Applied ${applicable.length} action(s) to email from ${email.fromAddress}`);
+              filteredMessages += 1;
+              appliedActions += applicable.length;
             } catch (err) {
               // Non-fatal — a bad rule must not break sync.
               logger.error(`[Filters] Failed to apply rules for ${email.id}:`, err);
             }
           }
+          if (filteredMessages > 0) logger.info(`[Filters] Applied ${appliedActions} action(s) to ${filteredMessages} message(s)`);
         }
 
         result.inserted += emailRecords.length;
@@ -1150,7 +1170,7 @@ export class MessageProcessor {
     // likeliest forgery of all, and it is judged like anyone's mail.
     const trusted = !!scored && opts?.trustedSender === true && !authenticationFailed(auth);
     if (scored && opts?.trustedSender === true && !trusted) {
-      logger.warn(`[AutoSpam] Trust set aside for ${envelopeFields.fromAddress}: the message failed authentication`);
+      logger.warn(`[AutoSpam] Trust set aside for uid ${message.uid}: a trusted sender's message failed authentication`);
     }
 
     // The classification tag the AI pipeline excludes on and the Spam filter

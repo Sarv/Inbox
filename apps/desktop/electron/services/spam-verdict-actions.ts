@@ -16,6 +16,7 @@ import {
   classifyFolder,
   computeFilterActionResult,
   createLogger,
+  failureCause,
   findFolderByType,
   removeTag,
   type EmailRecord,
@@ -157,7 +158,8 @@ export async function applyUserSpamVerdict(deps: VerdictDeps, emailId: string, v
         await storage.removeSpammer(email.fromAddress);
       }
     } catch (e) {
-      logger.warn(`[SpamVerdict] spammer list not updated for ${email.fromAddress}: ${(e as Error).message}`);
+      // The message id and the kind of failure, never the sender's address.
+      logger.warn(`[SpamVerdict] spammer list not updated for ${emailId} (${verdict}): ${failureCause(e)}`);
     }
   }
 

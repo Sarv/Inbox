@@ -1,5 +1,7 @@
+import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core/logger';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
+import { captureLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import { reportSendFailure } from '../../../../src/utils/send-failure';
 
 /**
@@ -16,16 +18,42 @@ describe('reportSendFailure', () => {
   const stub = () => {
     const alertSpy = vi.fn();
     (globalThis as any).alert = alertSpy;
-    const logSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    return { alertSpy, logSpy };
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    return { alertSpy };
   };
 
-  it('alerts the user with the error message and logs the error', () => {
-    const { alertSpy, logSpy } = stub();
-    const error = new Error('535 auth failed');
-    reportSendFailure(error);
-    expect(alertSpy).toHaveBeenCalledWith('Failed to send email: 535 auth failed');
-    expect(logSpy).toHaveBeenCalledWith('Failed to send email:', error);
+  // Changed (2026-11-23): the log line used to carry the whole error; it now
+  // names the failure's kind (see the next test). The dialog is unchanged.
+  it('alerts the user with the error message and logs the failure', () => {
+    const { alertSpy } = stub();
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      reportSendFailure(new Error('535 auth failed'));
+      expect(alertSpy).toHaveBeenCalledWith('Failed to send email: 535 auth failed');
+      expect(logs.containing('Failed to send email (Error)')).toHaveLength(1);
+    } finally {
+      logs.stop();
+    }
+  });
+
+  // Breaks: "Failed to send email: <error>" — a send's error text (the server's
+  // 5xx reply, "No encryption key for <recipients>") quotes the recipients, and
+  // the renderer's errors reach app.log, a release build included. The user
+  // still reads the full text in the dialog; the log keeps only its kind.
+  it('logs the kind of failure, never the recipients the error text names', () => {
+    const SENTINEL = 'sentinel-rcpt';
+    const { alertSpy } = stub();
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      reportSendFailure(Object.assign(new Error(`550 5.1.1 <${SENTINEL}@localhost>: no such user`), { code: 'EENVELOPE' }));
+      reportSendFailure(`No encryption key for ${SENTINEL}@example.org`);
+      expect(alertSpy).toHaveBeenCalledWith(`Failed to send email: 550 5.1.1 <${SENTINEL}@localhost>: no such user`);
+      expect(logs.containing(SENTINEL)).toEqual([]);
+      expect(logs.containing('Failed to send email (EENVELOPE)')).toHaveLength(1);
+      expect(logs.containing('Failed to send email (')).toHaveLength(2);
+    } finally {
+      logs.stop();
+    }
   });
 
   it('shows a string rejection verbatim instead of "undefined"', () => {

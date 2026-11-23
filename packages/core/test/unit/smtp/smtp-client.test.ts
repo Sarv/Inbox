@@ -248,7 +248,7 @@ describe('SMTPClient.sendEmail — recipient validation', () => {
   it('reports a transient failure when not connected (so the outbox retries)', async () => {
     const fresh = new SMTPClient();
     const result = await fresh.sendEmail(send());
-    expect(result).toEqual({ success: false, error: 'Not connected to SMTP server', transient: true });
+    expect(result).toEqual({ success: false, error: 'Not connected to SMTP server', transient: true, failure: 'not-connected' });
     expect(h.state.sent).toHaveLength(0);
   });
 
@@ -589,7 +589,7 @@ describe('SMTPClient.sendEmail — outgoing MIME transform', () => {
     const permanent = await client.sendEmail(send(), async () => {
       throw new OutgoingMimeError('No key for to@example.com', false);
     });
-    expect(permanent).toEqual({ success: false, error: 'No key for to@example.com', transient: false });
+    expect(permanent).toEqual({ success: false, error: 'No key for to@example.com', transient: false, failure: 'OutgoingMimeError' });
     const transient = await client.sendEmail(send(), async () => {
       throw new OutgoingMimeError('Key lookup timed out', true);
     });
@@ -648,5 +648,47 @@ describe('SMTPClient.sendEmail — what reaches the log', () => {
     expect(retried.success).toBe(true);
     expect(logs.containing(NAME)).toEqual([]);
     expect(logs.containing('Sending email: to=2 cc=1 bcc=1 recipient(s)')).toHaveLength(2);
+  });
+
+  const ADDRESS = 'sentinel-rcpt@example.org';
+
+  // Breaks: "Failed to send email: OutgoingMimeError: No encryption key for
+  // <recipients>" — our own refusal lists the recipients that have no key,
+  // and the failure line logged the whole error. The user still gets the
+  // text (in `error`); the log gets its kind.
+  it('logs the kind of a PGP refusal, not the recipients it names', async () => {
+    const result = await client.sendEmail(recipients(), async () => {
+      throw new OutgoingMimeError(`No encryption key for ${ADDRESS}, ${NAME} — import their key or send unencrypted`, false);
+    });
+
+    expect(result).toMatchObject({ success: false, transient: false, failure: 'OutgoingMimeError' });
+    expect(result.error).toContain(ADDRESS);
+    expect(logs.containing(ADDRESS)).toEqual([]);
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing('Failed to send email (OutgoingMimeError, reply code none, transient=false)')).toHaveLength(1);
+  });
+
+  // Breaks: a server's 5xx recipient rejection (nodemailer's message and its
+  // `response` quote the reply, which names the recipient) is logged whole.
+  it('logs the code of a server rejection, not the reply that names the recipient', async () => {
+    h.state.sendError = Object.assign(new Error(`Can't send mail - all recipients were rejected: 550 5.1.1 <${ADDRESS}>: Recipient address rejected`), {
+      code: 'EENVELOPE', responseCode: 550, response: `550 5.1.1 <${ADDRESS}>: Recipient address rejected`, rejected: [ADDRESS],
+    });
+    const result = await client.sendEmail(recipients());
+    h.state.sendError = null;
+
+    expect(result).toMatchObject({ success: false, transient: false, failure: 'EENVELOPE' });
+    expect(logs.containing(ADDRESS)).toEqual([]);
+    expect(logs.containing('Failed to send email (EENVELOPE, reply code 550, transient=false)')).toHaveLength(1);
+  });
+
+  // Breaks: the send queue and the agent's auto-send can only log `error` (the
+  // recipients' text) because the result carries no kind for the cases that
+  // fail before the wire.
+  it('gives every failure before the wire a fixed kind', async () => {
+    expect(await client.sendEmail(send({ to: [] }))).toMatchObject({ failure: 'no-recipients' });
+    expect(await client.sendEmail(send({ to: [`${NAME} <not-an-address>`] }))).toMatchObject({ failure: 'invalid-recipient', transient: false });
+    expect(await new SMTPClient().sendEmail(recipients())).toMatchObject({ failure: 'not-connected', transient: true });
+    expect(logs.containing(NAME)).toEqual([]);
   });
 });

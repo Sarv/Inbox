@@ -125,6 +125,14 @@ export interface SendResult {
    */
   transient?: boolean;
   /**
+   * On failure: what KIND of failure, as one token a log line may carry — a
+   * fixed kind (`invalid-recipient`, `not-connected`) or `failureCause` of the
+   * thrown error (`EENVELOPE`, `OutgoingMimeError`). `error` is for the user and
+   * can quote recipients' addresses (a server's 5xx reply, "no encryption key
+   * for …"), so it is never logged; this is. Undefined on success.
+   */
+  failure?: string;
+  /**
    * On success: the exact raw MIME that was submitted to SMTP. Reused verbatim
    * to APPEND a copy into the IMAP Sent folder so the Message-ID matches (no
    * rebuild / drift). Undefined on failure.

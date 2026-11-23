@@ -133,3 +133,40 @@ describe('sentMirrorBody', () => {
     expect(sentMirrorBody({ body: '' })).toEqual({ bodyText: '', bodyHtml: '' });
   });
 });
+
+// Breaks: the outbox and the agent's auto-send log a failed send by its KIND
+// (the SMTP client's `failure`), because `error` is the server's reply and
+// quotes the recipients. If this one send choke point drops the kind, or
+// leaves it off its own early refusals, those lines can only say "unknown".
+describe('sendEmailFromMain — the kind of failure travels with the result', () => {
+  const RSVP = { accountId: 'acct-1', to: ['organizer@example.com'], subject: 'Accepted', body: 'Accepted', calendarInvitationResponse: { invitationId: 'i1', sequence: 2, dtstampMs: 1234, deliveryToken: 'latest-choice' } };
+
+  it('passes the SMTP client\'s kind through, beside the error text the user sees', async () => {
+    const client = smtpClient([{ success: false, error: '550 5.1.1 <bob@example.org>: Recipient address rejected', transient: false, failure: 'EENVELOPE' }]);
+    vi.mocked(getSmtpClient).mockReturnValue(client as never);
+    expect(await sendEmailFromMain(OPTIONS)).toMatchObject({ success: false, transient: false, failure: 'EENVELOPE', error: expect.stringContaining('550') });
+  });
+
+  it('names its own refusals: no client yet, and a client that is not connected', async () => {
+    vi.mocked(getSmtpClient).mockReturnValue(null as never);
+    expect(await sendEmailFromMain(OPTIONS)).toMatchObject({ success: false, transient: true, failure: 'not-initialized' });
+    vi.mocked(getSmtpClient).mockReturnValue({ ...smtpClient([]), isConnected: () => false } as never);
+    expect(await sendEmailFromMain(OPTIONS)).toMatchObject({ success: false, transient: true, failure: 'not-connected' });
+  });
+
+  it.each([
+    [true, 'calendar-response-refused'],
+    [false, 'calendar-check-failed'],
+  ] as const)('names a meeting reply the calendar check stopped (validation=%s)', async (validation, failure) => {
+    vi.mocked(getSmtpClient).mockReturnValue(smtpClient([]) as never);
+    h.assertResponseDelivery.mockImplementationOnce(() => { throw validation ? new CalendarInvitationValidationError('Meeting changed') : new Error('Calendar database is locked'); });
+    expect(await sendEmailFromMain(RSVP)).toMatchObject({ success: false, failure });
+  });
+
+  it('names a meeting reply the check stopped after the OAuth refresh', async () => {
+    const client = smtpClient([{ success: false, error: 'Invalid credentials: token expired' }], { authMethod: 'oauth2', oauthProvider: 'sarv', username: 'recipient@sarv.com' });
+    vi.mocked(getSmtpClient).mockReturnValue(client as never);
+    h.assertResponseDelivery.mockImplementationOnce(() => {}).mockImplementationOnce(() => { throw new CalendarInvitationValidationError('Meeting changed during token refresh'); });
+    expect(await sendEmailFromMain(RSVP)).toMatchObject({ success: false, transient: false, failure: 'calendar-response-refused' });
+  });
+});

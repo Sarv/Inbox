@@ -50,6 +50,7 @@
 // other accounts' mail), and a click on "Load images" is remembered there.
 
 import { authenticationFailed } from '@sarv-in/mailguard/verdict';
+import { failureCause } from '@sarvinbox/core/error-diagnostic';
 import { bareSenderAddress, imageAllowKeysFor, parseImageAllowInput, type ImageAllowEntry } from '@sarvinbox/core/image-allowlist';
 import { createLogger } from '@sarvinbox/core/logger';
 import { useCallback, useSyncExternalStore } from 'react';
@@ -394,19 +395,22 @@ export const isSenderImagesAllowed = (address?: string | null, accountId?: strin
  *  (storage busy, account runtime still opening) should not lose the choice. */
 export const PERSIST_RETRY_DELAYS_MS: readonly number[] = [500, 2_000];
 
+/** `what` names the KIND of entry, never the entry: it is a sender's address or
+ *  domain, and this line reaches app.log. The failure is logged as its kind
+ *  too — main's refusal text and an IPC error can quote what was being saved. */
 async function persistWithRetry(what: string, attempt: () => Promise<{ success?: boolean; error?: string } | undefined>): Promise<boolean> {
-  let lastError = '';
+  let lastFailure = '';
   for (let tryNo = 0; tryNo <= PERSIST_RETRY_DELAYS_MS.length; tryNo++) {
     if (tryNo > 0) await new Promise((resolve) => setTimeout(resolve, PERSIST_RETRY_DELAYS_MS[tryNo - 1]));
     try {
       const res = await attempt();
       if (res?.success) return true;
-      lastError = res?.error || 'not stored';
+      lastFailure = 'refused';
     } catch (error) {
-      lastError = (error as Error)?.message ?? String(error);
+      lastFailure = failureCause(error);
     }
   }
-  log.warn(`${what} was not saved (${lastError}); it no longer applies`);
+  log.warn(`${what} was not saved after ${PERSIST_RETRY_DELAYS_MS.length + 1} tries (${lastFailure}); it no longer applies`);
   return false;
 }
 
@@ -420,7 +424,7 @@ export const rememberImagesAllowed = (input?: string | null, accountId?: string 
   if (!entry) return null;
   const account = resolveCacheAccount(accountId);
   void imageAllowlist.write(account, { add: entry.key }, () =>
-    persistWithRetry(`Image allowance for ${entry.label}`, () =>
+    persistWithRetry(`Image allowance (${entry.kind})`, () =>
       window.electronAPI.emails.allowImagesForSender(entry.key, account)));
   return entry;
 };
