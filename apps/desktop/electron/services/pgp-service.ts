@@ -6,6 +6,7 @@
 import {
   OutgoingMimeError,
   createLogger,
+  failureCause,
   type AutocryptSighting,
   type AutocryptSink,
   type OutgoingMimeTransform,
@@ -85,8 +86,9 @@ export function autocryptSink(
   keyringFor: () => Pick<PgpKeyring, 'recordAutocrypt'> = getPgpKeyring,
 ): AutocryptSink {
   return (sighting: AutocryptSighting) => {
-    const warn = (error: unknown) =>
-      logger.warn(`Autocrypt from ${sighting.fromAddress} not recorded: ${(error as Error)?.message ?? String(error)}`);
+    // The kind of failure only: the sighting is a correspondent's address and
+    // key, and the error (a key parse, a store write) can quote either.
+    const warn = (error: unknown) => logger.warn(`Autocrypt header not recorded: ${failureCause(error)}`);
     try {
       keyringFor().recordAutocrypt(sighting).catch(warn);
     } catch (error) {

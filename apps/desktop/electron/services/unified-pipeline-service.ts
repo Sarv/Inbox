@@ -1625,14 +1625,16 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
       // to a bogus recipient.
       const malformed = atIdx <= 0 || !localPart || !domainPart;
       if (malformed) {
-        logger.info(`[Pipeline] Skip auto-draft for ${emailId} — malformed sender address "${fromAddr}"`);
+        // Its shape, never the value: a malformed From is usually the sender's
+        // display name, which the release log's address redaction cannot see.
+        logger.info(`[Pipeline] Skip auto-draft for ${emailId} — malformed sender address (length ${fromAddr.length}, has @: ${atIdx >= 0})`);
         await agentRepo.updateDecisionStatus(decision.id, 'rejected', 'dismissed', 'malformed-sender');
         return;
       }
 
       // Hard skip: zero two-way history AND sender looks automated.
       if (repliedTo === 0 && sentTo === 0 && looksAutomated) {
-        logger.info(`[Pipeline] Skip auto-draft for ${emailId} — no two-way history with automated-looking sender ${fromAddr}`);
+        logger.info(`[Pipeline] Skip auto-draft for ${emailId} — no two-way history with an automated-looking sender`);
         return;
       }
 
@@ -1642,7 +1644,7 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
       // from a clearly-named human). Otherwise we wait for the user to
       // engage first.
       if (repliedTo === 0 && sentTo === 0 && (decision.confidence || 0) < 0.85) {
-        logger.info(`[Pipeline] Skip auto-draft for ${emailId} — cold sender (${fromAddr}) with only ${decision.confidence} confidence`);
+        logger.info(`[Pipeline] Skip auto-draft for ${emailId} — cold sender (no reply or send history) with only ${decision.confidence} confidence`);
         return;
       }
     }
@@ -2052,13 +2054,14 @@ async function tryAutoSendReply(params: {
     return !!t && (sender.includes(t) || senderDomain.includes(t));
   });
   if (blocked) {
-    logger.info(`[Pipeline] Auto-send skipped for ${emailId} — sender ${sender} matches neverAutoReplyTo`);
+    // Not the address, nor the list entry it matched: both name the sender.
+    logger.info(`[Pipeline] Auto-send skipped for ${emailId} — sender matches neverAutoReplyTo`);
     return false;
   }
 
   // Test mode: everything except the actual SMTP send.
   if (cfg.testMode) {
-    logger.info(`[Pipeline] [test mode] would send reply for ${emailId} (to=${sender}, confidence=${confidence}) — saving to Drafts instead`);
+    logger.info(`[Pipeline] [test mode] would send reply for ${emailId} (confidence=${confidence}) — saving to Drafts instead`);
     return false;
   }
 
@@ -2112,11 +2115,13 @@ async function tryAutoSendReply(params: {
   try {
     const result = await sendEmailFromMain(sendOptions, { source: 'agent_auto' });
     if (!result?.success) {
-      logger.warn(`[Pipeline] Auto-send FAILED for ${emailId} (${result?.error || 'unknown error'}) — falling back to Drafts`);
+      // The kind of failure, never `error`: that is the server's reply (or the
+      // recipient check's), and it quotes the recipients' addresses.
+      logger.warn(`[Pipeline] Auto-send FAILED for ${emailId} (${result?.failure ?? 'unknown'}, transient=${result?.transient === true}) — falling back to Drafts`);
       return false;
     }
 
-    logger.info(`[Pipeline] ✓ Auto-SENT reply for ${emailId} to ${sender}${cc ? ` (+${cc.length} cc)` : ''} messageId=${result.messageId || '?'}`);
+    logger.info(`[Pipeline] ✓ Auto-SENT reply for ${emailId} (1 to${cc ? `, ${cc.length} cc` : ''}) messageId=${result.messageId || '?'}`);
 
     // Durable Sent copy. The agent sends OUTSIDE the outbox queue, so append the
     // Sent-folder copy here (best-effort) — otherwise an auto-sent reply exists

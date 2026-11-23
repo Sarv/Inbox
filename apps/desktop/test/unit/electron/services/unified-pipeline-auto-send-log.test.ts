@@ -92,6 +92,7 @@ import { sendEmailFromMain } from '../../../../electron/ipc/smtp-handlers';
 import {
   autoDraftReply,
   drafterFallbackLabel,
+  getUnifiedPipeline,
   initializeUnifiedPipeline,
   setPipelineUserProfile,
   stopUnifiedPipeline,
@@ -140,15 +141,20 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** A reply-worthy email from a known sender, addressed to the user, with its pending reply decision. */
-async function replyWorthy(id: string): Promise<void> {
+/** A reply-worthy email (from a known sender unless `over` says otherwise), addressed to the user, with its pending reply decision. */
+async function replyWorthy(
+  id: string,
+  over: { fromAddress?: string; confidence?: number; proposedAction?: 'reply' | 'reply_all'; toAddress?: string; ccAddress?: string } = {},
+): Promise<void> {
+  const fromAddress = over.fromAddress ?? 'boss@company.test';
   await account.add(T, {
-    id, date: T0, subject: 'Budget', fromAddress: 'boss@company.test', fromName: 'Boss', toAddress: 'me@me.test',
+    id, date: T0, subject: 'Budget', fromAddress, fromName: 'Boss', toAddress: over.toAddress ?? 'me@me.test',
+    ...(over.ccAddress ? { ccAddress: over.ccAddress } : {}),
     rawBody: '<p>Me, can you approve the budget?</p>', cleanBody: 'Me, can you approve the budget?',
   });
   await account.storage.getRepositories().agent.saveDecision({
-    id: `dec-${id}`, emailId: id, threadId: T, senderAddress: 'boss@company.test', proposedAction: 'reply',
-    proposedValue: null, confidence: 0.9, reasoning: '', status: 'pending', actualAction: null,
+    id: `dec-${id}`, emailId: id, threadId: T, senderAddress: fromAddress, proposedAction: over.proposedAction ?? 'reply',
+    proposedValue: null, confidence: over.confidence ?? 0.9, reasoning: '', status: 'pending', actualAction: null,
     userFeedback: null, proposedAt: T0, resolvedAt: null, createdAt: T0,
   } as AgentDecision);
 }
@@ -201,6 +207,149 @@ describe('tryAutoSendReply — an ordinary draft', () => {
     expect(logs.containing(SENTINEL)).toEqual([]);
     expect(logs.containing('drafter signaled fallback')).toEqual([]);
     expect(logs.containing('Auto-SENT reply for e3')).toHaveLength(1);
+  });
+});
+
+// What breaks if this block fails: the auto-draft and auto-send lines write
+// the sender's address (or, for a malformed From, their display name, which the
+// release log's address redaction cannot see) to app.log — info and warn, both
+// kept in a release. Each line now carries the email id and what was decided;
+// the mail itself is unchanged: skipped, held, sent or parked as before.
+describe('auto-draft and auto-send — the sender stays out of the log', () => {
+  /** Lowercase: the pipeline lowercases the address before it reaches a line. */
+  const SENDER = 'sentinel-sender';
+  const goodDraft = () => JSON.stringify({ subject: 'Re: Budget', body: 'Approved.', suggestedCc: [], reasoning: 'Direct ask' });
+
+  // Breaks: 'malformed sender address "<display name>"' quotes the sender's name.
+  it('skips a malformed sender by the shape of the address, not its text', async () => {
+    await replyWorthy('m1', { fromAddress: `"${SENDER} Display Name` });
+
+    await autoDraftReply('m1', account.storage);
+
+    expect(h.llmCalls).toBe(0);
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing('Skip auto-draft for m1 — malformed sender address (length 29, has @: false)')).toHaveLength(1);
+  });
+
+  // Breaks: 'no two-way history with automated-looking sender <address>'.
+  it('skips an automated-looking cold sender without naming it', async () => {
+    await replyWorthy('m2', { fromAddress: `noreply.${SENDER}@mailer.example` });
+
+    await autoDraftReply('m2', account.storage);
+
+    expect(h.llmCalls).toBe(0);
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing('Skip auto-draft for m2 — no two-way history with an automated-looking sender')).toHaveLength(1);
+  });
+
+  // Breaks: 'cold sender (<address>) with only 0.6 confidence'.
+  it('skips a cold sender at low confidence without naming it', async () => {
+    await replyWorthy('m3', { fromAddress: `${SENDER}@company.example`, confidence: 0.6 });
+
+    await autoDraftReply('m3', account.storage);
+
+    expect(h.llmCalls).toBe(0);
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing('Skip auto-draft for m3 — cold sender (no reply or send history) with only 0.6 confidence')).toHaveLength(1);
+  });
+
+  // Breaks: 'sender <address> matches neverAutoReplyTo' — the address, and that
+  // the user listed it.
+  it('holds a sender on neverAutoReplyTo back without naming it or the entry', async () => {
+    await replyWorthy('m4', { fromAddress: `${SENDER}@blocked.example` });
+    getUnifiedPipeline()!.updateConfig({ neverAutoReplyTo: ['blocked.example'] });
+    h.draftAnswer = goodDraft();
+
+    await autoDraftReply('m4', account.storage);
+
+    expect(sendEmailFromMain).not.toHaveBeenCalled();
+    expect(h.saves).toHaveLength(1);
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing('blocked.example')).toEqual([]);
+    expect(logs.containing('Auto-send skipped for m4 — sender matches neverAutoReplyTo')).toHaveLength(1);
+  });
+
+  // Breaks: test mode's 'would send reply for … (to=<address>, …)'.
+  it('logs what test mode would send without the recipient', async () => {
+    await replyWorthy('m5', { fromAddress: `${SENDER}@company.example` });
+    getUnifiedPipeline()!.updateConfig({ testMode: true });
+    h.draftAnswer = goodDraft();
+
+    await autoDraftReply('m5', account.storage);
+
+    expect(sendEmailFromMain).not.toHaveBeenCalled();
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing('[test mode] would send reply for m5 (confidence=0.9) — saving to Drafts instead')).toHaveLength(1);
+  });
+
+  // Breaks: 'Auto-send FAILED for … (<the SMTP error>)' — a 550 reply quoting
+  // the recipient, or the invalid-recipient check listing it. The draft still
+  // falls back to Drafts.
+  it('logs a failed auto-send by its kind, not the server reply', async () => {
+    await replyWorthy('m6', { fromAddress: `${SENDER}@company.example` });
+    h.smtp = { isConnected: () => true };
+    vi.mocked(sendEmailFromMain).mockResolvedValue({
+      success: false, transient: false, failure: 'EENVELOPE',
+      error: `Can't send mail - all recipients were rejected: 550 5.1.1 <${SENDER}@company.example>: Recipient address rejected`,
+    } as never);
+    h.draftAnswer = goodDraft();
+
+    await autoDraftReply('m6', account.storage);
+
+    expect(sendEmailFromMain).toHaveBeenCalledTimes(1);
+    expect(h.saves).toHaveLength(1);
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing('Auto-send FAILED for m6 (EENVELOPE, transient=false) — falling back to Drafts')).toHaveLength(1);
+  });
+
+  // Breaks: a failure result with no kind (an older send path) logs nothing
+  // useful, or falls back to quoting its text.
+  it('logs a failed auto-send with no kind as unknown', async () => {
+    await replyWorthy('m7', { fromAddress: `${SENDER}@company.example` });
+    h.smtp = { isConnected: () => true };
+    vi.mocked(sendEmailFromMain).mockResolvedValue({ success: false, transient: true, error: `Invalid recipient address(es): ${SENDER}` } as never);
+    h.draftAnswer = goodDraft();
+
+    await autoDraftReply('m7', account.storage);
+
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing('Auto-send FAILED for m7 (unknown, transient=true) — falling back to Drafts')).toHaveLength(1);
+  });
+
+  // Breaks: 'Auto-SENT reply for … to <address>'.
+  it('logs a sent auto-reply by its recipient count, not the recipient', async () => {
+    await replyWorthy('m8', { fromAddress: `${SENDER}@company.example` });
+    h.smtp = { isConnected: () => true };
+    vi.mocked(sendEmailFromMain).mockResolvedValue({ success: true, messageId: '<sent-8@me.test>' } as never);
+    h.draftAnswer = goodDraft();
+
+    await autoDraftReply('m8', account.storage);
+
+    expect(vi.mocked(sendEmailFromMain).mock.calls[0]![0]).toMatchObject({ to: [`${SENDER}@company.example`] });
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing('Auto-SENT reply for m8 (1 to) messageId=<sent-8@me.test>')).toHaveLength(1);
+  });
+
+  // Breaks: the reply-all branch of the same line prints the Cc list (the
+  // original To/Cc correspondents) instead of its count.
+  it('logs a sent reply-all by its Cc count, not the Cc addresses', async () => {
+    await replyWorthy('m9', {
+      fromAddress: `${SENDER}@company.example`, proposedAction: 'reply_all',
+      toAddress: `me@me.test, ${SENDER}-to@company.example`, ccAddress: `${SENDER}-cc@partner.example`,
+    });
+    h.smtp = { isConnected: () => true };
+    vi.mocked(sendEmailFromMain).mockResolvedValue({ success: true, messageId: '<sent-9@me.test>' } as never);
+    h.draftAnswer = goodDraft();
+
+    await autoDraftReply('m9', account.storage);
+
+    expect(vi.mocked(sendEmailFromMain).mock.calls[0]![0]).toMatchObject({
+      to: [`${SENDER}@company.example`],
+      cc: [`${SENDER}-to@company.example`.toLowerCase(), `${SENDER}-cc@partner.example`.toLowerCase()],
+    });
+    expect(logs.containing(SENDER)).toEqual([]);
+    expect(logs.containing(SENDER.toLowerCase())).toEqual([]);
+    expect(logs.containing('Auto-SENT reply for m9 (1 to, 2 cc) messageId=<sent-9@me.test>')).toHaveLength(1);
   });
 });
 

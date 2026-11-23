@@ -12,6 +12,7 @@
 
 import type { SendEmailOptions, SendResult } from '../types/smtp';
 import type { IEmailStorage } from '../types/storage';
+import { failureCause } from '../utils/error-diagnostic';
 import { logger } from '../utils/logger';
 
 export type SendFn = (payload: SendEmailOptions) => Promise<SendResult>;
@@ -210,36 +211,41 @@ export class SendQueue {
         return { status: 'success', messageId: result.messageId };
       }
 
-      return this.handleFailure(id, attemptsMade, result.error ?? 'Unknown send error', result.transient ?? false);
+      return this.handleFailure(id, attemptsMade, result.error ?? 'Unknown send error', result.transient ?? false, result.failure);
     } catch (error) {
       // sendFn is not expected to throw, but if it does treat it as transient so
       // the send is retried rather than lost.
       const msg = (error as Error)?.message ?? String(error);
-      return this.handleFailure(id, attemptsMade, msg, true);
+      return this.handleFailure(id, attemptsMade, msg, true, failureCause(error));
     }
   }
 
   /**
    * Decide, after a failed attempt, whether to reschedule (transient, under the
    * retry cap) or dead-letter (permanent, or cap reached).
+   *
+   * `error` is stored on the row for the Outbox UI and returned to the caller,
+   * never logged: it is the server's reply or our own refusal, and either can
+   * quote the recipients ("550 <bob@…>: no such user", "No encryption key for
+   * …"). The log lines carry `failure`, the kind of failure, instead.
    */
-  private async handleFailure(id: number, attemptsMade: number, error: string, transient: boolean): Promise<SendQueueResult> {
+  private async handleFailure(id: number, attemptsMade: number, error: string, transient: boolean, failure = 'unknown'): Promise<SendQueueResult> {
     if (!transient) {
       await this.storage!.markPendingSendFailed(id, error);
-      logger.warn(`[Outbox] Send ${id} permanently failed: ${error}`);
+      logger.warn(`[Outbox] Send ${id} permanently failed (${failure})`);
       return { status: 'failed', error };
     }
 
     const nextAttempt = attemptsMade + 1;
     if (nextAttempt > this.config.maxRetries) {
       await this.storage!.markPendingSendFailed(id, `${error} (gave up after ${this.config.maxRetries} retries)`);
-      logger.warn(`[Outbox] Send ${id} dead-lettered after ${this.config.maxRetries} retries: ${error}`);
+      logger.warn(`[Outbox] Send ${id} dead-lettered after ${this.config.maxRetries} retries (${failure})`);
       return { status: 'failed', error };
     }
 
     const nextRetryAt = Math.floor(Date.now() / 1000) + Math.floor(this.backoffMs(attemptsMade) / 1000);
     await this.storage!.updatePendingSendAttempt(id, nextAttempt, error, nextRetryAt);
-    logger.info(`[Outbox] Send ${id} scheduled for retry ${nextAttempt}/${this.config.maxRetries}: ${error}`);
+    logger.info(`[Outbox] Send ${id} scheduled for retry ${nextAttempt}/${this.config.maxRetries} (${failure})`);
     return { status: 'queued', error };
   }
 

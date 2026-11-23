@@ -475,7 +475,7 @@ async function recordSuccessfulUserReply(
 export async function sendEmailFromMain(
   options: SendEmailOptions,
   context: SendExecutionContext = { source: 'user' },
-): Promise<{ success: boolean; messageId?: string; error?: string; transient?: boolean; rawMessage?: string; needsSentAppend?: boolean }> {
+): Promise<{ success: boolean; messageId?: string; error?: string; transient?: boolean; failure?: string; rawMessage?: string; needsSentAppend?: boolean }> {
   // Resolve the sending account: a non-active accountId (reply from another
   // mailbox) uses that account's SMTP client + DB + sync engine; otherwise the
   // active account (unchanged behavior).
@@ -486,7 +486,8 @@ export async function sendEmailFromMain(
       getLocalCalendarInvitationService().assertResponseDelivery({ ...options.calendarInvitationResponse, accountId: acctId,
         organizer: options.to[0]!, accountEmail: registryAccountEmail(acctId) });
     } catch (error) {
-      return { success: false, transient: !(error instanceof CalendarInvitationValidationError), error: error instanceof Error ? error.message : 'The meeting invitation could not be checked before sending.' };
+      const validation = error instanceof CalendarInvitationValidationError;
+      return { success: false, transient: !validation, failure: validation ? 'calendar-response-refused' : 'calendar-check-failed', error: error instanceof Error ? error.message : 'The meeting invitation could not be checked before sending.' };
     }
   }
   const scoped = !!acctId && acctId !== getCurrentAccountId();
@@ -496,10 +497,10 @@ export async function sendEmailFromMain(
   if (!smtpClient) {
     // No client yet — the renderer connects it lazily. Transient so the outbox
     // holds the send and retries once connected.
-    return { success: false, error: 'SMTP client not initialized', transient: true };
+    return { success: false, error: 'SMTP client not initialized', transient: true, failure: 'not-initialized' };
   }
   if (!smtpClient.isConnected()) {
-    return { success: false, error: 'Not connected to SMTP server. Please check connection settings.', transient: true };
+    return { success: false, error: 'Not connected to SMTP server. Please check connection settings.', transient: true, failure: 'not-connected' };
   }
 
   // OpenPGP: Autocrypt header always, encrypt/sign when the send asked. Built
@@ -524,7 +525,7 @@ export async function sendEmailFromMain(
       }
       result = await smtpClient.sendEmail(options, transformMime);
     } catch (refreshErr) {
-      if (refreshErr instanceof CalendarInvitationValidationError) return { success: false, transient: false, error: refreshErr.message };
+      if (refreshErr instanceof CalendarInvitationValidationError) return { success: false, transient: false, failure: 'calendar-response-refused', error: refreshErr.message };
       logger.error(`[SMTP] Token refresh/reconnect failed for ${cfg.username}:`, refreshErr);
     }
     // If it STILL failed after a refresh attempt, keep it TRANSIENT so the outbox
@@ -627,6 +628,8 @@ export async function sendEmailFromMain(
     messageId: result.messageId,
     error: result.error,
     transient: result.transient,
+    // The kind of failure, for log lines that must not quote `error`.
+    failure: result.failure,
     rawMessage: result.rawMessage,
     needsSentAppend,
   };

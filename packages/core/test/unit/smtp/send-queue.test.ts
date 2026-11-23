@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 
 import { SendQueue } from '../../../src/smtp/send-queue';
+import { captureLogs, type CapturedLogs } from '../../../src/test-support/log-capture';
 import type { SendEmailOptions } from '../../../src/types/smtp';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 // Regression for the "quit within the undo window loses the whole email" bug.
 // The old path deleted the draft immediately and kept the outgoing mail ONLY in
@@ -362,6 +364,81 @@ describe('SendQueue retry policy — transient retries, permanent dead-letters',
     const row = [...storage.rows.values()][0];
     expect(row.status).toBe('failed');
     expect(row.last_error).toContain('gave up after 2 retries');
+  });
+});
+
+// What breaks if this block fails: the outbox writes the recipients to app.log.
+// A failed send's `error` is the server's reply ("550 <bob@…>: no such user",
+// a greylisting 450 quoting the recipient) or our own refusal ("No encryption
+// key for …", "Invalid recipient address(es): Jane Doe <…>"), and the
+// permanent, dead-letter and retry lines each logged it. They now log the
+// kind of failure; the text stays on the row, where the Outbox shows it.
+describe('SendQueue failure lines — the kind of failure, never the text', () => {
+  const ADDRESS = 'sentinel-rcpt@example.org';
+  const NAME = 'Jane SENTINEL-Payroll';
+  let storage: ReturnType<typeof makeFakeStorage>;
+  let logs: CapturedLogs;
+
+  beforeEach(() => {
+    storage = makeFakeStorage();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-19T00:00:00Z'));
+    logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+  });
+  afterEach(() => {
+    logs.stop();
+    vi.useRealTimers();
+  });
+
+  const queueWith = (sendFn: () => Promise<unknown>, config = {}) => {
+    const queue = new SendQueue(config);
+    queue.initialize({ storage: storage as any, sendFn: sendFn as any, isConnected: () => true });
+    return queue;
+  };
+
+  // Breaks: "[Outbox] Send 1 permanently failed: No encryption key for <addr>".
+  it('logs a permanent failure by kind and keeps the text on the row', async () => {
+    const queue = queueWith(async () => ({
+      success: false, transient: false, failure: 'OutgoingMimeError',
+      error: `No encryption key for ${ADDRESS}, ${NAME} — import their key or send unencrypted`,
+    }));
+
+    expect(await queue.enqueueAndSend(PAYLOAD)).toMatchObject({ status: 'failed', error: expect.stringContaining(ADDRESS) });
+    expect([...storage.rows.values()][0].last_error).toContain(ADDRESS);
+    expect(logs.containing(ADDRESS)).toEqual([]);
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing('[Outbox] Send 1 permanently failed (OutgoingMimeError)')).toHaveLength(1);
+  });
+
+  // Breaks: the retry line and the dead-letter line quote a greylisting
+  // reply that names the recipient, on every attempt.
+  it('logs retries and the dead-letter by kind', async () => {
+    const queue = queueWith(async () => ({
+      success: false, transient: true, failure: 'EENVELOPE',
+      error: `450 4.2.0 <${ADDRESS}>: Recipient address rejected: Greylisted`,
+    }), { maxRetries: 1, baseRetryDelayMs: 1_000 });
+
+    await queue.enqueueAndSend(PAYLOAD);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await queue.processQueue();
+
+    expect(logs.containing(ADDRESS)).toEqual([]);
+    expect(logs.containing('[Outbox] Send 1 scheduled for retry 1/1 (EENVELOPE)')).toHaveLength(1);
+    expect(logs.containing('[Outbox] Send 1 dead-lettered after 1 retries (EENVELOPE)')).toHaveLength(1);
+  });
+
+  // Breaks: a sendFn that throws has its message logged on the retry line.
+  it('logs a thrown send by its class, and a result with no kind as unknown', async () => {
+    const thrown = queueWith(async () => { throw new TypeError(`cannot read recipient ${ADDRESS}`); });
+    expect(await thrown.enqueueAndSend(PAYLOAD)).toMatchObject({ status: 'queued' });
+
+    const bare = queueWith(async () => ({ success: false, transient: false, error: `Invalid recipient address(es): ${NAME} <x>` }));
+    expect(await bare.enqueueAndSend(PAYLOAD)).toMatchObject({ status: 'failed' });
+
+    expect(logs.containing(ADDRESS)).toEqual([]);
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing('[Outbox] Send 1 scheduled for retry 1/5 (TypeError)')).toHaveLength(1);
+    expect(logs.containing('[Outbox] Send 2 permanently failed (unknown)')).toHaveLength(1);
   });
 });
 

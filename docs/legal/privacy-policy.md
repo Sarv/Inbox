@@ -29,7 +29,7 @@ compare the policy against the app, and a mismatch fails verification.
 
 # Sarv Inbox Privacy Policy
 
-**Effective date:** 20 November 2026
+**Effective date:** 23 November 2026
 
 Sarv Inbox ("the app") is a desktop email client for macOS, Windows and Linux,
 published by Sarv Webs Private Limited ("Sarv", "we", "us"), IT-10, EPIP RIICO
@@ -390,8 +390,8 @@ data.
 Depending on where you live (for example under India's Digital Personal Data
 Protection Act, the GDPR or US state laws), you may have the right to access,
 correct or delete personal data we hold, or to object to its use. Most of your
-data never reaches us; for the data that does (AI requests to Sarv AI, Sarv
-reputation reports, scanner authentication/security records, crash reports), write to rc@sarv.com and we will answer
+data never reaches us; for the data that does (AI requests to Sarv AI, scanner
+authentication/security records, crash reports), write to rc@sarv.com and we will answer
 within 30 days.
 
 ## 10. Changes
