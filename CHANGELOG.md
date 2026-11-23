@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **New mail no longer stops arriving in a folder after one failed sync.** If
+  fetching a folder's new mail failed once (a timeout, a dropped connection, a
+  busy server), the app still noted the folder as up to date, and the regular
+  background sync then skipped it as unchanged. The missed mail stayed on the
+  server until something else arrived in that folder or you refreshed it by
+  hand. A folder is now noted as up to date only once its new mail has really
+  been downloaded, so the next sync picks up what the failed one missed.
+
 ### Security
 - **The log file no longer names your accounts, folders or user folder.**
   Every line about an account carried its internal id, which spells out the

@@ -60,6 +60,14 @@ export interface FolderSyncResult {
 }
 
 /**
+ * What one strategy pass (full or incremental) reports to `syncFolder`.
+ * `complete: false` means it ran but did not fetch everything the server
+ * offered up to the UIDNEXT seen at the start (a full sync whose batches
+ * failed), so the folder must not be recorded as caught up.
+ */
+type PassResult = Partial<FolderSyncResult> & { complete?: boolean };
+
+/**
  * Folder priority for sync ordering
  */
 const FOLDER_PRIORITIES: Record<string, number> = {
@@ -269,6 +277,8 @@ export class FolderSyncer {
       uidValidityChanged: false,
     };
 
+    // Set once the stored folder is known, so a failure can mark it unsynced.
+    let storedFolderId: string | null = null;
     try {
       // Select folder and get status
       const boxStatus = await client.selectFolder(folder.path);
@@ -279,6 +289,8 @@ export class FolderSyncer {
         result.error = new Error(`Folder not found: ${folder.path}`);
         return result;
       }
+
+      storedFolderId = storedFolder.id;
 
       // Check UIDVALIDITY
       result.uidValidityChanged = await this.handleUidValidity(
@@ -334,12 +346,24 @@ export class FolderSyncer {
         });
       }
 
-      // Update folder with server counts (for "load more" feature)
-      // Don't overwrite totalCount — it will be recalculated from local DB after sync
+      // How many messages the server holds, for the list counter and "load
+      // more" (it is the folder's serverMessageCount). Written now: it is true
+      // whatever this pass manages to fetch. Don't overwrite totalCount — it is
+      // recalculated from the local DB after the sync.
+      //
+      // NOT the UIDNEXT. That one is the skip-unchanged key (`hasChanges`):
+      // recording it says "everything below this has been fetched". It used to
+      // be written here, BEFORE the fetch, so a fetch that then failed (a
+      // timeout, a dropped connection) left the folder looking caught up, and
+      // every later sync with skipUnchanged — the periodic one included —
+      // skipped it as unchanged. The new mail stayed on the server until
+      // something else arrived. It is written below, once the pass is done.
       await storage.updateFolder(storedFolder.id, {
         lastKnownMessageCount: boxStatus.messages,
-        lastKnownUidnext: boxStatus.uidNext,
       } as any);
+
+      // Whether this pass fetched everything up to boxStatus.uidNext.
+      let caughtUp = true;
 
       // Determine sync strategy
       if (opts.flagsOnly && storedFolder.lastSyncUid) {
@@ -362,6 +386,9 @@ export class FolderSyncer {
         result.flagsUpdated = flagsResult.updated;
         result.deletedCount = flagsResult.deleted;
         result.success = true;
+        // Flags only: no new mail was fetched, so the folder is not caught up
+        // to this UIDNEXT (and keeps whatever key the last fetching pass left).
+        caughtUp = false;
       } else if (opts.fullSync || !storedFolder.lastSyncUid || result.uidValidityChanged || needsRecoverySync) {
         // Full sync (also triggered when local count is too low)
         const fullResult = await this.fullSync(
@@ -373,7 +400,7 @@ export class FolderSyncer {
           onProgress,
           touch,
         );
-        this.mergeResults(result, fullResult);
+        caughtUp = this.mergePass(result, fullResult);
       } else {
         // Incremental sync
         const incrementalResult = await this.incrementalSync(
@@ -385,21 +412,52 @@ export class FolderSyncer {
           onProgress,
           touch,
         );
-        this.mergeResults(result, incrementalResult);
+        caughtUp = this.mergePass(result, incrementalResult);
       }
 
-      // Update sync time
+      // Update sync time, and record the UIDNEXT as the skip-unchanged key
+      // only when this pass fetched up to it. A pass that did not (failed
+      // batches, flags only) leaves the key alone or clears it, so the next
+      // sync looks at the folder again instead of skipping it.
       await storage.updateFolder(storedFolder.id, {
         lastSyncTime: Math.floor(Date.now() / 1000),
-      });
+        ...(caughtUp ? { lastKnownUidnext: boxStatus.uidNext } : opts.flagsOnly ? {} : { lastKnownUidnext: null }),
+      } as any);
 
       result.success = true;
       return result;
     } catch (error) {
       logger.error(`Failed to sync folder ${folderLogLabel(folder.path)}:`, errorDiagnostic(error));
       result.error = error as Error;
+      await this.markNotCaughtUp(storage, storedFolderId, folder.path);
       return result;
     }
+  }
+
+  /**
+   * After a failed pass: clear the folder's recorded UIDNEXT, so the next
+   * sync's skip-unchanged check (`hasChanges`) treats it as changed and fetches
+   * what this pass did not. Leaving the key an earlier pass recorded is not
+   * enough: when no mail arrived since, it still matches the server, and the
+   * message count (written at the start of this pass) matches too, so a pass
+   * that failed in its flag or deletion reconcile would be skipped all the
+   * same. A cleared key is what a never-synced folder has. Best-effort: if
+   * storage is what failed, this write fails too and nothing is worse.
+   */
+  private async markNotCaughtUp(storage: IEmailStorage, folderId: string | null, path: string): Promise<void> {
+    if (!folderId) return;
+    try {
+      await storage.updateFolder(folderId, { lastKnownUidnext: null } as any);
+    } catch (error) {
+      logger.warn(`Could not mark ${folderLogLabel(path)} for a re-check after a failed sync: ${failureCause(error)}`);
+    }
+  }
+
+  /** Merge a strategy pass into the result; answers whether it caught up. */
+  private mergePass(target: FolderSyncResult, pass: PassResult): boolean {
+    const { complete, ...rest } = pass;
+    this.mergeResults(target, rest);
+    return complete !== false;
   }
 
   /**
@@ -468,7 +526,7 @@ export class FolderSyncer {
     options: FolderSyncOptions,
     onProgress?: (processed: number, total: number) => void,
     touch?: () => void,
-  ): Promise<Partial<FolderSyncResult>> {
+  ): Promise<PassResult> {
     if (boxStatus.messages === 0) {
       return {
         success: true,
@@ -559,6 +617,9 @@ export class FolderSyncer {
       messagesInserted: inserted,
       messagesUpdated: updated,
       lastSyncUid: maxUid > 0 ? maxUid : null,
+      // A failed batch is mail the server has and we do not: the next sync
+      // must look again rather than skip the folder as unchanged.
+      complete: failedBatches === 0,
     };
   }
 
@@ -573,7 +634,7 @@ export class FolderSyncer {
     options: FolderSyncOptions,
     onProgress?: (processed: number, total: number) => void,
     touch?: () => void,
-  ): Promise<Partial<FolderSyncResult>> {
+  ): Promise<PassResult> {
     const lastUID = folder.lastSyncUid || 0;
 
     // Log the watermark WITH the two server numbers that decide whether the "no
@@ -630,7 +691,7 @@ export class FolderSyncer {
     // the oldest end drained steadily. The helper also drops any UID <= lastUID
     // (some servers echo the boundary message for an out-of-range low bound) so
     // lastSyncUid can never regress into a permanent redundant refetch loop.
-    const { messages, scannedDownToUid } = await withFolderSelected(client, folder.path, () =>
+    const { messages, scannedDownToUid, interrupted } = await withFolderSelected(client, folder.path, () =>
       fetchNewestMessagesWindowed(client, lastUID, boxStatus.uidNext, {
         fetchHeaders: true,
         fetchBody: !options.headersOnly,
@@ -640,6 +701,12 @@ export class FolderSyncer {
     // True when the cap stopped the pass before it reached the watermark, so
     // unfetched UIDs remain BELOW the newest message we just took.
     const gapRemainsBelow = scannedDownToUid > lastUID + 1;
+    // A window FAILED (not the cap or the time budget): the hole is a transient
+    // miss, so the folder is not caught up and the next sync must not skip it.
+    // A capped pass still counts as caught up — closing that hole is the
+    // drain's job (SyncEngine.drainFolderChunk), and re-running this pass every
+    // cycle would only re-download the same newest messages.
+    const complete = interrupted !== true;
 
     if (messages.length === 0) {
       // Handle sent folder edge case
@@ -653,6 +720,7 @@ export class FolderSyncer {
         flagsUpdated: flagsResult.updated,
         deletedCount: flagsResult.deleted,
         lastSyncUid: lastUID,
+        complete,
       };
     }
 
@@ -698,6 +766,7 @@ export class FolderSyncer {
       flagsUpdated: flagsResult.updated,
       deletedCount: flagsResult.deleted,
       lastSyncUid: nextSyncUid,
+      complete,
     };
   }
 

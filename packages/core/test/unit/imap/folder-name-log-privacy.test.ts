@@ -157,12 +157,9 @@ describe('SyncEngine — a user-named folder never reaches app.log', () => {
     vi.spyOn(server, 'fetchMessagesByUidRange').mockRejectedValueOnce(serverError('FETCH_ERROR'));
 
     await engine.syncAll(); // the failing pass
-    // The re-run is forced (skipUnchanged off) on purpose. With the default the
-    // folder is skipped as "unchanged": syncFolder records the server's
-    // EXISTS/UIDNEXT before the fetch that failed, so nothing looks new. That is
-    // a separate, known sync gap (raised, not fixed here); this test is about
-    // what the lines say, not about when the mail lands.
-    await engine.syncAll({ skipUnchanged: false });
+    // The default re-run (skipUnchanged): a failed pass leaves the folder to be
+    // checked again (see skip-unchanged-after-failure.test.ts).
+    await engine.syncAll();
 
     expect(db.rowsTaggedWith(FOLDER)).toHaveLength(4);
     expect(leaks(logs)).toEqual([]);
