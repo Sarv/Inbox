@@ -16,6 +16,7 @@ import { AttachmentTransferProvider } from './components/attachment-viewer/Attac
 import { SentryErrorBoundary } from './components/SentryErrorBoundary';
 import { initSentryRenderer } from './sentry';
 import { useEmailStore } from './store/email-store';
+import { installFrameKeyForwarding } from './utils/frame-key-forwarding';
 import './index.css';
 // The chat view's own stylesheet, then the bridge that repoints its `--sec-*`
 // tokens at this app's theme. Order matters: the bridge must win over the
@@ -30,6 +31,10 @@ initSentryRenderer();
 // Paint the saved theme/accent/font/density/zoom onto <html> BEFORE the first
 // render, or the app shows one frame of the default light theme and then flips.
 initAppearance();
+
+// Keyboard shortcuts must survive a click inside a mail body's sandboxed frame
+// (which takes keyboard focus away from this document). See the module header.
+installFrameKeyForwarding();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

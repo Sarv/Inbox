@@ -106,6 +106,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goes to the agent like any other request, which finds the emails it means
   and prepares a card.
 
+### Fixed
+- **Keyboard shortcuts keep working after you click inside a message.**
+  Clicking a link in an email (or anywhere in its text) moved the keyboard into
+  the message, and every shortcut — next and previous mail, archive, delete,
+  search, Escape — stopped responding until you clicked somewhere outside it.
+  Shortcuts now work straight away, in the standard view and in chat view,
+  while copying text you selected in the message and typing into a field in it
+  work as before.
+
 ## [1.4.12] - 2026-11-24
 
 ### Fixed
