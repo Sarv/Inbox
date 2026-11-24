@@ -90,6 +90,25 @@ export interface InboxAgentChangeSet {
   items: InboxAgentChangeItem[];
 }
 
+/**
+ * The agent's undo_change of an earlier change, shown under its answer as
+ * that change's own card with only its Undo button. Nothing is held for it in
+ * main: the user's click is the earlier card's own Undo, sent with the
+ * earlier exchange's id, and the earlier card's Undo window governs.
+ */
+export interface InboxAgentUndoRequest {
+  kind: 'change_set' | 'setting';
+  /** The change set's or setting change's id. */
+  id: string;
+  /** The exchange whose card it is. */
+  exchangeId: string;
+  /** C1, R1… */
+  label: string;
+  summary: string;
+  /** waiting: nothing changes until the user clicks Undo. undone: the agent undid it for the user ("Approve for me"). */
+  outcome: 'waiting' | 'undone';
+}
+
 export interface InboxAgentChangeSetRequest {
   requestId: string;
   chatId: string;

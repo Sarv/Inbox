@@ -6,8 +6,8 @@ import {
   accountOf, InboxAgentToolError, oneLine, openAccount, optionalBoolean, optionalText, readArgs, roleFolders, selectedAccounts,
   type InboxAgentTool, type InboxAgentToolContext,
 } from './inbox-assistant-agent-tools';
-import { alreadyDone, destinationFolder, labelNameProblem } from './inbox-assistant-agent-write-tools';
-import { changeProtection, INBOX_AGENT_CHANGE_LIMITS, stageChangeSet, type HeldChangeSet, type StageTarget } from './inbox-assistant-change-sets';
+import { alreadyDone, conversationGuardsFor, destinationFolder, labelNameProblem, stagedProtection } from './inbox-assistant-agent-write-tools';
+import { INBOX_AGENT_CHANGE_LIMITS, stageChangeSet, type HeldChangeSet, type StageTarget } from './inbox-assistant-change-sets';
 import { fullBody } from './inbox-assistant-retrieval';
 import {
   describeFilter, INBOX_AGENT_SETTING_LIMITS, senderChanges, senderFlags, senderWords, stageSettingChange,
@@ -136,8 +136,11 @@ function mailActionFor(action: FilterAction, folders: FolderRecord[], checked: C
 
 /**
  * Existing mail as linked change sets, one per action, frozen now like any
- * change set: the user's own and already-gone mail left out, protections
- * computed, and only what each action would change.
+ * change set: the user's own and already-gone mail left out, and only what
+ * each action would change. Protections are change_mail's own: the email's,
+ * its state at this request's first look, and the sender and conversation
+ * guard (a VIP sender, a conversation the user is in), so a ticked "apply to
+ * existing" never hides mail change_mail would have left unticked.
  */
 async function linkedSets(
   context: InboxAgentToolContext, account: { id: string; email: string }, ids: string[],
@@ -156,16 +159,20 @@ async function linkedSets(
     emails.push(email);
   }
   const nowMs = context.changes!.nowMs();
-  const sets = steps.map((step, index) => {
+  const guard = conversationGuardsFor(context)(account, opened);
+  // The stored body only, read once per email: protections never wait on a download.
+  const bodies = new Map(emails.map(email => [email.id, fullBody(email)]));
+  const sets: HeldChangeSet[] = [];
+  for (const [index, step] of steps.entries()) {
     const targets: StageTarget[] = [];
     for (const email of emails) {
       if (alreadyDone(step.action, email, opened.folders, { ...(step.folder ? { destination: step.folder } : {}), ...(step.labelName ? { labelName: step.labelName } : {}) })) continue;
-      const protectedReason = changeProtection(step.action, email, fullBody(email));
+      const protectedReason = await stagedProtection(context, account.id, step.action, email, guard, bodies.get(email.id));
       targets.push({ accountId: account.id, accountEmail: account.email, email, folders: opened.folders, ...(protectedReason ? { protectedReason } : {}) });
     }
-    return stageChangeSet({ label: `${label}-${index + 1}`, action: step.action, targets, nowMs,
-      ...(step.folder ? { folder: step.folder } : {}), ...(step.labelName ? { labelName: step.labelName } : {}) });
-  });
+    sets.push(stageChangeSet({ label: `${label}-${index + 1}`, action: step.action, targets, nowMs,
+      ...(step.folder ? { folder: step.folder } : {}), ...(step.labelName ? { labelName: step.labelName } : {}) }));
+  }
   return { sets, truncated };
 }
 

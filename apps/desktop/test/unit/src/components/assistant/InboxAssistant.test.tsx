@@ -7,7 +7,8 @@ import { InboxAssistant } from '../../../../../src/components/assistant/InboxAss
 import type { ConfirmOptions } from '../../../../../src/components/ConfirmDialog';
 import type { InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantRequest, InboxAssistantResult, InboxAssistantRewind } from '../../../../../src/types/inbox-assistant';
 import type { InboxAssistantReviewItem } from '../../../../../src/types/inbox-assistant-actions';
-import type { InboxAgentChangeSet, InboxAgentChangeSetRequest, InboxAgentSettingChange } from '../../../../../src/types/inbox-assistant-changes';
+import type { InboxAgentChangeSet, InboxAgentChangeSetRequest, InboxAgentSettingChange, InboxAgentUndoRequest } from '../../../../../src/types/inbox-assistant-changes';
+import { ACTION_MODE_DESCRIPTION } from '../../../../../src/utils/inbox-assistant-approval';
 import { act, cleanup, fire, render, settle, toggle, typeInto } from '../../../../helpers/render';
 
 const ok = <T,>(data: T): InboxAssistantResult<T> => ({ success: true, data });
@@ -195,6 +196,13 @@ async function mount(props = {}) {
 }
 function button(view: ReturnType<typeof render>, text: string) {
   return view.all('button').find(element => element.textContent?.trim() === text) ?? null;
+}
+/** The chat as main saves it once the latest question ends: its exchange carries what that run did. */
+function savedAfterAsk(saved: Partial<InboxAssistantExchange>) {
+  api.chat.mockImplementation(async id => {
+    const requestId = api.ask.mock.calls.at(-1)?.[0].requestId;
+    return ok(chat(id, id === 'chat-1' && requestId ? [{ ...exchange('exchange-failed'), question: 'Undo that', status: 'failed', ...saved, requestId }] : []));
+  });
 }
 function submit(view: ReturnType<typeof render>, text = 'What quote did I send to TCS?') {
   typeInto(view.find('textarea'), text);
@@ -519,6 +527,8 @@ describe('Inbox Agent', () => {
     expect(api.updateChat).not.toHaveBeenCalled();
   });
 
+  // Breaks: the control describes a scope other than the one the host enforces.
+  // Changed on purpose: the description now comes from ACTION_MODE_DESCRIPTION.
   it('offers exactly two clearly named modes and defaults to asking for approval', async () => {
     const view = await mount();
     const select = view.byLabel('Action mode') as HTMLSelectElement;
@@ -526,10 +536,80 @@ describe('Inbox Agent', () => {
       { value: 'review', label: 'Ask for approval' }, { value: 'approve_for_me', label: 'Approve for me' },
     ]);
     expect(select.value).toBe('review');
-    expect(select.title).toContain('before mail changes');
+    expect(select.title).toBe(ACTION_MODE_DESCRIPTION.review);
     expect(api.updateChat).not.toHaveBeenCalled();
   });
 
+  // Breaks: one click widens what the agent may change without a card, without the user seeing what it covers.
+  it('asks before turning Approve for me on, naming what it covers; Cancel keeps Ask for approval and saves nothing', async () => {
+    confirm.mockResolvedValueOnce(false);
+    const view = await mount();
+    const select = view.byLabel('Action mode') as HTMLSelectElement;
+    act(() => { select.value = 'approve_for_me'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    await settle();
+    expect(confirm).toHaveBeenCalledOnce();
+    const options = confirm.mock.calls[0]![0];
+    expect(options).toEqual({ title: 'Let Inbox Agent change mail without asking?', message: ACTION_MODE_DESCRIPTION.approve_for_me, confirmLabel: 'Approve for me', destructive: false });
+    for (const words of ['200', 'archive', 'Trash', 'filters', 'protected emails']) expect(options.message).toContain(words);
+    expect(api.updateChat).not.toHaveBeenCalled();
+    expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('review');
+    expect((view.byLabel('Action mode') as HTMLSelectElement).disabled).toBe(false);
+    expect((view.find('textarea') as HTMLTextAreaElement).readOnly).toBe(false);
+  });
+
+  // Breaks: the confirmed choice is lost, or switching to the safer mode is gated behind a dialog.
+  it('saves Approve for me once confirmed, and switches back to Ask for approval without asking', async () => {
+    const view = await mount();
+    const select = () => view.byLabel('Action mode') as HTMLSelectElement;
+    act(() => { select().value = 'approve_for_me'; select().dispatchEvent(new Event('change', { bubbles: true })); });
+    await settle();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(api.updateChat).toHaveBeenCalledExactlyOnceWith({ chatId: 'chat-1', actionMode: 'approve_for_me' });
+    expect(select().value).toBe('approve_for_me');
+    expect(select().title).toBe(ACTION_MODE_DESCRIPTION.approve_for_me);
+    act(() => { select().value = 'review'; select().dispatchEvent(new Event('change', { bubbles: true })); });
+    await settle();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(api.updateChat).toHaveBeenLastCalledWith({ chatId: 'chat-1', actionMode: 'review' });
+    expect(select().value).toBe('review');
+    expect(select().title).toBe(ACTION_MODE_DESCRIPTION.review);
+  });
+
+  // Breaks: consent given in a dialog opened for one conversation lands on another.
+  it('changes no mode when another conversation is opened while the confirmation is open', async () => {
+    let decide!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise(resolve => { decide = resolve; }));
+    const view = await mount();
+    const select = () => view.byLabel('Action mode') as HTMLSelectElement;
+    act(() => { select().value = 'approve_for_me'; select().dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(confirm).toHaveBeenCalledOnce();
+    // The control stays locked while the question is open.
+    expect(select().disabled).toBe(true);
+    fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
+    await settle();
+    await act(async () => decide(true));
+    await settle();
+    expect(api.updateChat).not.toHaveBeenCalled();
+    expect(view.find('h1')?.textContent).toBe('Meeting follow-ups');
+    expect(select().value).toBe('review');
+    expect(select().disabled).toBe(false);
+  });
+
+  // Breaks: a confirmation answered after the assistant closed still changes the chat's mode.
+  it('saves nothing when the assistant closes while the confirmation is open', async () => {
+    let decide!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise(resolve => { decide = resolve; }));
+    const view = await mount();
+    const select = view.byLabel('Action mode') as HTMLSelectElement;
+    act(() => { select.value = 'approve_for_me'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    view.unmount();
+    await act(async () => decide(true));
+    await settle();
+    expect(api.updateChat).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the confirmed mode is not kept across requests, or changing it drops the draft or account scope.
+  // Changed on purpose: turning it on now confirms first, and the title is ACTION_MODE_DESCRIPTION.
   it('persists Approve for me across requests while retaining draft text and chosen account scope', async () => {
     let savedMode: InboxAssistantActionMode = 'review';
     api.updateChat.mockImplementation(async ({ chatId, ...changes }) => {
@@ -546,7 +626,8 @@ describe('Inbox Agent', () => {
     await settle();
     expect(api.updateChat).toHaveBeenCalledExactlyOnceWith({ chatId: 'chat-1', actionMode: 'approve_for_me' });
     expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('approve_for_me');
-    expect((view.byLabel('Action mode') as HTMLSelectElement).title).toContain('until changed');
+    expect(confirm).toHaveBeenCalledOnce();
+    expect((view.byLabel('Action mode') as HTMLSelectElement).title).toBe(ACTION_MODE_DESCRIPTION.approve_for_me);
     expect((view.find('textarea') as HTMLTextAreaElement).value).toBe('Keep this unread review question.');
     expect(view.find('button[aria-controls="assistant-account-picker"]')?.textContent).toContain('1 of 2 accounts');
     expect(api.chat).toHaveBeenCalledExactlyOnceWith('chat-1');
@@ -562,12 +643,16 @@ describe('Inbox Agent', () => {
     expect(api.updateChat).toHaveBeenCalledOnce();
   });
 
+  // Breaks: a save error from one conversation's mode change shows in another, or locks its composer.
+  // Changed on purpose: the save starts after the confirmation, so the test lets it resolve first.
   it('keeps a late action-mode save error in its original chat after switching', async () => {
     let resolveMode!: (value: InboxAssistantResult<InboxAssistantChatSummary>) => void;
     api.updateChat.mockImplementationOnce(() => new Promise(resolve => { resolveMode = resolve; }));
     const view = await mount();
     const select = view.byLabel('Action mode') as HTMLSelectElement;
     act(() => { select.value = 'approve_for_me'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    await settle();
+    expect(api.updateChat).toHaveBeenCalledOnce();
     fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
     await settle();
     await act(async () => resolveMode({ success: false, error: 'Previous chat mode could not be saved.' }));
@@ -596,6 +681,46 @@ describe('Inbox Agent', () => {
     expect(button(view, 'Undo 1 email')).not.toBeNull();
     expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('approve_for_me');
     expect(api.changeSet).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a question that fails after the agent undid an earlier change, or
+  // applied one, leaves the mail list showing mail in its old place (the
+  // failed IPC result carries no exchange; main saved it).
+  it.each<[string, Partial<InboxAssistantExchange>]>([
+    ['undid an earlier change', { undoRequests: [undoRequest({ outcome: 'undone' })] }],
+    ['applied a change', { changeSets: changeExchange('applied').changeSets }],
+  ])('refreshes the mail list when a failed question %s', async (_name, saved) => {
+    savedAfterAsk(saved);
+    api.ask.mockImplementationOnce(async () => ({ success: false, error: 'The provider failed.' }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    submit(view, 'Undo that'); await settle();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+  });
+
+  // Breaks: every failed question refreshes the mail list although it changed nothing.
+  it('leaves the mail list alone when a failed question changed nothing', async () => {
+    savedAfterAsk({ changeSets: changeExchange('pending').changeSets });
+    api.ask.mockImplementationOnce(async () => ({ success: false, error: 'The provider failed.' }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    submit(view, 'Archive these'); await settle();
+    expect(api.chat.mock.calls.length).toBeGreaterThan(1);
+    expect(onMailChanged).not.toHaveBeenCalled();
+  });
+
+  // Breaks: stopping a question after the agent applied a change leaves the mail list stale.
+  it('refreshes the mail list when a stopped question had applied a change', async () => {
+    let resolveAsk!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.ask.mockImplementationOnce(() => new Promise(resolve => { resolveAsk = resolve; }));
+    savedAfterAsk({ changeSets: changeExchange('applied').changeSets, status: 'stopped' });
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    submit(view, 'Archive these');
+    fire(view.byLabel('Stop answering'), 'click'); await settle();
+    await act(async () => resolveAsk({ success: false, error: 'Request cancelled.' }));
+    await settle();
+    expect(onMailChanged).toHaveBeenCalledOnce();
   });
 
   // Breaks: a Trash card skips its confirmation in either mode, a second click
@@ -1423,5 +1548,69 @@ describe('Inbox Agent change-set cards', () => {
     api.ask.mockImplementationOnce(async request => ok({ ...changeExchange('applied'), id: 'exchange-applied', chatId: request.chatId }));
     submit(view, 'Mark the sale read'); await settle();
     expect(onMailChanged).toHaveBeenCalledOnce();
+  });
+});
+
+/** A later answer in which the agent undid, or asked the user to undo, earlier cards. */
+function undoExchange(requests: InboxAgentUndoRequest[], id = 'exchange-undo'): InboxAssistantExchange {
+  return { ...exchange(id), question: 'Undo that', answer: { ...exchange().answer, text: 'Its Undo is below your answer.', sources: [] }, undoRequests: requests };
+}
+const undoRequest = (over: Partial<InboxAgentUndoRequest> = {}): InboxAgentUndoRequest => ({
+  kind: 'change_set', id: 'set-1', exchangeId: 'exchange-change', label: 'C1', summary: 'Mark 1 email read', outcome: 'waiting', ...over,
+});
+const buttonIn = (scope: HTMLElement, text: string) => [...scope.querySelectorAll('button')].find(element => element.textContent?.trim() === text) ?? null;
+
+// The agent's undo of an earlier change puts that change's own card under its
+// answer, with only its Undo. A regression here is a card that cannot undo,
+// an Undo sent for the wrong exchange (and refused), or a stale mail list.
+describe('Inbox Agent undo requests', () => {
+  // Breaks: the request card cannot undo, or sends the new exchange's id and is refused.
+  it('puts an earlier card the agent asked to undo under its answer, and undoes it through the earlier exchange on the user\'s click', async () => {
+    const onMailChanged = vi.fn();
+    const onNavigateToSource = vi.fn();
+    const requests = [undoRequest(), undoRequest({ kind: 'setting', id: 'setting-1', exchangeId: 'exchange-setting', label: 'R1', summary: 'Block news@shop.test' })];
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [changeExchange('applied'), settingExchange('applied'), undoExchange(requests)] : [])));
+    const view = await mount({ onMailChanged, onNavigateToSource });
+    const later = () => view.byLabel('Answer to Undo that')!;
+    // Its emails still open in the reader, without deciding anything.
+    fire(later().querySelector('[aria-label="Open email: Weekend sale (rc@sarv.com)"]') as HTMLElement, 'click');
+    expect(onNavigateToSource).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ accountId: 'work', emailId: 'mail-1' }));
+    expect(later().textContent).toContain('Mark 1 email read');
+    expect(later().textContent).toContain('Block news@shop.test');
+    expect(later().textContent!.match(/Inbox Agent asked to undo this\. Nothing changes until you click Undo\./g)).toHaveLength(2);
+    expect(later().querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+    expect(buttonIn(later(), 'Approve')).toBeNull();
+    fire(buttonIn(later(), 'Undo 1 email'), 'click'); await settle();
+    expect(api.changeSet).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: 'chat-1', exchangeId: 'exchange-change', changeSetId: 'set-1', decision: 'undo' }));
+    expect(api.changeSet.mock.calls[0]![0].itemIds).toBeUndefined();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    fire(buttonIn(later(), 'Undo'), 'click'); await settle();
+    expect(api.changeSet.mock.calls[1]![0]).toMatchObject({ chatId: 'chat-1', exchangeId: 'exchange-setting', changeSetId: 'setting-1', decision: 'undo' });
+    expect(api.changeSet.mock.calls[1]![0].includeExisting).toBeUndefined();
+  });
+
+  // Breaks: mail the agent put back still shows as archived until a manual refresh.
+  it('refreshes the mail list when the agent undid an earlier change for the user', async () => {
+    const onMailChanged = vi.fn();
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [changeExchange('applied')] : [])));
+    const view = await mount({ onMailChanged });
+    api.ask.mockImplementationOnce(async request => ok({ ...undoExchange([undoRequest()]), chatId: request.chatId }));
+    submit(view, 'Undo that'); await settle();
+    expect(onMailChanged).not.toHaveBeenCalled();
+    api.ask.mockImplementationOnce(async request => ok({ ...undoExchange([undoRequest({ outcome: 'undone' })], 'exchange-undone'), chatId: request.chatId }));
+    submit(view, 'Undo that'); await settle();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    expect(view.container.textContent).toContain('Undone for you.');
+  });
+
+  // Breaks: an undo request for a card that is gone crashes the answer or shows a dead button.
+  it('says a change can no longer be undone when its card is gone', async () => {
+    const requests = [undoRequest({ exchangeId: 'exchange-gone' }), undoRequest({ kind: 'setting', id: 'setting-9', label: 'R1', summary: 'Block news@shop.test' })];
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [changeExchange('applied'), undoExchange(requests)] : [])));
+    const view = await mount();
+    const later = view.byLabel('Answer to Undo that')!;
+    expect(later.textContent).toContain('Mark 1 email read: this can no longer be undone from here.');
+    expect(later.textContent).toContain('Block news@shop.test: this can no longer be undone from here.');
+    expect([...later.querySelectorAll('button')].some(element => /Undo/.test(element.textContent ?? ''))).toBe(false);
   });
 });

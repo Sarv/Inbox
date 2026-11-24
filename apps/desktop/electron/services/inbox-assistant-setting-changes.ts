@@ -5,7 +5,7 @@ import type { FilterAction, FilterCondition, FilterRule, FilterRuleInput } from 
 import type { InboxAgentSettingChange, InboxAgentSettingKind } from '../../src/types/inbox-assistant-changes';
 
 import {
-  applyChangeSet, INBOX_AGENT_CHANGE_LIMITS, InboxAgentChangeError, undoChangeSet,
+  applyChangeSet, INBOX_AGENT_CHANGE_LIMITS, InboxAgentChangeError, isChanged, undoChangeSet,
   type HeldChangeSet, type InboxAgentEmailReader, type InboxAgentMailActions,
 } from './inbox-assistant-change-sets';
 
@@ -178,6 +178,21 @@ export function stageSettingChange(input: {
   return { change, plan: input.plan, linked: change.existing ? linked : [], busy: false };
 }
 
+/**
+ * Start a setting change's approval window when its card reaches the user,
+ * as openApprovalWindow does for a change set, and give its existing mail the
+ * same window: approving with "apply to existing" must not save the setting
+ * and then find the mail's own window already over. Only a pending change is
+ * touched, and no window is shortened.
+ */
+export function openSettingApprovalWindow(held: HeldSettingChange, nowMs: number): void {
+  const { change } = held;
+  if (change.status !== 'pending') return;
+  change.approveBy = Math.max(change.approveBy, nowMs + INBOX_AGENT_CHANGE_LIMITS.approveMs);
+  // Nothing of the existing mail is applied before the setting is.
+  for (const { set } of held.linked) set.approveBy = Math.max(set.approveBy, change.approveBy);
+}
+
 function claim(held: HeldSettingChange): void {
   if (held.busy) throw new InboxAgentChangeError('This change is already being applied.');
   held.busy = true;
@@ -236,10 +251,12 @@ function emailsWhere(held: HeldSettingChange, test: (item: HeldChangeSet['set'][
 }
 
 function existingResult(held: HeldSettingChange): string {
-  const changed = emailsWhere(held, item => item.status === 'applied' || item.status === 'queued');
+  const changed = emailsWhere(held, isChanged);
   const failed = emailsWhere(held, item => item.status === 'failed');
-  const stale = emailsWhere(held, item => item.status === 'skipped' && item.detail !== 'Not selected.');
-  const guarded = held.change.existing?.protectedCount ?? 0;
+  // Counted from the rows, so mail that became protected after staging (the
+  // user starred it) is reported as protected, not as changed meanwhile.
+  const guarded = emailsWhere(held, item => !!item.protectedReason && !isChanged(item));
+  const stale = emailsWhere(held, item => item.status === 'skipped' && item.detail !== 'Not selected.' && !item.protectedReason);
   return [
     `${changed} ${changed === 1 ? 'email' : 'emails'} changed`,
     guarded ? `${guarded} protected left as ${guarded === 1 ? 'it is' : 'they are'}` : '',
@@ -250,7 +267,7 @@ function existingResult(held: HeldSettingChange): string {
 
 function undoneResult(held: HeldSettingChange): string {
   const undone = emailsWhere(held, item => item.status === 'undone');
-  const left = emailsWhere(held, item => item.status === 'applied' || item.status === 'queued');
+  const left = emailsWhere(held, isChanged);
   return [`${undone} ${undone === 1 ? 'email' : 'emails'} put back`, left ? `${left} left as ${left === 1 ? 'it is' : 'they are'} now (changed since, or could not be undone)` : ''].filter(Boolean).join(' · ');
 }
 
@@ -342,7 +359,7 @@ export async function undoSettingChange(held: HeldSettingChange, options: Settin
   claim(held);
   try {
     for (const set of [...held.linked].reverse()) {
-      if (!['applied', 'partial'].includes(set.set.status) || !set.set.items.some(item => item.status === 'applied' || item.status === 'queued')) continue;
+      if (!['applied', 'partial'].includes(set.set.status) || !set.set.items.some(isChanged)) continue;
       options.signal?.throwIfAborted();
       try { await undoChangeSet(set, { actions: options.mail, readEmail: options.readEmail, nowMs: options.nowMs, ...(options.signal ? { signal: options.signal } : {}) }); }
       catch { /* Rows not put back stay as they are, and are counted so. */ }

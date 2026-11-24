@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AssistantReadReceipt } from '../../../../electron/services/assistant-mail-actions';
 import { INBOX_AGENT_CHANGE_LIMITS, stageChangeSet, type InboxAgentMailActions } from '../../../../electron/services/inbox-assistant-change-sets';
 import {
-  applySettingChange, cancelSettingChange, describeFilter, senderChanges, senderFlags, senderWords, stageSettingChange, undoSettingChange,
+  applySettingChange, cancelSettingChange, describeFilter, openSettingApprovalWindow, senderChanges, senderFlags, senderWords, stageSettingChange, undoSettingChange,
   type InboxAgentSettingActions, type SenderSettings, type SettingPlan,
 } from '../../../../electron/services/inbox-assistant-setting-changes';
 import { emailRecord } from '../../../helpers/email-fixtures';
@@ -291,5 +291,33 @@ describe('undoing a standing change', () => {
     w.failing.clear();
     await undoSettingChange(held, w.options());
     expect(held.change.status).toBe('undone');
+  });
+});
+
+describe('the approval window', () => {
+  // Breaks: approving with "apply to existing" saves the setting but silently
+  // changes no mail, because the existing mail's window, stamped at staging,
+  // expired first; or a long run eats the user's approval time.
+  it('gives a setting change and its existing mail one window from when the card is handed over', async () => {
+    const w = world();
+    const { approveMs } = INBOX_AGENT_CHANGE_LIMITS;
+    const delivered = T0 + 4 * 60_000;
+    const held = stage(w, { kind: 'create_filter', input: INPUT }, ['m1']);
+    openSettingApprovalWindow(held, delivered);
+    expect(held.change.approveBy).toBe(delivered + approveMs);
+    expect(held.linked[0]!.set.approveBy).toBe(delivered + approveMs);
+    // Never shortened.
+    openSettingApprovalWindow(held, T0);
+    expect(held.change.approveBy).toBe(delivered + approveMs);
+    // Near the end of the window that opened on delivery, the ticked existing mail changes too.
+    await applySettingChange(held, w.options({ nowMs: delivered + approveMs - 1_000, includeExisting: true }));
+    expect(held.change.existing!.result).toBe('1 email changed');
+    // A decided change is left alone.
+    openSettingApprovalWindow(held, delivered + approveMs);
+    expect(held.change.approveBy).toBe(delivered + approveMs);
+    const cancelled = stage(w, { kind: 'create_filter', input: INPUT });
+    cancelSettingChange(cancelled);
+    openSettingApprovalWindow(cancelled, delivered);
+    expect(cancelled.change.approveBy).toBe(T0 + approveMs);
   });
 });

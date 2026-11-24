@@ -161,6 +161,35 @@ describe('Inbox Agent change set card', () => {
     expect(view.byLabel('Change actions')).toBeNull();
   });
 
+  // Breaks: a card the agent asked to undo (shown again under a later answer)
+  // offers Approve, Cancel, Retry or tick boxes, or a dead Undo.
+  it('shows only Undo on a card the agent asked to undo, and no buttons once it is undone or past its window', () => {
+    const asked = set({ status: 'partial', autoApplied: true, undoBy: NOW + 60_000, items: [
+      item('c1-1', { status: 'applied' }), item('c1-2', { status: 'failed', detail: 'Could not be changed.' }), item('c1-3', { protectedReason: 'Starred' }),
+    ] });
+    const { view, props } = mount(asked, { undoOnly: 'waiting' });
+    const text = () => view.container.textContent!;
+    expect(text()).toContain('Inbox Agent asked to undo this. Nothing changes until you click Undo.');
+    expect(view.all('input[type="checkbox"]')).toHaveLength(0);
+    for (const label of ['Approve', 'Approve selected', 'Leave the rest', 'Cancel', 'Retry 1 failed email']) expect(button(view, label)).toBeNull();
+    expect(text()).not.toContain('left unticked');
+    fire(button(view, 'Undo 1 email'), 'click');
+    expect(props.onDecision).toHaveBeenCalledExactlyOnceWith('undo');
+    // Undone since, by the user's click: its own status says so, and nothing is offered.
+    view.rerender(<AssistantChangeSetCard {...props} undoOnly="waiting" changeSet={set({ status: 'undone', undoBy: NOW + 60_000, items: [item('c1-1', { status: 'undone' })] })} />);
+    expect(view.byLabel('Change actions')).toBeNull();
+    expect(text()).toContain('Undone · 1 undone');
+    expect(text()).not.toContain('Inbox Agent asked');
+    // Past its Undo window.
+    view.rerender(<AssistantChangeSetCard {...props} undoOnly="waiting" changeSet={set({ status: 'applied', undoBy: NOW - 1, items: [item('c1-1', { status: 'applied' })] })} />);
+    expect(view.byLabel('Change actions')).toBeNull();
+    expect(text()).toContain('This can no longer be undone from here.');
+    // Undone for the user under "Approve for me".
+    view.rerender(<AssistantChangeSetCard {...props} undoOnly="undone" changeSet={set({ status: 'undone', undoBy: NOW + 60_000, items: [item('c1-1', { status: 'undone' })] })} />);
+    expect(text()).toContain('Undone for you.');
+    expect(view.byLabel('Change actions')).toBeNull();
+  });
+
   // Breaks: a busy card accepts a second decision, or a large set renders every row at once.
   it('ignores input while busy and pages long sets', () => {
     const many = set({ items: Array.from({ length: 60 }, (_, index) => item(`c1-${index + 1}`)) });

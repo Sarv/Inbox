@@ -1,5 +1,5 @@
 import type { InboxAssistantReview, InboxAssistantReviewApplyResult } from './inbox-assistant-actions';
-import type { InboxAgentChangeSet, InboxAgentChangeSetRequest, InboxAgentSettingChange } from './inbox-assistant-changes';
+import type { InboxAgentChangeSet, InboxAgentChangeSetRequest, InboxAgentSettingChange, InboxAgentUndoRequest } from './inbox-assistant-changes';
 import type { InboxAssistantDashboard, InboxAssistantDashboardRequest } from './inbox-assistant-dashboard';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest } from './local-calendar';
 
@@ -309,6 +309,8 @@ export interface InboxAssistantExchange {
   changeSets?: InboxAgentChangeSet[];
   /** Settings the agent asked to change (filters, sender blocks), one card each. */
   settingChanges?: InboxAgentSettingChange[];
+  /** Earlier changes the agent undid, or asked the user to undo, in this exchange: each shows the earlier card with only its Undo. */
+  undoRequests?: InboxAgentUndoRequest[];
   /** Compact receipt presentation for batches produced by one automatic run. */
   reviewBatch?: { runId: string; number: number };
   requestId?: string;

@@ -2,8 +2,9 @@ import { CheckCircle2, Clock3, ShieldAlert, Undo2 } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 
 import type { InboxAssistantSource } from '../../types/inbox-assistant';
-import type { InboxAgentChangeItem, InboxAgentChangeSet } from '../../types/inbox-assistant-changes';
+import type { InboxAgentChangeItem, InboxAgentChangeSet, InboxAgentUndoRequest } from '../../types/inbox-assistant-changes';
 
+import { undoRequestNote } from './undo-request-note';
 import './assistant-review.css';
 
 /**
@@ -17,6 +18,12 @@ export interface AssistantChangeSetCardProps {
   busy: boolean;
   onDecision: (decision: 'approve' | 'cancel' | 'undo', itemIds?: string[]) => void;
   onOpen: (source: InboxAssistantSource) => void;
+  /**
+   * Shown again under a later answer because the agent undid it or asked to
+   * (an undo request): only its Undo is offered, with no Approve, Cancel,
+   * Retry or tick boxes.
+   */
+  undoOnly?: InboxAgentUndoRequest['outcome'];
 }
 
 const PAGE = 25;
@@ -63,7 +70,7 @@ function statusLine(set: InboxAgentChangeSet, now: number): string {
   }
 }
 
-export function AssistantChangeSetCard({ changeSet, busy, onDecision, onOpen }: AssistantChangeSetCardProps) {
+export function AssistantChangeSetCard({ changeSet, busy, onDecision, onOpen, undoOnly }: AssistantChangeSetCardProps) {
   const headingId = useId();
   const [now, setNow] = useState(() => Date.now());
   const [shown, setShown] = useState(PAGE);
@@ -79,8 +86,9 @@ export function AssistantChangeSetCard({ changeSet, busy, onDecision, onOpen }: 
   const pending = changeSet.items.filter(item => item.status === 'pending');
   const failed = changeSet.items.filter(item => item.status === 'failed');
   const undoable = changeSet.items.filter(changed);
-  const canApprove = ['pending', 'partial'].includes(changeSet.status) && changeSet.approveBy > now && (pending.length > 0 || failed.length > 0);
+  const canApprove = !undoOnly && ['pending', 'partial'].includes(changeSet.status) && changeSet.approveBy > now && (pending.length > 0 || failed.length > 0);
   const canUndo = ['applied', 'partial'].includes(changeSet.status) && changeSet.undoBy > now && undoable.length > 0;
+  const undoNote = undoOnly && undoRequestNote(undoOnly, { canUndo, undone: changeSet.status === 'undone' });
   const chosen = pending.filter(item => selected.has(item.id));
   const protectedChosen = chosen.filter(item => item.protectedReason).length;
   const protectedCount = changeSet.items.filter(item => item.protectedReason && item.status === 'pending').length;
@@ -99,6 +107,7 @@ export function AssistantChangeSetCard({ changeSet, busy, onDecision, onOpen }: 
           <div className="min-w-0">
             <h3 id={headingId} className="assistant-review-title">{changeSet.summary}</h3>
             <p role="status" className="assistant-review-subtitle">{statusLine(changeSet, now)}</p>
+            {undoNote && <p className="mt-1 text-xs font-medium leading-5">{undoNote}</p>}
             {changeSet.note && <p className="mt-1 text-xs leading-5 text-muted-foreground">{changeSet.note}</p>}
             {protectedCount > 0 && canApprove && <p className="mt-1 flex items-start gap-1.5 text-xs leading-5 text-muted-foreground"><ShieldAlert aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />{count(protectedCount, 'email')} {protectedCount === 1 ? 'is' : 'are'} protected and left unticked. Tick {protectedCount === 1 ? 'it' : 'them'} only if you are sure.</p>}
           </div>
@@ -109,7 +118,7 @@ export function AssistantChangeSetCard({ changeSet, busy, onDecision, onOpen }: 
         {changeSet.items.slice(0, shown).map(item => {
           const isSelected = item.status === 'pending' && selected.has(item.id);
           return <li key={item.id} data-selected={isSelected} className="assistant-review-item min-w-0">
-            <label className="assistant-review-select-target"><input type="checkbox" checked={isSelected} disabled={busy || !canApprove || item.status !== 'pending'} onChange={() => toggle(item)} aria-label={`Include: ${item.subject} (${item.accountEmail})`} className="assistant-review-checkbox h-4 w-4 accent-primary disabled:opacity-40" /></label>
+            {!undoOnly && <label className="assistant-review-select-target"><input type="checkbox" checked={isSelected} disabled={busy || !canApprove || item.status !== 'pending'} onChange={() => toggle(item)} aria-label={`Include: ${item.subject} (${item.accountEmail})`} className="assistant-review-checkbox h-4 w-4 accent-primary disabled:opacity-40" /></label>}
             <div className="assistant-review-item-content">
               <div className="assistant-review-item-heading">
                 <button type="button" onClick={() => onOpen(sourceFor(item))} aria-label={`Open email: ${item.subject} (${item.accountEmail})`} className="assistant-review-subject">{item.subject}</button>

@@ -220,6 +220,13 @@ describe('a run of the agent loop', () => {
     expect(JSON.parse(inboxAssistantDiagnosticsReport({ ...exchange, diagnostics: { version: 1, route: 'agent', agent: { mode: 'native', reasoning: 'off', steps: 2, toolCalls: {}, toolErrors: {} } } })).agent.reasoning).toBe('off');
   });
 
+  // Breaks: the activity panel says the agent undid a change when it only put
+  // the change's Undo on a card for the user (undo_change follows the approval rules).
+  it('says undo_change undid or asked to undo a change', () => {
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: { version: 1, route: 'agent', agent: { mode: 'native', steps: 2, toolCalls: { undo_change: 1 }, toolErrors: {} } } })[0])
+      .toBe('The AI worked in 2 steps and undid or asked to undo a change.');
+  });
+
   // Breaks: a report or the activity panel hides that the agent changed mail.
   it('reports the changes the agent prepared and applied, as counts only', () => {
     const changed: InboxAssistantRunDiagnostics = { version: 1, route: 'agent',

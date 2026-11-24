@@ -10,7 +10,7 @@ import { inboxAssistantTermWords, matchesInboxAssistantTerm, meaningfulInboxAssi
 
 export type AssistantResearchStorage = Pick<SQLiteStorage,
   'getFolders' | 'searchEmails' | 'getEmail' | 'getContacts' | 'getAttachments'>
-  & Partial<Pick<SQLiteStorage, 'getEmailsByThread' | 'searchEmailsCount'>>
+  & Partial<Pick<SQLiteStorage, 'getEmailsByThread' | 'searchEmailsCount' | 'getSenderStats'>>
   & { getCategoryDefinitions?(): Array<{ slug: string; name?: string }> };
 
 export interface AssistantResearchMailbox {

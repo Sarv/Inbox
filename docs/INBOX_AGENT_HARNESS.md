@@ -238,7 +238,11 @@ eval passes. Tests and the whole suite with every phase, as CLAUDE.md requires.
   Emails are named by `S…` ids a tool showed in this run, or by a
   `classify_messages` result and its labels (`from_result` + `labels`);
   `unsure` is never changed. `include_conversation` adds each email's
-  conversation (same account). Mail already as asked is left out and counted.
+  conversation (same account): never a draft (the core conversation
+  predicate), never a Trash or Spam copy for an action that hides mail, and,
+  for a move or a spam report, never the user's own sent copy ("your own sent
+  copy" is counted as left out); `trash` still takes sent copies, as Delete
+  conversation does. Mail already as asked is left out and counted.
   A move covers one account, never to Trash (that is `trash`), Spam, Drafts or
   Sent.
 - **Provenance**: an id the model was not shown (made up, or read in an email)
@@ -249,6 +253,9 @@ eval passes. Tests and the whole suite with every phase, as CLAUDE.md requires.
   failed. A row moved or deleted since staging is skipped. Each account's
   action fails on its own. Approval is open 30 minutes; Undo 24 hours, in this
   app session (memory only: after a restart the card shows as expired).
+  (Since 3 the change journal keeps both across a restart; since 3b the
+  30 minutes start when the answer arrives, not at staging. See "The approval
+  window starts when the answer arrives" under Phase 3b.)
 - **Undo** puts each changed row back only if it is still as the set left it:
   flags and categories by their inverse, archive and move back to where the
   message was (its Inbox if it was in one), Trash back through the Trash
@@ -257,11 +264,15 @@ eval passes. Tests and the whole suite with every phase, as CLAUDE.md requires.
   important mail and the unread review's content gates (security codes, bank
   and card records, invoices, contracts, business reports, invitations) are
   staged unticked with the reason. Only the user's tick applies them; the card
-  asks once more, as it does for Trash.
+  asks once more, as it does for Trash. (Since 3b: also spam and snooze, with
+  the review's other protections, held for the whole request; see "Protections
+  carried over" and "Protection holds for the whole request" under Phase 3b.)
 - **Modes**: "Ask for approval" stages every set for a card under the answer.
   "Approve for me" applies a set at once, up to 200 emails per request; a
   larger set, or one made only of protected mail, waits for a card. A set
-  applied before the run fails keeps its card and Undo.
+  applied before the run fails keeps its card and Undo. (Since 3b the 200 also
+  counts what the agent's own `undo_change` puts back, and a chat saved as
+  "Approve for me" before 3b loads as "Ask for approval"; see Phase 3b.)
 - **Card and IPC**: `AssistantChangeSetCard` (Approve / Approve selected /
   Cancel, Retry failed, Undo); `inboxAssistant:changeSet` with
   `decision: approve | cancel | undo`, validated strictly and serialized with
@@ -307,7 +318,10 @@ removing the regex router).
   `list_filters`) and `change_sender` (block, unblock, vip, unvip, trust,
   untrust). Each is one card (R1, R2…) that always waits for approval. Existing
   mail a change can act on is staged as linked change sets (one per filter
-  action; Sent, Drafts, Trash and Spam left out; protected mail stays) and is
+  action; Sent, Drafts, Trash and Spam left out; protected mail stays, with
+  `change_mail`'s protections: the email's own, its state at the request's
+  first look, and the sender and conversation guard; a filter's star or label
+  step hides nothing and is never held) and is
   applied only when the user ticks it. Undo reverts only what is still as the
   change left it: a filter edited since, or a flag the user changed, is kept.
   "Block" adds the sender to the spammer list (what files new mail in Spam)
@@ -321,12 +335,16 @@ removing the regex router).
   and setting changes are saved in one core-database blob
   (`inbox-agent-change-journal`), so a card keeps Approve and Undo across a
   restart while its windows last. An unreadable journal is never written over;
-  a save larger than 16 MB is skipped and logged.
+  a save larger than 16 MB is skipped and logged. (Since 3b a set the run
+  applies or undoes is saved the moment it changes mail, with its card on the
+  unfinished exchange, so a quit or crash mid-run keeps its Undo; its approval
+  window still opens with the answer.)
 - **"Undo that"**: labels run on through a chat (C1, C2… and R1, R2…); the
   prompt lists earlier changes that can still be undone, and `undo_change`
   takes C or R ids from earlier messages, checked against the accounts each was
   prepared for. A card always shows its held state, and an earlier card the
-  agent undid is saved that way.
+  agent undid is saved that way. (Since 3b the model's undo follows the
+  approval rules; see "Undo follows the approval rules" below.)
 - **Enrichment fix**: an empty reply at the token limit (a reasoning model that
   spent its budget thinking) is retried once with twice the budget in the
   renderer's provider call; the empty-reply log no longer writes the model's
@@ -355,21 +373,137 @@ categorize), and the same 4 `keep` mails leaked as by the review, no more.
   setting and environment variable. Old saved reviews still show their text,
   with a note that their buttons are gone.
 - **Protections carried over** from the review, for every action that hides
-  mail (mark read, archive, Trash, move, spam): the provider's Important flag,
-  a calendar invitation, encrypted mail, a non-soft category the user chose
-  (`changeProtection`), and, looked up per sender and conversation, a
-  favourite (VIP) sender and a conversation the user is in: a reply of theirs
-  in the last 30 days or a colleague at their own company domain
-  (`createConversationGuard`). A lookup that fails protects.
+  mail (mark read, archive, Trash, move, spam, snooze; `hidesMail`). The
+  email's own (`emailProtection`): starred, important (the `important` tag,
+  the provider's flag or the user's manual flag), a calendar invitation,
+  encrypted mail, a category the user chose that is not a soft one
+  (promotions, social, updates, forums), and the review's content gates
+  (security codes, bank and card records, invoices, contracts, business
+  reports, invitations), and, as the review did, mail whose body was never
+  stored (`hasBody` false or no body at all: the gates had nothing to read,
+  `NOT_DOWNLOADED`) and mail with attached files nobody read
+  (`ATTACHMENTS_UNCHECKED`). Looked up per sender and conversation
+  (`createConversationGuard`): a favourite or VIP sender (the shared address
+  book's favourite, or the account's own `sender_stats.is_vip`, which the
+  sender panel's VIP toggle and an approved `change_sender` vip card set; per
+  account) and a conversation the user is in: a reply of theirs in the last
+  30 days or a colleague at their own company domain. A lookup that fails
+  protects. The existing mail a filter or block offers to change gets the
+  same protections (one guard factory, `conversationGuardsFor`, and
+  `stagedProtection`). Actions that hide nothing or bring mail back (mark
+  unread, star and unstar, labels, categories, restore, unsnooze) are never
+  held; not_spam is not held either, but it is standing and always waits for
+  a card. At approval (a card, an auto-apply, a linked set) the flags the user
+  can set by hand (`flagProtection`: starred, important, a category of their
+  own) are checked again on rows the user did not tick: a row flagged since
+  staging is protected and left as it is ("Protected since it was
+  prepared"); protection is only ever added there, never released, and a
+  linked set's result counts it as protected.
+- **Protection holds for the whole request** (2026-11-22). unstar and
+  remove_category hide nothing, so they still apply at once under "Approve
+  for me", but they can no longer open mail to a later hiding set in the same
+  request: each message's own protection (`emailProtection`) at the request's
+  first look, by any action, is kept for the run (`stagedProtection`,
+  `InboxAgentChangeContext.atStart`, keyed by account and message), and a row
+  protected only by it is labelled "… before this request changed it".
+  `undo_change` records its rows before it changes them; a read that fails
+  there protects that row for the rest of the request (the mailbox is opened
+  directly for this check, never through the run's cache, so a blip does not
+  mark the account unavailable). Across requests, only what the agent
+  lowered itself is carried: an unstar or a category removal it applied
+  without a card records each row's protection before it (`HeldItem.lowered`),
+  and a later request in the same chat keeps that row protected ("… before an
+  earlier request in this chat changed it") while the change stands: its row
+  still changed, its Undo window open, and the user not having decided it on
+  its card. Another chat sees mail as it is. Protection is still decided at
+  staging and only ever added, never released, by a later approval.
+- **Undo follows the approval rules** (2026-11-22). An undo the MODEL asks
+  for is a change like any other. `undo_change` of a setting change (filter,
+  block, VIP, trust) always waits for the user, in every mode: the run's
+  context has no way to undo a setting at all. Every undo waits in "Ask for
+  approval". Under "Approve for me" it runs at once only for a set the agent
+  applied without a card, in an account this request selected, within the
+  same 200-per-request cap as `change_mail` (it reserves the set's changed rows
+  before it runs; `diagnostics.agent.changes.autoApplied` still counts only
+  what `change_mail` applied). It waits for a spam verdict or a set that created a label
+  (standing), a set the user decided on its card (including the protected rest
+  of an auto-applied set, `HeldChangeSet.userApproved`), and an undo that would
+  hide mail again, decided per row from what the undo does (`undoHides`):
+  undoing mark unread, restore or unsnooze; a move whose undo takes mail out
+  of the Inbox (the set moved it into one) or back into Trash, Archive or
+  Spam; and a snooze whose undo snoozes for longer (it moved an earlier
+  snooze to an earlier time), since protections are not checked on Undo. The rule is one pure function, `agentUndoWait`, next
+  to `autoApplyWait`, the rule `change_mail` uses. A waiting undo of an EARLIER
+  change becomes an undo request on the exchange (`undoRequests`): the earlier
+  change's own card is shown again under the answer with only its Undo
+  (`undoOnly`), and the user's click is that card's existing Undo, sent with
+  the earlier exchange's id. Main holds nothing new for it; the earlier card's
+  24-hour Undo window governs. A waiting undo of one of the run's own sets adds
+  nothing: its card is already under the answer. The UID rule is unchanged: an
+  undo before sync reports a moved message's new UID is refused by the mail
+  action and reported as left as it is, never moved locally. What
+  `undo_change` reports, and records, is what that call put back (rows an
+  earlier Undo put back are not counted again); an undo the agent ran that
+  put nothing back (every row changed since, or refused) is recorded as
+  waiting, so the card still offers the user's Undo. An undo past the set's
+  24 hours, or with no changed row left, is answered as such and never
+  reaches the mail actions. An undo request keeps the exchange its card had
+  when the run started, even if that card's window ended before the answer.
+  The renderer refreshes the mail list when the agent applied a change or
+  undid an earlier one, also when the request then failed or was stopped (it
+  reads the saved exchange back by its request id).
+- **The approval window starts when the answer arrives** (2026-11-22). A set's
+  or a setting change's 30 minutes used to start at staging, so a long run
+  (up to 5 minutes) spent the user's time before the card showed. The window
+  now opens when the run's cards are handed over (`rememberChangeSets`, at the
+  answer or at the failure the user sees), before the returned exchange copies
+  them, so the shown card, its saved copy and the journal agree. It is never
+  shortened and only open sets are touched (`openApprovalWindow`). A setting
+  change and its "apply to existing" sets share one window
+  (`openSettingApprovalWindow`): approving near its end must not save the
+  setting and silently skip the mail. A card restored from the journal keeps
+  the absolute window it was delivered with; a restart never extends it.
+- **Consent to "Approve for me" carries its meaning** (2026-11-22). 1.4.11
+  saved the same `approve_for_me` when it only marked reviewed mail read (and
+  the regex mark read/unread command); the agent reads it as leave to archive,
+  Trash, move, label, snooze, star and categorise up to 200 emails. A chat's
+  choice is now saved with the scope it was made for (`approvalScope` in the
+  chat index, never in a chat body or an IPC result), built from the
+  auto-applicable actions and the cap (`APPROVE_FOR_ME_SCOPE`,
+  `src/utils/inbox-assistant-approval.ts`), so widening either resets every
+  chat with no version to bump. A chat delegated before this version, by
+  1.4.11's `approve_for_me` or an older Auto, loads as "Ask for approval",
+  rewritten once in the index transaction (a failed write throws and saves
+  nothing; order, titles, pins, chat bodies and recovery stay as they were).
+  The index marker stays 2, because 1.4.11 refuses any other. Turning "Approve
+  for me" on asks first with the mode's description (what it applies, the
+  cap, the 24-hour Undo, and what always asks); turning it off never asks.
+  The control's tooltip is the same description (`ACTION_MODE_DESCRIPTION`),
+  tied by tests to the cap and actions the host enforces. The renderer does
+  not offer the mode control while a request runs (Stop it first). In main,
+  as defence in depth (a second window, a race): switching a chat to "Ask for
+  approval" while a request runs makes that request's further changes wait
+  (`ActiveRun.changes`), and stops it if it has already changed mail
+  (`ActiveRun.mutating` stays set for the rest of the run); a change it had
+  decided to apply without a card but was still waiting its turn behind
+  another chat's change checks the mode again when its turn comes and stops
+  the request. Switching to "Approve for me" never widens a request already
+  running. New chats save no mode and start on "Ask for approval". Known residual: a chat enabled here, downgraded
+  to 1.4.11, switched off and on there, and upgraded again keeps its record.
 - **Diagnostics**: a run records its latest `deep_search` plan and per-account
   coverage, as the one-shot search did.
 - **Evaluation** (`apps/desktop/test/eval/assistant/`, docs/TESTING.md): the
   questions are scored through `deep_search` at floor and ceiling and must end
   in a verified answer citing the right email; the other requests are tasks
   (`agent-tasks.ts`) checked on the mailbox and the cards; the live-provider run
-  records a real model's agent turns, replayed in CI.
+  records a real model's agent turns, replayed in CI. `review-safety.test.ts`
+  runs the worst-case model once per hiding action (mark read, snooze,
+  archive, Trash, move) on its own mailbox; since 2026-11-22 the triage mail
+  includes a `keep` mail whose body was never downloaded and one whose
+  content is only an attachment.
 - **Scale**: one request does what fits in 14 turns and 40 tool calls (pages of
-  50, classification in 200s, at most 200 messages applied without a card),
+  50, classification in 200s, at most 200 messages changed without a card,
+  `change_mail` and the agent's own undos together),
   where the automatic review ran up to 10 batches unattended. A larger cleanup
   is several requests; a saved playbook is Phase 5.
 - **Not yet**: drafts and sending (Phase 4).

@@ -1,14 +1,19 @@
 import { TZDate } from '@date-fns/tz';
-import { classifyFolder, FLAG_TAG_NAMES, hasTag, isInboxFolder, isTrashFolder, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
+import {
+  classifyFolder, conversationFoldersOf, FLAG_TAG_NAMES, hasTag, isDraftRow, isExcludedFolderCopy, isInboxFolder, isSentCopy, isTrashFolder,
+  type EmailRecord, type FolderRecord,
+} from '@sarvinbox/core';
 
-import type { InboxAssistantAccount } from '../../src/types/inbox-assistant';
 import type { InboxAgentChangeAction } from '../../src/types/inbox-assistant-changes';
 
 import {
   accountOf, InboxAgentToolError, oneLine, openAccount, optionalBoolean, optionalText, readArgs, roleFolders,
-  type InboxAgentTool, type InboxAgentToolContext,
+  type InboxAgentChangeContext, type InboxAgentTool, type InboxAgentToolContext,
 } from './inbox-assistant-agent-tools';
-import { changeCounts, changeProtection, createConversationGuard, INBOX_AGENT_CHANGE_LIMITS, stageChangeSet, type HeldChangeSet, type InboxAgentSpamRevert, type StageTarget } from './inbox-assistant-change-sets';
+import {
+  agentUndoWait, autoApplyWait, changeCounts, createConversationGuard, emailProtection, hidesMail, INBOX_AGENT_CHANGE_LIMITS, isChanged, LOWERING_ACTIONS, stageChangeSet,
+  type AgentUndoWait, type AutoApplyWait, type ConversationGuard, type HeldChangeSet, type InboxAgentSpamRevert, type StageTarget,
+} from './inbox-assistant-change-sets';
 import { fullBody, type AssistantResearchMailbox } from './inbox-assistant-retrieval';
 
 /**
@@ -175,14 +180,132 @@ async function senderLists(storage: unknown, address: string): Promise<InboxAgen
   return { address, spammer: !!await lists.isSpammer?.(address), trusted: !!await lists.isTrustedSender?.(address) };
 }
 
+/**
+ * The review's sender and conversation protections, one guard per account,
+ * each caching its lookups for as long as the returned function is kept (one
+ * tool call). The user's own addresses: every selected account's, plus that
+ * mailbox's aliases. change_mail and a filter's or block's existing mail use
+ * the same guards.
+ */
+export function conversationGuardsFor(context: InboxAgentToolContext): (account: { id: string }, opened: { mailbox: AssistantResearchMailbox }) => ConversationGuard {
+  const guards = new Map<string, ConversationGuard>();
+  return (account, opened) => {
+    let guard = guards.get(account.id);
+    if (!guard) {
+      guard = createConversationGuard({ storage: opened.mailbox.storage, nowMs: context.changes!.nowMs(),
+        ownAddresses: [...context.accounts.map(item => item.email), ...opened.mailbox.aliases] });
+      guards.set(account.id, guard);
+    }
+    return guard;
+  };
+}
+
+/** Recorded for a message whose state before this request changed it could not be read: it protects, as a failed lookup does. */
+const UNCHECKED_AT_START = 'Its state before this request could not be checked';
+
+/** Each run's index of the protection earlier requests in its chat lowered, built on first use. */
+const loweredIndex = new WeakMap<NonNullable<InboxAgentToolContext['changes']>, Map<string, { held: HeldChangeSet; lowered: string; itemId: string }>>();
+
+/**
+ * The protection an EARLIER request in this chat lowered on this message
+ * without a card (an unstar or a category removal the agent applied itself
+ * under "Approve for me"), while that change stands: its row is still changed,
+ * its Undo window is open, and the user has not approved it on its card. So
+ * "unstar these" in one request does not open the mail to an archive in the
+ * next. A change the user decided, undid or let expire carries nothing.
+ */
+function loweredEarlier(context: InboxAgentToolContext, accountId: string, emailId: string): string | undefined {
+  const state = context.changes!;
+  let index = loweredIndex.get(state);
+  if (!index) {
+    index = new Map();
+    for (const held of state.earlier.sets) {
+      if (!held.set.autoApplied || !LOWERING_ACTIONS.has(held.set.action)) continue;
+      for (const entry of held.items.values()) {
+        if (entry.lowered) index.set(`${entry.item.accountId}\0${entry.item.emailId}`, { held, lowered: entry.lowered, itemId: entry.item.id });
+      }
+    }
+    loweredIndex.set(state, index);
+  }
+  const found = index.get(`${accountId}\0${emailId}`);
+  if (!found || found.held.userApproved || state.nowMs() > found.held.set.undoBy) return undefined;
+  const entry = found.held.items.get(found.itemId);
+  return entry && isChanged(entry.item) ? `${found.lowered} before an earlier request in this chat changed it` : undefined;
+}
+
+/**
+ * Why a message must stay unticked in a set being staged, or undefined: its
+ * protection now, else its protection at this request's first look at it (so
+ * an unstar or a category removal earlier in the request lowers nothing),
+ * else the protection an earlier request's own unstar or category removal
+ * lowered (loweredEarlier), else the sender and conversation guard. Only
+ * actions that hide mail are protected, but every action records the first
+ * look, which always comes before any set of this request changes the
+ * message (undo_change records its rows itself before it changes them).
+ */
+export async function stagedProtection(
+  context: InboxAgentToolContext, accountId: string, action: InboxAgentChangeAction, email: EmailRecord, guard: ConversationGuard, body = fullBody(email),
+): Promise<string | undefined> {
+  const { atStart } = context.changes!;
+  const key = `${accountId}\0${email.id}`;
+  const now = emailProtection(email, body);
+  if (!atStart.has(key)) atStart.set(key, now ?? null);
+  if (!hidesMail(action)) return undefined;
+  const start = atStart.get(key);
+  const before = !start ? undefined : start === UNCHECKED_AT_START ? start : `${start} before this request changed it`;
+  return now ?? before ?? loweredEarlier(context, accountId, email.id) ?? await guard(action, email);
+}
+
+/**
+ * Record, before an undo changes them, the protection of the messages it is
+ * about to change, unless this request already looked at them. The agent
+ * undoes only mail of the accounts this request selected (agentUndoWait); mail
+ * that is gone is skipped. A read that fails protects that row only: the
+ * mailbox is opened here directly, never through the run's cache, so a blip
+ * in this best-effort check does not mark the account unavailable for the rest
+ * of the request.
+ */
+async function rememberAtStart(context: InboxAgentToolContext, rows: Array<{ accountId: string; emailId: string }>): Promise<void> {
+  const { atStart } = context.changes!;
+  for (const row of rows) {
+    const key = `${row.accountId}\0${row.emailId}`;
+    if (atStart.has(key)) continue;
+    try {
+      const mailbox = await context.deps.openMailbox(row.accountId);
+      const email = await mailbox.storage.getEmail(row.emailId);
+      if (email) atStart.set(key, emailProtection(email, fullBody(email)) ?? null);
+    } catch {
+      atStart.set(key, UNCHECKED_AT_START);
+    }
+  }
+}
+
+/**
+ * The other messages of a conversation that include_conversation adds: never
+ * a draft (the core conversation predicate), never a copy already in Trash or
+ * Spam for an action that hides mail, and, for a move or a spam report, never
+ * the user's own sent copy (it stays in Sent, as the filter and block paths
+ * leave it). Trash still takes sent copies, as the app's Delete conversation does.
+ */
+function conversationAdditions(action: InboxAgentChangeAction, named: EmailRecord, rows: EmailRecord[], folders: FolderRecord[]): { members: EmailRecord[]; ownCopies: number } {
+  const conversation = conversationFoldersOf(folders);
+  const roleOf = (email: EmailRecord) => classifyFolder(folders.find(folder => folder.id === email.folderId) ?? { path: '', name: '', specialUse: null }) ?? '';
+  let ownCopies = 0;
+  const members = rows.filter(member => {
+    if (member.id === named.id || isDraftRow(member.tags, conversation) || roleOf(member) === 'drafts') return false;
+    if (hidesMail(action) && (isExcludedFolderCopy(member.tags) || ['trash', 'spam'].includes(roleOf(member)))) return false;
+    if ((action === 'move' || action === 'spam') && (roleOf(member) === 'sent' || isSentCopy(member.tags, conversation))) { ownCopies++; return false; }
+    return true;
+  });
+  return { members, ownCopies };
+}
+
 const NOTES: Partial<Record<InboxAgentChangeAction, string>> = {
   spam: 'Also sends these senders\' future mail to Spam.',
   not_spam: 'Also stops sending these senders\' future mail to Spam.',
 };
 
-type Waiting = 'approval' | 'cap' | 'protected' | 'standing';
-
-function result(held: HeldChangeSet, waiting: Waiting | undefined, notes: string[]): string {
+function result(held: HeldChangeSet, waiting: AutoApplyWait | undefined, notes: string[]): string {
   const { set } = held;
   const counts = changeCounts(set);
   const guarded = set.items.filter(item => item.protectedReason);
@@ -246,15 +369,7 @@ const changeMail: InboxAgentTool = {
     /** Each account's spelling of the label, or null where applying creates it. */
     const labelIn = new Map<string, string | null>();
     const senders = new Map<string, InboxAgentSpamRevert['sender']>();
-    // The review's sender and conversation protections, one guard per account (its own lookups cached).
-    const guards = new Map<string, ReturnType<typeof createConversationGuard>>();
-    const guardOf = (account: InboxAssistantAccount, opened: { mailbox: AssistantResearchMailbox }) => {
-      if (!guards.has(account.id)) {
-        guards.set(account.id, createConversationGuard({ storage: opened.mailbox.storage, nowMs: state.nowMs(),
-          ownAddresses: [...context.accounts.map(item => item.email), ...opened.mailbox.aliases] }));
-      }
-      return guards.get(account.id)!;
-    };
+    const guardOf = conversationGuardsFor(context);
     for (const choice of picked) {
       context.signal.throwIfAborted();
       const account = accountOf(context, choice.accountId);
@@ -284,8 +399,13 @@ const changeMail: InboxAgentTool = {
       }
       const named = await opened.mailbox.storage.getEmail(choice.emailId);
       if (!named) { left.set('no longer in the mailbox', (left.get('no longer in the mailbox') ?? 0) + 1); continue; }
-      const members = wholeConversations && named.threadId && opened.mailbox.storage.getEmailsByThread
-        ? [named, ...(await opened.mailbox.storage.getEmailsByThread(named.threadId)).filter(member => member.id !== named.id)] : [named];
+      let members = [named];
+      if (wholeConversations && named.threadId && opened.mailbox.storage.getEmailsByThread) {
+        // The email the model named stays whatever it is; only what the conversation adds is filtered.
+        const added = conversationAdditions(action, named, await opened.mailbox.storage.getEmailsByThread(named.threadId), opened.folders);
+        members = [named, ...added.members];
+        if (added.ownCopies) left.set('your own sent copy', (left.get('your own sent copy') ?? 0) + added.ownCopies);
+      }
       for (const member of members) {
         const key = `${account.id}\0${member.id}`;
         if (seen.has(key)) continue;
@@ -295,8 +415,10 @@ const changeMail: InboxAgentTool = {
         if (done) { left.set(done, (left.get(done) ?? 0) + 1); continue; }
         // The stored body only: protections never wait on a download.
         const email = member === named ? named : await opened.mailbox.storage.getEmail(member.id) ?? member;
-        const body = fullBody(email);
-        const protectedReason = changeProtection(action, email, body) ?? await guardOf(account, opened)(action, email);
+        const protectedReason = await stagedProtection(context, account.id, action, email, guardOf(account, opened));
+        // What an unstar or a category removal lowers, so the next request in the chat still protects it.
+        const firstLook = LOWERING_ACTIONS.has(action) ? state.atStart.get(key) : undefined;
+        const lowered = firstLook && firstLook !== UNCHECKED_AT_START ? firstLook : undefined;
         const address = (action === 'spam' || action === 'not_spam') && email.fromAddress ? email.fromAddress.toLowerCase() : undefined;
         if (address && !senders.has(`${account.id}\0${address}`)) {
           try { senders.set(`${account.id}\0${address}`, await senderLists(opened.mailbox.storage, email.fromAddress)); }
@@ -305,7 +427,7 @@ const changeMail: InboxAgentTool = {
         targets.push({ accountId: account.id, accountEmail: account.email, email, folders: opened.folders,
           ...(address ? { sender: senders.get(`${account.id}\0${address}`) } : {}),
           ...(choice.reason && member.id === named.id ? { reason: oneLine(choice.reason, 160) } : {}),
-          ...(protectedReason ? { protectedReason } : {}) });
+          ...(protectedReason ? { protectedReason } : {}), ...(lowered ? { lowered } : {}) });
       }
       if (targets.length > INBOX_AGENT_CHANGE_LIMITS.perSet) throw new InboxAgentToolError(`At most ${INBOX_AGENT_CHANGE_LIMITS.perSet} emails per change. Split it into smaller groups.`);
     }
@@ -321,8 +443,7 @@ const changeMail: InboxAgentTool = {
       targets, nowMs: state.nowMs() });
     state.sets.push(held);
     const unprotected = targets.filter(target => !target.protectedReason).length;
-    const waiting: Waiting | undefined = state.mode !== 'approve_for_me' ? 'approval' : held.set.standing ? 'standing' : !unprotected ? 'protected'
-      : state.autoApplied + unprotected > INBOX_AGENT_CHANGE_LIMITS.autoApplyPerRun ? 'cap' : undefined;
+    const waiting = autoApplyWait({ mode: state.mode, standing: held.set.standing, count: unprotected, autoApplied: state.autoApplied });
     if (!waiting) {
       context.progress({ stage: 'action', status: 'running', message: held.set.summary });
       await state.apply(held);
@@ -336,11 +457,28 @@ const changeMail: InboxAgentTool = {
   },
 };
 
+/** Why the agent's undo of a change set waits for the user, as the model is told. */
+const UNDO_WAITS: Record<AgentUndoWait, string> = {
+  approval: 'this chat asks the user before every change',
+  standing: 'undoing it changes more than these emails (the spam filter and the sender lists, or a label it created)',
+  approved: 'the user approved it on its card, so undoing it is their decision too',
+  hides: 'undoing it would hide mail again (marked read, moved out of the Inbox or back to Trash, Archive or Spam, or snoozed again)',
+  account: 'it changed mail in an account this request did not select',
+  cap: `undoing it is more than the ${INBOX_AGENT_CHANGE_LIMITS.autoApplyPerRun} emails that may change without asking in one request`,
+};
+
+/** Record an earlier change the agent undid or asked the user to undo: one entry per change, the latest outcome. */
+function noteUndo(state: InboxAgentChangeContext, request: InboxAgentChangeContext['undoRequests'][number]): void {
+  const index = state.undoRequests.findIndex(item => item.id === request.id);
+  if (index < 0) state.undoRequests.push(request);
+  else state.undoRequests[index] = request;
+}
+
 const undoChange: InboxAgentTool = {
   activity: 'Undoing a change',
   definition: {
     name: 'undo_change',
-    description: 'Undo a change set (C1…) or a setting change (R1…) from this chat that was applied, putting things back as they were. Anything changed by someone since is left as it is now.',
+    description: 'Undo a change set (C1…) or a setting change (R1…) from this chat that was applied, putting things back as they were. Anything changed by someone since is left as it is now. Only a change set you applied yourself under "Approve for me" is undone at once; any other undo (a setting change, everything in "Ask for approval") puts the change\'s Undo on a card for the user, and nothing is undone until they click it.',
     parameters: { type: 'object', additionalProperties: false, required: ['change_set'], properties: { change_set: { type: 'string', description: 'C… or R…' } } },
   },
   async run(raw, context) {
@@ -349,18 +487,47 @@ const undoChange: InboxAgentTool = {
     const label = optionalText(args, 'change_set', 10)?.toUpperCase();
     const setting = [...state.settingChanges, ...state.earlier.settings].find(item => item.change.label === label);
     if (setting) {
-      if (setting.change.status === 'pending') return `${label} was not applied, so there is nothing to undo. It waits for the user's approval; tell them they can cancel it on the card.`;
-      if (setting.change.status !== 'applied') return `${label} is ${setting.change.status}; there is nothing to undo.`;
-      await state.undoSetting(setting);
-      return `${label}: ${(setting.change.status as string) === 'undone' ? 'undone' : 'not undone'}${setting.change.detail ? ` (${setting.change.detail})` : ''}${setting.change.existing?.result && setting.change.existingApplied ? `. Existing mail: ${setting.change.existing.result}` : ''}.`;
+      const { change } = setting;
+      if (change.status === 'pending') return `${label} was not applied, so there is nothing to undo. It waits for the user's approval; tell them they can cancel it on the card.`;
+      if (change.status !== 'applied') return `${label} is ${change.status}; there is nothing to undo.`;
+      if (state.nowMs() > change.undoBy) return `${label} can no longer be undone from here.`;
+      // A setting keeps acting on mail nobody has seen: undoing one is the
+      // user's decision in every mode, so the agent has no way to do it.
+      noteUndo(state, { kind: 'setting', id: change.id, label: change.label, summary: change.summary, outcome: 'waiting' });
+      context.progress({ stage: 'action', status: 'done', message: `Asked to undo: ${change.summary}`, detail: 'Waiting for your Undo below the answer.' });
+      return `${label}: NOT undone. Undoing a setting change always waits for the user: its Undo is on a card below your answer. Do not say it is undone.`;
     }
     const held = [...state.sets, ...state.earlier.sets].find(item => item.set.label === label);
     if (!held) throw new InboxAgentToolError(`${label ?? 'That'} is not a change from this chat that can still be undone.`);
-    if (held.set.status === 'pending') return `${held.set.label} was not applied, so there is nothing to undo. It waits for the user's approval; tell them they can cancel it on the card.`;
-    if (!['applied', 'partial'].includes(held.set.status)) return `${held.set.label} is ${held.set.status}; there is nothing to undo.`;
+    const { set } = held;
+    if (set.status === 'pending') return `${set.label} was not applied, so there is nothing to undo. It waits for the user's approval; tell them they can cancel it on the card.`;
+    if (!['applied', 'partial'].includes(set.status)) return `${set.label} is ${set.status}; there is nothing to undo.`;
+    const rows = set.items.filter(isChanged);
+    if (!rows.length) return `${set.label}: nothing is left to undo.`;
+    if (state.nowMs() > set.undoBy) return `${set.label} can no longer be undone from here.`;
+    // One of this run's own sets already has its card, with Undo, under the answer.
+    const earlier = !state.sets.includes(held);
+    const wait = agentUndoWait(held, { mode: state.mode, autoApplied: state.autoApplied, accountIds: context.accounts.map(account => account.id) });
+    if (wait) {
+      if (earlier) noteUndo(state, { kind: 'change_set', id: set.id, label: set.label, summary: set.summary, outcome: 'waiting' });
+      context.progress({ stage: 'action', status: 'done', message: `Asked to undo: ${set.summary}`, detail: 'Waiting for your Undo below the answer.' });
+      return `${set.label}: NOT undone. It waits for the user: its Undo is on a card below your answer, because ${UNDO_WAITS[wait]}. Do not say it is undone.`;
+    }
+    // Counted against the per-request cap before it runs, whether or not each
+    // row can be put back, as change_mail counts what it applies.
+    state.autoApplied += rows.length;
+    state.autoUndone += rows.length;
+    context.progress({ stage: 'action', status: 'running', message: `Undo: ${set.summary}` });
+    await rememberAtStart(context, rows);
+    // What THIS call put back: rows an earlier Undo (the user's, or an earlier request's) already put back are not counted again.
+    const undoneBefore = changeCounts(set).undone;
     await state.undo(held);
-    const counts = changeCounts(held.set);
-    return `${held.set.label}: ${counts.undone} put back${counts.applied + counts.queued ? `, ${counts.applied + counts.queued} left as they are (changed since, or could not be undone)` : ''}.`;
+    const putBack = changeCounts(set).undone - undoneBefore;
+    const left = rows.filter(isChanged).length;
+    // Nothing put back (every row changed since, or refused): the card's Undo is still the user's to try.
+    if (earlier) noteUndo(state, { kind: 'change_set', id: set.id, label: set.label, summary: set.summary, outcome: putBack ? 'undone' : 'waiting' });
+    context.progress({ stage: 'action', status: left ? 'warning' : 'done', message: `Undo: ${set.summary}: done`, detail: `${putBack} put back${left ? `, ${left} left as they are` : ''}.` });
+    return `${set.label}: ${putBack} put back${left ? `, ${left} left as they are (changed since, or could not be undone)` : ''}.`;
   },
 };
 

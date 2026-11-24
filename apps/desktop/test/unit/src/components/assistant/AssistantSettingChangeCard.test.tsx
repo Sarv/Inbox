@@ -75,6 +75,28 @@ describe('Inbox Agent setting change card', () => {
     expect(props.onDecision).toHaveBeenLastCalledWith('undo');
   });
 
+  // Breaks: the card of a setting the agent asked to undo lets the user
+  // re-approve it, tick its existing mail or retry, instead of only undoing it.
+  it('shows only Undo on a change the agent asked to undo', () => {
+    const { view, props } = mount(change({ status: 'applied', undoBy: NOW + 60_000, existingApplied: true, existing: { text: 'x', count: 3, protectedCount: 0, result: '2 emails changed · 1 failed' } }), { undoOnly: 'waiting' });
+    const text = () => view.container.textContent!;
+    expect(text()).toContain('Inbox Agent asked to undo this. Nothing changes until you click Undo.');
+    for (const label of ['Approve', 'Cancel', 'Retry failed emails']) expect(button(view, label)).toBeNull();
+    expect(option(view)).toBeUndefined();
+    fire(button(view, 'Undo'), 'click');
+    expect(props.onDecision).toHaveBeenLastCalledWith('undo');
+    // Never an Approve or an existing-mail tick, even on a change still pending.
+    view.rerender(<AssistantSettingChangeCard {...props} undoOnly="waiting" change={change()} />);
+    expect(view.byLabel('Setting actions')).toBeNull();
+    expect(option(view)).toBeUndefined();
+    expect(text()).toContain('This can no longer be undone from here.');
+    // Undone since, by the user's click: its own status says so.
+    view.rerender(<AssistantSettingChangeCard {...props} undoOnly="waiting" change={change({ status: 'undone' })} />);
+    expect(text()).toContain('Undone');
+    expect(text()).not.toContain('Inbox Agent asked');
+    expect(text()).not.toContain('no longer be undone');
+  });
+
   // Breaks: a reason a decision did not go through is hidden from the user.
   it('shows why a decision did not go through', () => {
     const { view } = mount(change({ detail: 'Could not be saved. Approve again to retry.', existing: undefined }));

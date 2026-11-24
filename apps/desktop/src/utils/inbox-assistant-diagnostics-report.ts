@@ -160,7 +160,7 @@ const AGENT_TOOL_LABELS: Record<string, string> = {
   search_mail: 'searched mail', count_mail: 'counted mail', read_message: 'read emails', read_thread: 'read conversations',
   read_attachment: 'read attachments', deep_search: 'searched in depth', classify_messages: 'sorted emails',
   list_accounts: 'listed accounts', list_folders: 'listed folders', list_categories: 'listed categories',
-  change_mail: 'prepared mail changes', undo_change: 'undid a change',
+  change_mail: 'prepared mail changes', undo_change: 'undid or asked to undo a change',
 };
 
 /** A few plain sentences for the activity panel. The copied report holds the detail. */

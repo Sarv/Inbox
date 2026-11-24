@@ -32,7 +32,8 @@ export function mailRecord(mail: Mail, uid?: number): Partial<EmailRecord> & { i
   return {
     id: mail.id, ...(uid ? { uid } : {}), folderId: mail.folder === 'sent' ? 'f-sent' : 'f-inbox', tags: mail.unread ? `|${folderTag}|` : `|${folderTag}|read|`,
     subject: mail.subject, fromAddress: mail.from[0], fromName: mail.from[1], toAddress: mail.to, ccAddress: mail.cc ?? null,
-    date: ist(mail.at), receivedDate: ist(mail.at), cleanBody: text, rawBody: mail.format === 'text' ? text : toHtml(mail.body),
+    date: ist(mail.at), receivedDate: ist(mail.at), ...(mail.bodyMissing ? { cleanBody: '', rawBody: '', hasBody: false }
+      : { cleanBody: text, rawBody: mail.format === 'text' ? text : toHtml(mail.body) }),
     contentType: mail.format === 'text' ? 'text' : 'html', hasAttachments: Boolean(mail.attachments?.length),
     attachmentCount: mail.attachments?.length ?? 0, attachmentNames: mail.attachments?.length ? JSON.stringify(mail.attachments) : null,
     ...(mail.ics ? { calendarIcs: mail.ics } : {}),

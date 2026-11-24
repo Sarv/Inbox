@@ -1,8 +1,9 @@
 import { SlidersHorizontal, Undo2 } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 
-import type { InboxAgentSettingChange } from '../../types/inbox-assistant-changes';
+import type { InboxAgentSettingChange, InboxAgentUndoRequest } from '../../types/inbox-assistant-changes';
 
+import { undoRequestNote } from './undo-request-note';
 import './assistant-review.css';
 
 /**
@@ -15,6 +16,12 @@ export interface AssistantSettingChangeCardProps {
   change: InboxAgentSettingChange;
   busy: boolean;
   onDecision: (decision: 'approve' | 'cancel' | 'undo', includeExisting?: boolean) => void;
+  /**
+   * Shown again under a later answer because the agent asked to undo it (an
+   * undo request): only its Undo is offered, with no Approve, Cancel, Retry or
+   * existing-mail tick.
+   */
+  undoOnly?: InboxAgentUndoRequest['outcome'];
 }
 
 function count(value: number, noun: string): string {
@@ -32,7 +39,7 @@ function statusLine(change: InboxAgentSettingChange, now: number): string {
   }
 }
 
-export function AssistantSettingChangeCard({ change, busy, onDecision }: AssistantSettingChangeCardProps) {
+export function AssistantSettingChangeCard({ change, busy, onDecision, undoOnly }: AssistantSettingChangeCardProps) {
   const headingId = useId();
   const optionId = useId();
   const [now, setNow] = useState(() => Date.now());
@@ -44,9 +51,10 @@ export function AssistantSettingChangeCard({ change, busy, onDecision }: Assista
     return () => clearInterval(timer);
   }, []);
 
-  const canApprove = change.status === 'pending' && change.approveBy > now;
+  const canApprove = !undoOnly && change.status === 'pending' && change.approveBy > now;
   const canUndo = change.status === 'applied' && change.undoBy > now;
-  const canRetry = canUndo && change.existingApplied && /failed/.test(change.existing?.result ?? '') && change.approveBy > now;
+  const canRetry = !undoOnly && canUndo && change.existingApplied && /failed/.test(change.existing?.result ?? '') && change.approveBy > now;
+  const undoNote = undoOnly && undoRequestNote(undoOnly, { canUndo, undone: change.status === 'undone' });
   const existing = change.existing;
 
   return (
@@ -56,6 +64,7 @@ export function AssistantSettingChangeCard({ change, busy, onDecision }: Assista
           <div className="min-w-0">
             <h3 id={headingId} className="assistant-review-title flex items-center gap-1.5"><SlidersHorizontal aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />{change.summary}</h3>
             <p role="status" className="assistant-review-subtitle">{statusLine(change, now)}</p>
+            {undoNote && <p className="mt-1 text-xs font-medium leading-5">{undoNote}</p>}
             <p className="mt-1 text-xs leading-5 text-muted-foreground">Setting for {change.accountEmail}. It keeps acting on new mail after this chat.</p>
           </div>
         </div>

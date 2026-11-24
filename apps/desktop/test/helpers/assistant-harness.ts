@@ -99,6 +99,8 @@ export interface AssistantHarness {
   accounts: InboxAssistantAccount[];
   service: InboxAssistantService;
   history: InboxAssistantHistoryStore;
+  /** The core database behind `history` (its `core_blobs` table), to seed a chat list saved by an earlier version. */
+  coreDb: Database.Database;
   deps: InboxAssistantServiceDeps;
   /** The chat `ask` uses. `newChat` replaces it. */
   chatId: string;
@@ -217,7 +219,7 @@ export async function createAssistantHarness(options: {
     read() { if (this.unreadable) throw new Error('locked'); return this.text; }, write(value: string) { this.text = value; } };
 
   const harness = {
-    accounts, history, chatId, calls, logs, agentTurns, agent: options.agent, engine, journal,
+    accounts, history, coreDb: db, chatId, calls, logs, agentTurns, agent: options.agent, engine, journal,
     // By default the planner is refused (a 400 is permanent, so nothing retries)
     // and the answer is empty: the host's own routing and retrieval, unaided.
     ai: options.ai ?? (prompt => scriptedPurpose(prompt) === 'plan' ? { status: 400 } : NO_FACTS),

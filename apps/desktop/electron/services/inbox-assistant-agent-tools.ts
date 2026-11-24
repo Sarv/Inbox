@@ -2,6 +2,7 @@ import type { AIToolDefinition, EmailRecord, FilterRule, FolderRecord, SearchQue
 import { parseAttachmentNames, parseTags, trimCharsStart } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssistantActionMode, InboxAssistantEvidence, InboxAssistantProgress } from '../../src/types/inbox-assistant';
+import type { InboxAgentUndoRequest } from '../../src/types/inbox-assistant-changes';
 import { instantToWallClock, startOfLocalDate, validLocalDate } from '../../src/utils/local-calendar';
 
 import { inboxAssistantEvidenceText, jsonObject, normalizeExcerpt } from './inbox-assistant-answer';
@@ -148,12 +149,37 @@ export interface InboxAgentChangeContext {
   mode: InboxAssistantActionMode;
   /** This run's change sets, in the order staged (C1, C2, …). */
   sets: HeldChangeSet[];
-  /** Messages applied without a card in this run ("Approve for me"). */
+  /**
+   * Messages changed without a card in this run ("Approve for me"): applied by
+   * change_mail or put back by undo_change. The per-request cap counts both.
+   */
   autoApplied: number;
+  /** Of `autoApplied`, the messages undo_change put back (the diagnostics count only what was applied). */
+  autoUndone: number;
+  /**
+   * Each message's protection at this request's first look, keyed
+   * `${accountId}\0${emailId}` (null: none). A message protected then stays
+   * protected for the whole request, so an unstar or a category removal that
+   * applies at once cannot open it to a later archive or Trash in the same
+   * request. Lives in the run only: never journaled, never shared across
+   * requests or chats.
+   */
+  atStart: Map<string, string | null>;
   nowMs(): number;
   /** Apply under "Approve for me", serialized with every other mail action. */
   apply(held: HeldChangeSet): Promise<void>;
+  /**
+   * Undo a change set the agent applied, at once: "Approve for me" only, as
+   * agentUndoWait decides. There is deliberately no way to undo a setting:
+   * undo_change puts that on the user's card (undoRequests).
+   */
   undo(held: HeldChangeSet): Promise<void>;
+  /**
+   * Earlier changes the agent undid, or asked the user to undo, in this run,
+   * at most one entry per change. Each shows under the answer as the earlier
+   * change's own card with only its Undo button.
+   */
+  undoRequests: Array<Omit<InboxAgentUndoRequest, 'exchangeId'>>;
   /** The host's settings (filters, senders). Absent: the setting tools are not offered. */
   settings?: InboxAgentSettingActions;
   /** This run's standing changes, in the order asked (R1, R2, …). They are never applied by the run. */
@@ -162,7 +188,6 @@ export interface InboxAgentChangeContext {
   earlier: { sets: HeldChangeSet[]; settings: HeldSettingChange[] };
   /** How many change sets and setting changes the chat had before this run, so labels stay unique in it. */
   labelOffset: { sets: number; settings: number };
-  undoSetting(held: HeldSettingChange): Promise<void>;
 }
 
 export interface InboxAgentTool {
