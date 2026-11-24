@@ -1,5 +1,6 @@
 import type { EmailRecord } from '@sarvinbox/core';
 import { conversationFoldersOf, latestConversationMember } from '@sarvinbox/core/conversation-membership';
+import { createLogger } from '@sarvinbox/core/logger';
 import { useEffect, useRef } from 'react';
 
 import type { AppSection } from '../components/AppSidebar';
@@ -11,6 +12,7 @@ import {
   type GotoTarget,
 } from '../config/keyboard-shortcuts';
 import { useEmailStore } from '../store/email-store';
+import { isTypingTarget } from '../utils/frame-key-forwarding';
 import { conversationStarToggle } from '../utils/thread-utils';
 
 interface UseKeyboardShortcutsOptions {
@@ -19,6 +21,8 @@ interface UseKeyboardShortcutsOptions {
   enabled?: boolean;
   allowListNavigation?: boolean;
 }
+
+const log = createLogger('Shortcuts');
 
 // Next/prev-email navigation always opens a different thread and thus triggers
 // a thread load + IMAP body fetch. OS key-repeat (holding the arrow) is
@@ -40,14 +44,6 @@ function isKeyboardShortcutsEnabled(): boolean {
     }
   } catch { /* ignore */ }
   return true;
-}
-
-function isTypingTarget(el: EventTarget | null): boolean {
-  if (!el || !(el instanceof HTMLElement)) return false;
-  const tag = el.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-  if (el.isContentEditable) return true;
-  return false;
 }
 
 function getActiveEmailId(): string | null {
@@ -147,10 +143,10 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
         waitingForGotoRef.current = true;
         if (gotoTimerRef.current) clearTimeout(gotoTimerRef.current);
         gotoTimerRef.current = setTimeout(() => {
-          console.log('[Shortcuts] Go-to mode timed out');
+          log.debug('Go-to mode timed out');
           waitingForGotoRef.current = false;
         }, GOTO_TIMEOUT_MS);
-        console.log('[Shortcuts] Go-to mode activated — press target key within 1s');
+        log.debug('Go-to mode activated — press target key within 1s');
         e.preventDefault();
         return;
       }
@@ -165,7 +161,7 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
 
         const gotoRecord = getEffectiveGotoRecord();
         const target: GotoTarget | undefined = gotoRecord[e.key];
-        console.log('[Shortcuts] Go-to key:', e.key, '→ target:', target || '(no match)');
+        log.debug(`Go-to key resolved: ${target ? 'matched' : 'no match'}`);
         if (target) {
           e.preventDefault();
           handleGoto(target);
