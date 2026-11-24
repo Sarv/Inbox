@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.12] - 2026-11-24
+
 ### Fixed
 - **A refreshed Inbox Agent review replaces the expired one.** A review of
   unread mail can change mail for a limited time, so that nothing is marked as
@@ -1488,7 +1490,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.11...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.12...HEAD
+[1.4.12]: https://github.com/Sarv/Inbox/releases/tag/v1.4.12
 [1.4.11]: https://github.com/Sarv/Inbox/releases/tag/v1.4.11
 [1.4.10]: https://github.com/Sarv/Inbox/releases/tag/v1.4.10
 [1.4.9]: https://github.com/Sarv/Inbox/releases/tag/v1.4.9
