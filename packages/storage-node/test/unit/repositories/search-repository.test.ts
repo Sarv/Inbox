@@ -1074,6 +1074,112 @@ describe('SearchRepository', () => {
     });
   });
 
+  // ── reading only what a page needs ─────────────────────────────────────────
+  // A search used to build the WHOLE record of every match (body, and in the
+  // FTS path the index's own stored copy of each match's text) before
+  // `ORDER BY … LIMIT` threw all but one page away. On a real encrypted
+  // mailbox, a 61-row search for "meeting" froze the main process for 25
+  // seconds, and an Inbox Agent question that ran 48 of them hung the app for
+  // over three minutes (2026-11-24).
+  describe('reading only what a page needs', () => {
+    /** Ids whose body was read, through a view that shadows email_bodies. */
+    function countBodyReads(): Set<string> {
+      const read = new Set<string>();
+      db.function('test_body_read', { deterministic: false }, (id: unknown, value: unknown) => { read.add(String(id)); return value; });
+      db.exec(`CREATE TEMP VIEW email_bodies AS SELECT email_id,
+        test_body_read(email_id, clean_body) AS clean_body, test_body_read(email_id, raw_body) AS raw_body FROM main.email_bodies`);
+      return read;
+    }
+
+    /** `count` messages that all match "meeting", with bodies in email_bodies. */
+    function addMeetings(count: number, date = (index: number) => 10_000 + index): void {
+      for (let index = 0; index < count; index++) {
+        const id = `m${String(index).padStart(3, '0')}`;
+        addEmail(db, { id, subject: `Weekly sync ${index}`, body: '', tags: '|INBOX|', date: date(index) });
+        db.prepare('INSERT INTO email_bodies (email_id, clean_body, raw_body) VALUES (?, ?, ?)')
+          .run(id, `Agenda for the meeting, item ${index}`, `<p>Agenda for the meeting, item ${index}</p>`);
+      }
+    }
+
+    // Breaks: every search reads the body of every match before keeping one
+    // page, so a common word freezes the app for as long as the mailbox is big.
+    // The text searches did exactly that before. On the filter-only and LIKE
+    // paths SQLite already put the reads off until after the sort; those cases
+    // are here because the three paths now share one page query.
+    it.each([
+      ['a text search by date', { query: 'meeting' }],
+      ['a text search by relevance', { query: 'meeting', sortBy: 'relevance' }],
+      ['a text search with an exclusion', { query: 'meeting', doesntHave: 'lunch' }],
+      ['a filter-only search by subject', { query: '', sortBy: 'subject', sortOrder: 'asc' }],
+      ['the LIKE fallback', { query: 'meeting' }, true],
+    ] as Array<[string, SearchQuery, boolean?]>)('reads the bodies of the page only: %s', (_name, query, withoutIndex) => {
+      addMeetings(40);
+      if (withoutIndex) breakFtsIndex(db);
+      const read = countBodyReads();
+      const page = repo.search({ ...query, limit: 5 });
+      expect(page).toHaveLength(5);
+      // The LIKE fallback has to read bodies to match them; it still must not
+      // read them a second time to build rows it then throws away.
+      if (!withoutIndex) expect([...read].sort()).toEqual(ids(page).filter(id => id.startsWith('m')).sort());
+    });
+
+    // Breaks: the fallback hydrates every match, which the test above cannot
+    // see because matching itself reads every body. Hydrating reads raw_body,
+    // which matching never touches. (Guards the shared page query; the old
+    // fallback did not do this.)
+    it('builds full rows for the page only, in the LIKE fallback too', () => {
+      addMeetings(40);
+      breakFtsIndex(db);
+      const raw = new Set<string>();
+      db.function('test_raw_read', { deterministic: false }, (id: unknown, value: unknown) => { raw.add(String(id)); return value; });
+      db.exec(`CREATE TEMP VIEW email_bodies AS SELECT email_id, clean_body, test_raw_read(email_id, raw_body) AS raw_body FROM main.email_bodies`);
+      const page = repo.search({ query: 'meeting', limit: 5 });
+      expect([...raw].sort()).toEqual(ids(page).sort());
+    });
+
+    // Breaks: the search reaches its email through the index's stored copy
+    // of the id, which fts5 can only hand out by loading that row's whole
+    // stored text (subject, addresses and full body). Joining on the rowid
+    // reads none of it. A wrong stored copy proves which one the join uses.
+    it('reaches each email through the index rowid, never its stored email_id', () => {
+      db.prepare("UPDATE emails_fts SET email_id = 'not-an-email' WHERE rowid = (SELECT rowid FROM emails WHERE id = 'e1')").run();
+      expect(sortedIds(repo.search({ query: 'invoice' }))).toEqual(['e1', 'e5']);
+      expect(sortedIds(repo.search({ query: 'invoice', collapseThreads: true }))).toEqual(['e1', 'e5']);
+      expect(repo.count({ query: 'invoice' })).toBe(2);
+      expect(ids(repo.search({ query: '', doesntHave: 'acme' }))).not.toContain('e1');
+    });
+
+    // Breaks: a page boundary that falls among messages with the same date
+    // repeats one message on two pages and never shows another.
+    it('pages through messages with equal dates without repeating or skipping one', () => {
+      addMeetings(23, () => 10_000);
+      for (const query of [{ query: 'meeting' }, { query: '', sortBy: 'subject' as const }, { query: 'meeting', sortBy: 'relevance' as const }]) {
+        const whole = ids(repo.search(query));
+        const paged = [0, 1, 2, 3, 4, 5].flatMap(index => ids(repo.search({ ...query, limit: 5, offset: index * 5 })));
+        expect(paged).toEqual(whole);
+        expect(new Set(paged).size).toBe(paged.length);
+      }
+    });
+
+    // Breaks: the page query and the query that builds its rows disagree on
+    // order, so a search shows the right messages in the wrong order.
+    it('returns the page in the order it was chosen in', () => {
+      addMeetings(12, index => 10_000 + (index % 4));
+      const expected = [...Array(12).keys()].map(index => ({ id: `m${String(index).padStart(3, '0')}`, date: 10_000 + (index % 4) }))
+        .sort((a, b) => b.date - a.date || b.id.localeCompare(a.id)).map(item => item.id);
+      expect(ids(repo.search({ query: 'meeting' }))).toEqual(expected);
+      expect(ids(repo.search({ query: 'meeting', limit: 4, offset: 2 }))).toEqual(expected.slice(2, 6));
+    });
+
+    // Breaks: relevance scores stop reaching the caller once rows are built
+    // apart from the query that ranked them.
+    it('still carries each match its relevance score', () => {
+      const rows = repo.search({ query: 'invoice' });
+      expect(rows.every(row => typeof row.relevanceScore === 'number')).toBe(true);
+      expect(repo.search({ query: '' }).every(row => row.relevanceScore === undefined)).toBe(true);
+    });
+  });
+
   it('throws Storage not initialized when the DB is not ready yet', () => {
     const detached = new SearchRepository(() => undefined as unknown as Database.Database, rowToRecord);
     expect(() => detached.search({ query: '' })).toThrow('Storage not initialized');

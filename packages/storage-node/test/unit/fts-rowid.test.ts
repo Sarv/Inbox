@@ -271,3 +271,26 @@ describe('migration v84 — fts_rowid_alignment', () => {
     } finally { db.close(); }
   });
 });
+
+describe('FTS rowid contract across VACUUM', () => {
+  // Breaks: search joins the index to `emails` by rowid, and so do the delete
+  // and update triggers. SQLite documents that VACUUM "may change the ROWIDs"
+  // of a table without an INTEGER PRIMARY KEY, which `emails` is. If the
+  // bundled SQLite ever did, the database compaction (db-compact.worker.ts runs
+  // VACUUM) would make every search return the wrong messages and every
+  // delete remove the wrong entry. This pins that it keeps them.
+  it('keeps every index row on its own email after deletes leave gaps and VACUUM runs', () => {
+    const db = newDb();
+    try {
+      for (let index = 0; index < 60; index++) addEmail(db, `e${index}`, `Subject ${index}`, `body word${index}`);
+      db.prepare("DELETE FROM emails WHERE CAST(SUBSTR(id, 2) AS INTEGER) % 3 = 0").run();
+      db.exec('VACUUM');
+      const misaligned = db.prepare(`SELECT COUNT(*) AS n FROM emails JOIN emails_fts ON emails_fts.rowid = emails.rowid
+        WHERE emails_fts.email_id != emails.id`).get() as { n: number };
+      expect(misaligned.n).toBe(0);
+      expect(indexSize(db)).toBe(40);
+      expect((db.prepare(`SELECT emails.id FROM emails_fts JOIN emails ON emails.rowid = emails_fts.rowid
+        WHERE emails_fts MATCH 'word7'`).all() as { id: string }[]).map(row => row.id)).toEqual(['e7']);
+    } finally { db.close(); }
+  });
+});

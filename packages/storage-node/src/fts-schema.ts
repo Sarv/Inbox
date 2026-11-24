@@ -44,6 +44,11 @@
  *
  * `rowid` is fts5's own primary key, so addressing by it plans as
  * `INDEX 0:=` — a seek. Keep every statement here keyed that way.
+ *
+ * Searches rely on it too: search-repository.ts joins matches to `emails` by
+ * rowid (`FTS_JOIN`), because reading the stored `email_id` loads that row's
+ * whole stored text. A row whose rowids disagree is a search that returns the
+ * wrong email, so fts-rowid.test.ts also pins that VACUUM keeps them equal.
  */
 export const FTS_TABLE_DDL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS emails_fts USING fts5(
