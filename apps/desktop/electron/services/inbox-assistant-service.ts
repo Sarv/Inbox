@@ -1,34 +1,42 @@
 import { randomUUID } from 'node:crypto';
 
-import { createLogger, errorDiagnostic, waitForAbortableOperation } from '@sarvinbox/core';
+import { createLogger, errorDiagnostic, waitForAbortableOperation, type AIChatRequest, type AIChatResult } from '@sarvinbox/core';
 
-import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantAIWorkload, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord, InboxAssistantAIPurpose, InboxAssistantRunDiagnostics } from '../../src/types/inbox-assistant';
-import type { InboxAssistantReview, InboxAssistantReviewAutomation, InboxAssistantReviewDateFilter, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
+import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantAIWorkload, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantRewind, InboxAssistantRunRecord, InboxAssistantAIPurpose, InboxAssistantRunDiagnostics } from '../../src/types/inbox-assistant';
+import type { InboxAgentChangeSetRequest, InboxAgentUndoRequest } from '../../src/types/inbox-assistant-changes';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest, LocalCalendarPreferences } from '../../src/types/local-calendar';
 import { readInboxAssistantAIWorkload } from '../../src/utils/inbox-assistant-workload';
 
 import { isMeetingDraft, meetingAvailabilityRequests, recheckMeetingAvailability } from './assistant-calendar';
-import { applyInboxAssistantReview, inboxAssistantHeaderMatchedItems, inboxAssistantReadCommandReference, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps } from './inbox-assistant-actions';
-import { answerInboxAssistant, INBOX_ASSISTANT_OUTPUT_TOKENS, planInboxAssistantSearch } from './inbox-assistant-answer';
-import { inboxAssistantCapabilityReply } from './inbox-assistant-capabilities';
+import { runInboxAgent, type InboxAgentProtocol } from './inbox-assistant-agent';
+import type { InboxAgentChangeContext } from './inbox-assistant-agent-tools';
+import { INBOX_ASSISTANT_OUTPUT_TOKENS, planInboxAssistantSearch } from './inbox-assistant-answer';
+import type { InboxAgentChangeJournal } from './inbox-assistant-change-journal';
+import { applyChangeSet, cancelChangeSet, changeCounts, INBOX_AGENT_CHANGE_LIMITS, openApprovalWindow, undoChangeSet, type HeldChangeSet, type InboxAgentEmailReader, type InboxAgentMailActions } from './inbox-assistant-change-sets';
 import { buildInboxAssistantContext } from './inbox-assistant-context';
 import { inboxAssistantDegradedStages, inboxAssistantRunSummary } from './inbox-assistant-diagnostics';
 import { generateInboxAssistantDraft } from './inbox-assistant-draft';
 import type { InboxAssistantHistoryStore } from './inbox-assistant-history';
-import { InboxAssistantRecommendationCache } from './inbox-assistant-recommendation-cache';
 import { researchInboxAssistant, type AssistantResearchDeps } from './inbox-assistant-retrieval';
-import { inboxAssistantReviewDateLabel, parseInboxAssistantReviewDate } from './inbox-assistant-review-date';
-import { aggregateInboxAssistantUsage } from './inbox-assistant-usage';
+import { applySettingChange, cancelSettingChange, openSettingApprovalWindow, undoSettingChange, type HeldSettingChange, type InboxAgentSettingActions } from './inbox-assistant-setting-changes';
+import { aggregateInboxAssistantUsage, INBOX_ASSISTANT_SYSTEM_PROMPT } from './inbox-assistant-usage';
 
 export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
   accounts(): InboxAssistantAccount[];
   callAI(prompt: string, signal: AbortSignal, onUsage?: (usage: InboxAssistantAIUsage) => void, options?: { maxOutputTokens?: number }): Promise<string>;
-  reviewCacheIdentity?(): string;
+  /** A multi-turn tool call: the agent loop. */
+  callAIChat(request: AIChatRequest, signal: AbortSignal, onUsage?: (usage: InboxAssistantAIUsage) => void): Promise<AIChatResult>;
+  /** Which provider and model answer now: the agent remembers per identity how calling it succeeded. */
+  providerIdentity?(): string;
   now?(): number;
   timeZone?(): string;
   history: InboxAssistantHistoryStore;
-  setRead?: InboxAssistantActionDeps['setRead'];
-  moveMail?: InboxAssistantActionDeps['moveMail'];
+  /** How the agent's approved change sets reach the mailbox. Absent: the agent can only read. */
+  mailActions?: InboxAgentMailActions;
+  /** How the agent's approved setting changes (filters, senders) are saved. Absent: the setting tools are not offered. */
+  settingActions?: InboxAgentSettingActions;
+  /** Where open cards are kept across a restart. Absent: they expire when the app quits. */
+  changeJournal?: InboxAgentChangeJournal;
   calendar?: {
     preferences(): LocalCalendarPreferences;
     availability(request: LocalCalendarAvailabilityRequest): LocalCalendarAvailability | Promise<LocalCalendarAvailability>;
@@ -43,15 +51,20 @@ interface ActiveRun {
   record: InboxAssistantRunRecord;
   mutating: boolean;
   cancelled: boolean;
+  /**
+   * The agent's change context, while a question runs. The renderer does not
+   * offer the mode while a request runs; as defence in depth, switching the
+   * chat to "Ask for approval" narrows it at once, so the rest of the run waits
+   * for cards (a change already waiting its turn stops the run: see
+   * withMailActions); switching to "Approve for me" never widens a run already going.
+   */
+  changes?: InboxAgentChangeContext;
   settled: Promise<void>;
   finish(): void;
-  reviewBudget?: { calls: number; inputChars: number; reason?: string };
 }
 
 // Content-free lines only: see inbox-assistant-diagnostics.ts.
 const logger = createLogger('InboxAssistant');
-
-const AUTOMATIC_REVIEW_LIMITS = { batches: 10, aiCalls: 20, inputChars: 500_000, durationMs: 10 * 60_000 };
 
 /** A calendar preference failure must not prevent unrelated email research. */
 function researchTimeZone(deps: InboxAssistantServiceDeps): string {
@@ -67,20 +80,6 @@ function researchTimeZone(deps: InboxAssistantServiceDeps): string {
   return 'UTC';
 }
 
-interface HeldReview {
-  chatId: string;
-  exchangeId: string;
-  review: InboxAssistantReview;
-  excludedThreads: Record<string, string[]>;
-  /** Host-only continuation, updated only after safely settled batches. */
-  automaticCheckpoint?: Record<string, string[]>;
-  automaticExhausted?: boolean;
-  /** Validated retention preferences from the original user review request. */
-  reviewPreferences?: string;
-  /** Original host-owned cutoff, retained unchanged by every continuation. */
-  dateFilter?: InboxAssistantReviewDateFilter;
-}
-
 function validateRequest(value: unknown): InboxAssistantRequest {
   if (!value || typeof value !== 'object') throw new Error('Invalid Inbox Agent question.');
   const request = value as InboxAssistantRequest;
@@ -89,92 +88,11 @@ function validateRequest(value: unknown): InboxAssistantRequest {
     || typeof request.question !== 'string' || !request.question.trim() || request.question.length > 4000
     || !Array.isArray(request.accountIds) || !request.accountIds.length
     || !request.accountIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 500)
-    || (request.previousExchangeId !== undefined && typeof request.previousExchangeId !== 'string')
-    || (request.reviewKind !== undefined && !['unread', 'uncategorized', 'mark_read', 'mark_unread'].includes(request.reviewKind))
-    || (request.reviewOnly !== undefined && typeof request.reviewOnly !== 'boolean')
-    || (request.continueReviewId !== undefined && (typeof request.continueReviewId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(request.continueReviewId)))) {
+    || (request.previousExchangeId !== undefined && typeof request.previousExchangeId !== 'string')) {
     throw new Error('Enter a question and select at least one account. Questions can contain up to 4,000 characters.');
   }
-  return { ...request, question: request.question.trim(), accountIds: [...new Set(request.accountIds)] };
-}
-
-/** User-authored requests alone can enter the action flow; mail cannot invoke it. */
-export function inboxAssistantReviewIntent(question: string): InboxAssistantReviewKind | undefined {
-  if (/\b(?:do not|don't|never|without)\s+(?:mark|change|review|process)/i.test(question)) return undefined;
-  if (/\bunread\b/i.test(question) && /\b(?:all|including|include|also)\b/i.test(question)
-    && /\b(?:review|triage|clean|mark|look|check)\b/i.test(question)) return 'unread';
-  if (/\b(?:uncategori[sz]ed|unlabelled|unlabeled|unclassified)\b/i.test(question)
-    && /\b(?:review|check|find|show|triage|look|process)\b/i.test(question)) return 'uncategorized';
-  if (/\bunread\b/i.test(question) && /\b(?:review|triage|clean|mark|look|check)\b/i.test(question)) return 'unread';
-  return undefined;
-}
-
-/**
- * “Approve for me” applies the actions the user REQUESTS. A typed review that
- * only asks to see or check mail, a question, or a look at uncategorized mail
- * requests no change, so its recommendations wait on the card for approval.
- * Imperative review/triage/clean/mark requests, and the app's own continuation
- * buttons (which send an explicit kind), keep applying without asking.
- */
-export function viewOnlyReviewRequest(request: Pick<InboxAssistantRequest, 'question' | 'reviewKind' | 'continueReviewId'>, kind: InboxAssistantReviewKind): boolean {
-  if (request.reviewKind || request.continueReviewId) return false;
-  const question = request.question.trim().replace(/^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?/iu, '');
-  if (/^(?:do|does|did|is|are|was|were|have|has|had|which|what|who|whom|whose|when|where|why|how|should|shall|any|kya|kitne|kitni|kaun)\b/iu.test(question)
-    || /\b(?:do|if)\s+i\s+have\b/iu.test(question)) return true;
-  if (kind === 'uncategorized') return !/\b(?:mark|clean|cleanup|triage)\b/iu.test(question);
-  return !/\b(?:review|triage|clean|cleanup|mark|process)\b/iu.test(question);
-}
-
-/** This first tool has an explicit account scope and no hidden free-text filters. */
-function genericReviewWords(question: string): boolean {
-  const allowed = new Set('a about across all an and are as at available can categorization categorisation categories check clean cleanup conversation conversations could do email emails for have help i if in inbox inboxes into is it let look low mail mails mark me my no nonvaluable not of or our please process read review should show that the them these they this those triage uncategorized uncategorised unclassified unlabelled unlabeled unread unvaluable up us useful valuable value what which will with worthless worth would you your accounts account'.split(' '));
-  const words = question.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  return words.length > 0 && words.every(word => allowed.has(word));
-}
-
-/** Retention criteria can keep more mail, never silently narrow the mailbox query. */
-export function inboxAssistantReviewPreferences(question: string): string | undefined {
-  const dated = parseInboxAssistantReviewDate(question, Date.now());
-  if (dated.invalid) return undefined;
-  question = dated.question;
-  const clause = /\b(?:(?:only|please)\s+)?(?:keep|leave|retain|preserve|protect)\b/iu.exec(question);
-  if (!clause || !genericReviewWords(question.slice(0, clause.index))
-    || !/\b(?:review|triage|check|look|process)\b/iu.test(question.slice(0, clause.index))) return undefined;
-  const preferences = question.slice(clause.index).trim();
-  // Unknown names, sender addresses, dates and additional selection commands
-  // must not be dropped and replaced by an account-wide review. This bounded
-  // vocabulary covers keep-only personal/business/relationship preferences.
-  if (/@|https?:|\p{N}/iu.test(preferences)
-    || /\b(?:review|triage|check|look|find|show|process|mark|before|after|since|until|today|yesterday|tomorrow|delete|archive|move)\b/iu.test(preferences)) return undefined;
-  const allowed = new Set('a about active addressed ads advertisements all already also an and are as at automated be been bulk business by can category categories cc client clients contact contacts conversation conversations correspondence corresponded could customer customers direct directly do earlier email emails even ever financial for from genuine had has have help historical historically history histry histroy i if important in invitation invitations invite is it keep known leave legitimate list lists mail mailing mails marketing me meeting messages more my needs news newsletter newsletters no non not of old older ongoing only or other our past people person personal personally please pormotinal preserve previous previously prior promotional promotinal promotion promotions protect read recipient recipients related relationship relationships relevant replied replies reply report reports requested respond responded responding response retain routine security send sender senders sent should so spam statement statements still team that the their them these they this those to unread unsolicited updates us valuable value want wanted was we were what where which who whom will with would you your'.split(' '));
-  const words = preferences.toLowerCase().replace(/\b(i|we|they|you)['’]ve\b/gu, '$1 have').replace(/\bdon['’]t\b/gu, 'do not').match(/[\p{L}\p{N}]+/gu) ?? [];
-  return words.length > 0 && words.every(word => allowed.has(word)) ? preferences : undefined;
-}
-
-export function inboxAssistantGenericReviewRequest(question: string): boolean {
-  const dated = parseInboxAssistantReviewDate(question, Date.now());
-  return !dated.invalid && (genericReviewWords(dated.question) || inboxAssistantReviewPreferences(dated.question) !== undefined);
-}
-
-function unscopedReadCommandMessage(reference: string): string {
-  const pronoun = /^(?:(?:all|both|each)\s+)?(?:of\s+)?(?:it|them|they|these|those|that|this|ones?)(?:\s+(?:all|two|three|\d{1,2}))?$/iu.test(reference.trim());
-  return `${pronoun ? `I can’t tell which emails “${reference.trim()}” refers to, so nothing was matched.` : 'This command does not say which emails to change.'} Name a sender, subject or phrase, for example “Mark all BigBlueButton emails as read”, or put the exact words in quotes. To go through everything unread, ask “Review my unread emails”. No mail was changed.`;
-}
-
-function reviewText(review: InboxAssistantReview): string {
-  const accountCount = review.coverage.filter(account => account.status === 'reviewed').length;
-  const accountText = `${accountCount} ${accountCount === 1 ? 'account' : 'accounts'}`;
-  if (review.kind === 'mark_read' || review.kind === 'mark_unread') {
-    const flag = review.kind === 'mark_unread' ? 'unread' : 'read';
-    const changed = review.items.filter(item => item.status === 'applied' || item.status === 'queued').length;
-    const messages = review.items.reduce((sum, item) => sum + (item.targetEmailIds?.length ?? 0), 0);
-    return `Found ${review.items.length} matching ${review.items.length === 1 ? 'conversation' : 'conversations'} for “${review.scope?.query ?? ''}” across ${accountText}. ${messages} matching ${messages === 1 ? 'email is' : 'emails are'} selected for marking as ${flag}.\n\n${changed ? `${changed} ${changed === 1 ? 'conversation was' : 'conversations were'} updated. Review the receipts below or undo the changes.` : 'Review the matching emails below before applying the change.'}${review.truncated ? '\n\nMore mail may remain. Continue with another review after this batch.' : ''}`;
-  }
-  const suggested = review.items.filter(item => item.recommendation === 'mark_read').length;
-  const applied = review.items.filter(item => item.status === 'applied' || item.status === 'queued').length;
-  const uncategorized = review.items.filter(item => item.uncategorized).length;
-  const unverified = review.items.filter(item => item.needsRetry).length;
-  return `Reviewed ${unverified ? `${review.items.length - unverified} of ` : ''}${review.items.length} unread conversations across ${accountText}.${review.dateFilter ? ` Scope: unread emails ${inboxAssistantReviewDateLabel(review.dateFilter)}.` : ''} ${uncategorized} conversations include uncategorized mail.\n\n${applied ? `${applied} conversations marked as read. Review the results below or undo the changes.` : `${suggested} conversations are recommended for marking as read. Important, incomplete and uncertain conversations stay unread.`}${unverified ? `\n\nThe AI review did not finish for ${unverified} ${unverified === 1 ? 'conversation. It stays' : 'conversations. They stay'} unread. Continue to retry; verified recommendations are saved.` : review.truncated ? '\n\nMore unread mail remains. Continue with another review after this batch.' : ''}`;
+  return { requestId: request.requestId, chatId: request.chatId, question: request.question.trim(), accountIds: [...new Set(request.accountIds)],
+    ...(request.previousExchangeId !== undefined ? { previousExchangeId: request.previousExchangeId } : {}) };
 }
 
 function validateDraftRequest(value: unknown): InboxAssistantDraftRequest {
@@ -197,10 +115,48 @@ export class InboxAssistantService {
   private running = new Map<string, ActiveRun>();
   private mailActionTail: Promise<void> = Promise.resolve();
   private generations = new Map<string, number>();
-  private actionReviews = new Map<string, HeldReview>();
-  private recommendationCache = new InboxAssistantRecommendationCache();
+  /** The agent's change sets, by id: what a card's Approve, Cancel and Undo act on. */
+  private heldSets = new Map<string, { chatId: string; exchangeId: string; accounts: InboxAssistantAccount[]; held: HeldChangeSet }>();
+  /** The agent's setting changes, by id, likewise. */
+  private heldSettings = new Map<string, { chatId: string; exchangeId: string; accounts: InboxAssistantAccount[]; held: HeldSettingChange }>();
+  private journalLoaded = false;
+  /** How the agent last succeeded in calling each provider identity, so a refusal is paid for once. */
+  private agentProtocols = new Map<string, InboxAgentProtocol>();
 
+  // The service is built when its IPC module loads, before main.ts names the
+  // app: anything that opens the core database there fixes the data folder
+  // (and keychain item) to the RELEASE app's. So the journal is read on first
+  // use, never in the constructor.
   constructor(private deps: InboxAssistantServiceDeps) {}
+
+  /** Cards from before a restart keep their buttons while their windows last. Read once, on first use. */
+  private loadJournal(): void {
+    if (this.journalLoaded) return;
+    this.journalLoaded = true;
+    const saved = this.deps.changeJournal?.load(this.deps.now?.() ?? Date.now());
+    for (const entry of saved?.sets ?? []) this.heldSets.set(entry.held.set.id, entry);
+    for (const entry of saved?.settings ?? []) this.heldSettings.set(entry.held.change.id, entry);
+  }
+
+  private get changeSets() { this.loadJournal(); return this.heldSets; }
+  private get settingChanges() { this.loadJournal(); return this.heldSettings; }
+
+  /** Save what the cards can still do, so it survives a restart. */
+  private saveJournal(): void {
+    this.deps.changeJournal?.save({ sets: [...this.changeSets.values()], settings: [...this.settingChanges.values()] }, this.deps.now?.() ?? Date.now());
+  }
+
+  /** An exchange's cards as their held state says now (an Undo from a later message changes an earlier card). */
+  private withHeldCards(exchange: InboxAssistantExchange): InboxAssistantExchange {
+    const sets = exchange.changeSets?.some(set => this.changeSets.has(set.id));
+    const settings = exchange.settingChanges?.some(change => this.settingChanges.has(change.id));
+    if (!sets && !settings) return exchange;
+    return {
+      ...exchange,
+      ...(sets ? { changeSets: exchange.changeSets!.map(set => { const held = this.changeSets.get(set.id)?.held; return held ? structuredClone(held.set) : set; }) } : {}),
+      ...(settings ? { settingChanges: exchange.settingChanges!.map(change => { const held = this.settingChanges.get(change.id)?.held; return held ? structuredClone(held.change) : change; }) } : {}),
+    };
+  }
 
   private assertIdle(chatId: string, requestId: string): void {
     if (this.running.has(chatId)) throw new Error('Another Inbox Agent request is still running in this conversation. Stop it before starting another.');
@@ -242,12 +198,18 @@ export class InboxAssistantService {
     if (index < 0) runs.push(record); else runs[index] = record;
     let exchanges = exchange ? current.exchanges.some(value => value.id === exchange.id)
       ? current.exchanges.map(value => value.id === exchange.id ? exchange : value) : [...current.exchanges, exchange] : current.exchanges;
+    // Earlier cards a run changed (the agent undid one) are saved as they are now.
+    exchanges = exchanges.map(value => this.withHeldCards(value));
     if (run.record.kind === 'question' && run.record.exchangeId && !exchange) {
       const previous = exchanges.find(value => value.id === run.record.exchangeId);
+      // Sets the run already changed mail with (keepRunSet): their cards are
+      // saved with the unfinished exchange, so they survive a crash mid-run.
+      const kept = [...this.changeSets.values()].filter(entry => entry.chatId === run.chatId && entry.exchangeId === run.record.exchangeId)
+        .map(entry => structuredClone(entry.held.set));
       const question: InboxAssistantExchange = { ...(previous ?? { id: run.record.exchangeId, chatId: run.chatId, question: run.record.question,
         accountIds: run.record.accountIds, createdAt: run.record.startedAt, answer: { text: '', sources: [], coverage: [], warnings: [] } }),
         requestId: run.id, status: run.record.status, updatedAt: record.updatedAt, activities: record.activities, ...(record.usage ? { usage: record.usage } : {}),
-        ...(record.diagnostics ? { diagnostics: record.diagnostics } : {}),
+        ...(record.diagnostics ? { diagnostics: record.diagnostics } : {}), ...(kept.length ? { changeSets: kept } : {}),
         ...(run.record.error ? { error: run.record.error } : {}) };
       exchanges = previous ? exchanges.map(value => value.id === question.id ? question : value) : [...exchanges, question];
     }
@@ -278,14 +240,21 @@ export class InboxAssistantService {
     return saved;
   }
 
-  /** Serialize mutations while allowing independent chats to research in parallel. */
-  private async withMailActions<T>(run: ActiveRun, action: () => Promise<T>): Promise<T> {
+  /**
+   * Serialize mutations while allowing independent chats to research in
+   * parallel. `delegated`: a change the run decided to make without a card
+   * ("Approve for me"). The mode is checked again once the change's turn
+   * comes: a chat switched to "Ask for approval" while it waited stops the
+   * request, as a switch during an apply does.
+   */
+  private async withMailActions<T>(run: ActiveRun, action: () => Promise<T>, delegated = false): Promise<T> {
     const before = this.mailActionTail.catch(() => {});
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     this.mailActionTail = before.then(() => gate);
     try {
       await waitForAbortableOperation(before, run.controller.signal);
+      if (delegated && run.changes && run.changes.mode !== 'approve_for_me') { run.cancelled = true; run.controller.abort(new Error('Delegated approval stopped.')); }
       run.controller.signal.throwIfAborted();
       this.markRequestMutating(run.controller);
       return await action();
@@ -294,17 +263,15 @@ export class InboxAssistantService {
 
   private callRunAI(run: ActiveRun, prompt: string, signal: AbortSignal, maxOutputTokens?: number, workload?: InboxAssistantAIWorkload, purpose?: InboxAssistantAIPurpose): Promise<string> {
     signal.throwIfAborted();
-    if (run.reviewBudget) {
-      const budget = run.reviewBudget;
-      if (budget.calls >= AUTOMATIC_REVIEW_LIMITS.aiCalls || budget.inputChars + prompt.length > AUTOMATIC_REVIEW_LIMITS.inputChars) {
-        budget.reason = 'The automatic review reached its AI budget. Start another run to continue.';
-        throw new Error(budget.reason);
-      }
-      budget.calls++;
-      budget.inputChars += prompt.length;
-    }
+    const onUsage = this.usageRecorder(run, workload, purpose);
+    return waitForAbortableOperation(maxOutputTokens === undefined ? this.deps.callAI(prompt, signal, onUsage)
+      : this.deps.callAI(prompt, signal, onUsage, { maxOutputTokens }), signal);
+  }
+
+  /** Records one provider call's usage on its run, as the host describes it. */
+  private usageRecorder(run: ActiveRun, workload?: InboxAssistantAIWorkload, purpose?: InboxAssistantAIPurpose): (usage: InboxAssistantAIUsage) => void {
     const trustedWorkload = readInboxAssistantAIWorkload(workload);
-    const onUsage = (usage: InboxAssistantAIUsage) => {
+    return (usage: InboxAssistantAIUsage) => {
       // Only the host's actual prepared batch describes workload. Provider
       // accounting remains unchanged and cannot supply these diagnostic counts.
       // The step name is the host's too: which of a run's calls this was.
@@ -315,9 +282,14 @@ export class InboxAssistantService {
       if (run.generation === (this.generations.get(run.chatId) ?? 0)) this.persistRun(run);
       else this.persistStaleUsage(run);
     };
-    return waitForAbortableOperation(maxOutputTokens === undefined ? this.deps.callAI(prompt, signal, onUsage)
-      : this.deps.callAI(prompt, signal, onUsage, { maxOutputTokens }), signal);
   }
+
+  private callRunChat(run: ActiveRun, request: AIChatRequest, signal: AbortSignal, purpose: InboxAssistantAIPurpose = 'agent'): Promise<AIChatResult> {
+    signal.throwIfAborted();
+    if (!this.deps.callAIChat) throw new Error('The Inbox Agent is unavailable. Restart the app after updating.');
+    return waitForAbortableOperation(this.deps.callAIChat(request, signal, this.usageRecorder(run, undefined, purpose)), signal);
+  }
+
 
   private persistStaleUsage(run: ActiveRun): void {
     // The caller may have rewound/cleared the request before the aborted
@@ -333,9 +305,20 @@ export class InboxAssistantService {
 
   private visibleExchanges(exchanges: InboxAssistantExchange[]): InboxAssistantExchange[] {
     const registered = new Set(this.accounts().map(account => account.id));
-    return exchanges.filter(exchange => exchange.accountIds.every(id => registered.has(id))).map(exchange => {
-      if (!exchange.review || (this.actionReviews.has(exchange.review.id) && exchange.review.expiresAt > Date.now())) return exchange;
-      return { ...exchange, review: { ...exchange.review, status: 'expired' } };
+    return exchanges.filter(exchange => exchange.accountIds.every(id => registered.has(id))).map(stored => {
+      let exchange = this.withHeldCards(stored);
+      // A card whose change set is no longer held (the app restarted) can no
+      // longer be approved or undone: say so rather than offer the buttons.
+      if (exchange.changeSets?.some(set => !this.changeSets.has(set.id))) {
+        exchange = { ...exchange, changeSets: exchange.changeSets.map(set => this.changeSets.has(set.id) ? set
+          : { ...set, approveBy: 0, undoBy: 0, ...(set.status === 'pending' ? { status: 'expired' as const } : {}) }) };
+      }
+      if (exchange.settingChanges?.some(change => !this.settingChanges.has(change.id))) {
+        exchange = { ...exchange, settingChanges: exchange.settingChanges.map(change => this.settingChanges.has(change.id) ? change
+          : { ...change, approveBy: 0, undoBy: 0, ...(change.status === 'pending' ? { status: 'expired' as const } : {}) }) };
+      }
+      // A review card from the retired unread review: its actions went with it.
+      return exchange.review ? { ...exchange, review: { ...exchange.review, status: 'expired' } } : exchange;
     });
   }
 
@@ -357,10 +340,11 @@ export class InboxAssistantService {
     };
     const recovered: InboxAssistantChat = { ...chat, exchanges: chat.exchanges.map(value => {
       const exchange = stopOrphan(value);
-      if (exchange.review?.automation?.status !== 'running' || (live && live.record.exchangeId === exchange.id)) return exchange;
+      // An automatic review that was running when the app quit, saved by an earlier version.
+      if (exchange.review?.automation?.status !== 'running') return exchange;
       changed = true;
       return { ...exchange, review: { ...exchange.review, automation: { ...exchange.review.automation, status: 'stopped' as const,
-        reason: 'Interrupted when the app restarted. Saved receipts remain available; start a new review to continue.' } } };
+        reason: 'Interrupted when the app restarted. Saved receipts remain available.' } } };
     }),
       ...(chat.runs ? { runs: chat.runs.map(stopOrphan) } : {}) };
     if (changed) this.deps.history.writeChat(recovered);
@@ -397,7 +381,10 @@ export class InboxAssistantService {
       ...(request.actionMode !== undefined ? { actionMode: request.actionMode as InboxAssistantActionMode } : {}),
     });
     const run = this.running.get(request.chatId);
-    if (request.actionMode === 'review' && run?.mutating) { run.cancelled = true; run.controller.abort(new Error('Delegated approval stopped.')); }
+    if (request.actionMode === 'review' && run) {
+      if (run.changes) run.changes.mode = 'review';
+      if (run.mutating) { run.cancelled = true; run.controller.abort(new Error('Delegated approval stopped.')); }
+    }
     return result;
   }
 
@@ -407,7 +394,7 @@ export class InboxAssistantService {
     const result = this.deps.history.delete(value);
     this.generations.set(value, (this.generations.get(value) ?? 0) + 1);
     this.running.get(value)?.controller.abort(new Error('This conversation was deleted.'));
-    for (const [id, entry] of this.actionReviews) if (entry.chatId === value) this.actionReviews.delete(id);
+    this.forgetChangeSets(value);
     return result;
   }
 
@@ -421,7 +408,7 @@ export class InboxAssistantService {
     await this.stopForHistoryChange(request.chatId);
     if (this.running.has(request.chatId)) throw new Error('A new request started in this conversation. Stop it before rewinding.');
     const result = this.deps.history.rewind(request.chatId, request.exchangeId);
-    this.invalidateReviews(request.chatId);
+    this.invalidateCards(request.chatId);
     return { ...result, chat: { ...result.chat, exchanges: this.visibleExchanges(result.chat.exchanges) } };
   }
 
@@ -432,7 +419,7 @@ export class InboxAssistantService {
     await this.stopForHistoryChange(request.chatId);
     if (this.running.has(request.chatId)) throw new Error('A new request started in this conversation. Stop it before restoring.');
     const chat = this.deps.history.restoreRewind(request.chatId);
-    this.invalidateReviews(request.chatId);
+    this.invalidateCards(request.chatId);
     return { ...chat, exchanges: this.visibleExchanges(chat.exchanges) };
   }
 
@@ -443,9 +430,133 @@ export class InboxAssistantService {
     await this.cancel(run.id);
   }
 
-  private invalidateReviews(chatId: string): void {
+  private invalidateCards(chatId: string): void {
     this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
-    for (const [id, entry] of this.actionReviews) if (entry.chatId === chatId) this.actionReviews.delete(id);
+    this.forgetChangeSets(chatId);
+  }
+
+  private forgetChangeSets(chatId: string): void {
+    for (const [id, entry] of this.changeSets) if (entry.chatId === chatId) this.changeSets.delete(id);
+    for (const [id, entry] of this.settingChanges) if (entry.chatId === chatId) this.settingChanges.delete(id);
+    this.saveJournal();
+  }
+
+  /**
+   * Hand a run's cards over: called when its answer (or its failure) is
+   * delivered, before the exchange that shows them is built. Their approval
+   * windows start here, when the user can first see them, not when the run
+   * staged them.
+   */
+  private rememberChangeSets(chatId: string, exchangeId: string, accounts: InboxAssistantAccount[], sets: HeldChangeSet[], settings: HeldSettingChange[] = []): void {
+    const now = this.deps.now?.() ?? Date.now();
+    for (const held of sets) openApprovalWindow(held, now);
+    for (const held of settings) openSettingApprovalWindow(held, now);
+    for (const [id, entry] of this.changeSets) if (Math.max(entry.held.set.approveBy, entry.held.set.undoBy) < now) this.changeSets.delete(id);
+    for (const [id, entry] of this.settingChanges) if (Math.max(entry.held.change.approveBy, entry.held.change.undoBy) < now) this.settingChanges.delete(id);
+    for (const held of sets) this.changeSets.set(held.set.id, { chatId, exchangeId, accounts, held });
+    for (const held of settings) this.settingChanges.set(held.change.id, { chatId, exchangeId, accounts, held });
+    while (this.changeSets.size > 200) this.changeSets.delete(this.changeSets.keys().next().value!);
+    while (this.settingChanges.size > 100) this.settingChanges.delete(this.settingChanges.keys().next().value!);
+    this.saveJournal();
+  }
+
+  /**
+   * The run's undo requests with the exchange each card belongs to. `known` is
+   * the chat's cards as the run started: a request whose card stopped being
+   * held during the run (its window ended) keeps its exchange, so an undo the
+   * agent did still refreshes the mail list and its earlier card still shows.
+   */
+  private undoRequests(requests: InboxAgentChangeContext['undoRequests'], known: Map<string, string>): InboxAgentUndoRequest[] {
+    return requests.flatMap(request => {
+      const exchangeId = (request.kind === 'setting' ? this.settingChanges.get(request.id) : this.changeSets.get(request.id))?.exchangeId ?? known.get(request.id);
+      return exchangeId ? [{ ...request, exchangeId }] : [];
+    });
+  }
+
+  /** Which exchange each of a chat's held cards belongs to, now. */
+  private cardExchanges(chatId: string): Map<string, string> {
+    return new Map([...this.changeSets, ...this.settingChanges].filter(([, entry]) => entry.chatId === chatId).map(([id, entry]) => [id, entry.exchangeId]));
+  }
+
+  /**
+   * Keep a set the run changed mail with (applied without a card, or undone)
+   * at once, not when the run ends: if the app quits or crashes mid-run, its
+   * card and its Undo must survive. A set of this run is held under the run's
+   * exchange, and the unfinished exchange is saved with its card (persistRun).
+   * Its approval window is not opened here; that waits for the answer
+   * (rememberChangeSets). An earlier set (`own` false) keeps its own card and
+   * exchange; only the journal is saved. Nothing is kept for a chat deleted or
+   * rewound since.
+   */
+  private keepRunSet(run: ActiveRun, accounts: InboxAssistantAccount[], held: HeldChangeSet, own: boolean): void {
+    if (run.generation !== (this.generations.get(run.chatId) ?? 0)) return;
+    if (own && !this.changeSets.has(held.set.id) && held.set.items.some(item => item.status !== 'pending')) {
+      this.changeSets.set(held.set.id, { chatId: run.chatId, exchangeId: run.record.exchangeId!, accounts, held });
+    }
+    this.saveJournal();
+    this.persistRun(run);
+  }
+
+  /** A chat's earlier changes the agent can still undo, and how many cards it had, so new labels stay unique. */
+  private earlierChanges(chatId: string): Pick<InboxAgentChangeContext, 'earlier' | 'labelOffset'> {
+    const exchanges = this.deps.history.load(chatId, { select: false }).exchanges;
+    return {
+      earlier: {
+        sets: [...this.changeSets.values()].filter(entry => entry.chatId === chatId).map(entry => entry.held),
+        settings: [...this.settingChanges.values()].filter(entry => entry.chatId === chatId).map(entry => entry.held),
+      },
+      labelOffset: {
+        sets: exchanges.reduce((sum, exchange) => sum + (exchange.changeSets?.length ?? 0), 0),
+        settings: exchanges.reduce((sum, exchange) => sum + (exchange.settingChanges?.length ?? 0), 0),
+      },
+    };
+  }
+
+  /** The host's settings, refused once an account is no longer the one the change was prepared for. */
+  private agentSettings(signal: AbortSignal, expected: InboxAssistantAccount[]): InboxAgentSettingActions {
+    const settings = this.deps.settingActions;
+    if (!settings) throw new Error('Settings are unavailable. Restart the app after updating.');
+    const checked = <A extends unknown[], R>(call: (accountId: string, ...args: A) => Promise<R>) => (accountId: string, ...args: A): Promise<R> => {
+      signal.throwIfAborted();
+      const account = this.accounts().find(item => item.id === accountId);
+      if (!account || !expected.some(item => item.id === account.id && item.email === account.email)) return Promise.reject(new Error('The account changed or is no longer connected.'));
+      return call(accountId, ...args);
+    };
+    return {
+      listFilters: checked(settings.listFilters.bind(settings)), createFilter: checked(settings.createFilter.bind(settings)), updateFilter: checked(settings.updateFilter.bind(settings)),
+      deleteFilter: checked(settings.deleteFilter.bind(settings)), matchFilter: checked(settings.matchFilter.bind(settings)), senderEmails: checked(settings.senderEmails.bind(settings)),
+      sender: checked(settings.sender.bind(settings)), setSender: checked(settings.setSender.bind(settings)),
+    };
+  }
+
+  /** The agent's mail actions, refused once an account is no longer the one the change was prepared for. */
+  private agentMail(signal: AbortSignal, expected: InboxAssistantAccount[]): { actions: InboxAgentMailActions; readEmail: InboxAgentEmailReader } {
+    const mail = this.deps.mailActions;
+    if (!mail) throw new Error('Mail actions are unavailable. Restart the app after updating.');
+    const assertAccount = (accountId: string) => {
+      signal.throwIfAborted();
+      const account = this.accounts().find(item => item.id === accountId);
+      if (!account || !expected.some(item => item.id === account.id && item.email === account.email)) throw new Error('The account changed or is no longer connected.');
+    };
+    return {
+      actions: {
+        setRead: (accountId, ids, read) => { assertAccount(accountId); return mail.setRead(accountId, ids, read); },
+        setStarred: (accountId, ids, starred) => { assertAccount(accountId); return mail.setStarred(accountId, ids, starred); },
+        move: (accountId, ids, to) => { assertAccount(accountId); return mail.move(accountId, ids, to); },
+        restore: (accountId, ids) => { assertAccount(accountId); return mail.restore(accountId, ids); },
+        setCategory: (accountId, ids, slug, on) => { assertAccount(accountId); return mail.setCategory(accountId, ids, slug, on); },
+        setLabel: (accountId, ids, name, on) => { assertAccount(accountId); return mail.setLabel(accountId, ids, name, on); },
+        createLabel: (accountId, name) => { assertAccount(accountId); return mail.createLabel(accountId, name); },
+        dropLabel: (accountId, name) => { assertAccount(accountId); return mail.dropLabel(accountId, name); },
+        setSnooze: (accountId, ids, until) => { assertAccount(accountId); return mail.setSnooze(accountId, ids, until); },
+        spamVerdict: (accountId, ids, verdict) => { assertAccount(accountId); return mail.spamVerdict(accountId, ids, verdict); },
+        revertSpamVerdict: (accountId, rows) => { assertAccount(accountId); return mail.revertSpamVerdict(accountId, rows); },
+      },
+      readEmail: async (accountId, emailId) => {
+        assertAccount(accountId);
+        return (await this.deps.openMailbox(accountId)).storage.getEmail(emailId);
+      },
+    };
   }
 
   history(): InboxAssistantExchange[] {
@@ -472,222 +583,106 @@ export class InboxAssistantService {
     this.generations.set(active, (this.generations.get(active) ?? 0) + 1);
     this.running.get(active)?.controller.abort();
     this.deps.history.clear(active);
-    for (const [id, entry] of this.actionReviews) if (entry.chatId === active) this.actionReviews.delete(id);
+    this.forgetChangeSets(active);
   }
 
-  private reviewDeps(signal: AbortSignal, expectedAccounts?: InboxAssistantAccount[]): InboxAssistantActionDeps {
-    const assertAccount = (accountId: string) => {
-      signal.throwIfAborted();
-      const account = this.accounts().find(item => item.id === accountId);
-      if (!account || (expectedAccounts && !expectedAccounts.some(item => item.id === account.id && item.email === account.email))) {
-        throw new Error('The review account changed or is no longer connected.');
-      }
-    };
-    return {
-      openMailbox: accountId => {
-        assertAccount(accountId);
-        return this.deps.openMailbox(accountId);
-      },
-      callAI: (prompt, stepSignal, workload) => {
-        const effective = stepSignal ? AbortSignal.any([signal, stepSignal]) : signal;
-        if (effective.aborted) throw new Error('Request stopped.');
-        const run = [...this.running.values()].find(value => value.controller.signal === signal);
-        if (!run) throw new Error('This Inbox Agent request is no longer running.');
-        expectedAccounts?.forEach(account => assertAccount(account.id));
-        return this.callRunAI(run, prompt, effective, 4_000, workload, 'review');
-      },
-      setRead: async (accountId, ids, read, context) => {
-        assertAccount(accountId);
-        if (!this.deps.setRead) throw new Error('Mail actions are unavailable. Restart the app after updating.');
-        return context ? this.deps.setRead(accountId, ids, read, context) : this.deps.setRead(accountId, ids, read);
-      },
-      moveMail: async (accountId, ids, action, context) => {
-        assertAccount(accountId);
-        if (!this.deps.moveMail) throw new Error('Folder actions are unavailable. Restart the app after updating.');
-        return context ? this.deps.moveMail(accountId, ids, action, context) : this.deps.moveMail(accountId, ids, action);
-      },
-    };
-  }
-
-  private rememberReview(chatId: string, exchangeId: string, review: InboxAssistantReview, excludedThreads: Record<string, string[]>, reviewPreferences?: string, dateFilter?: InboxAssistantReviewDateFilter): void {
-    for (const [id, held] of this.actionReviews) if (held.review.expiresAt <= Date.now()) this.actionReviews.delete(id);
-    while (this.actionReviews.size >= 20) this.actionReviews.delete(this.actionReviews.keys().next().value!);
-    this.actionReviews.set(review.id, { chatId, exchangeId, review, excludedThreads, ...(reviewPreferences ? { reviewPreferences } : {}), ...(dateFilter ? { dateFilter: { ...dateFilter } } : {}) });
-  }
-
-  /** Each batch keeps its own trusted snapshot and durable, independently undoable receipt. */
-  private async automaticallyReview(run: ActiveRun, initial: InboxAssistantExchange, held: HeldReview, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantExchange> {
-    const selected = held.review.accounts.map(account => ({ ...account }));
-    const identity = this.deps.reviewCacheIdentity?.();
-    const signal = run.controller.signal;
-    const deps = this.reviewDeps(signal, selected);
-    const resuming = !!held.review.automation && held.review.automation.status !== 'running';
-    const progress: InboxAssistantReviewAutomation = { reviewId: held.review.id, status: 'running', batchesReviewed: 0,
-      reviewedConversations: 0, markedConversations: 0, markedEmails: 0, queuedEmails: 0,
-      maxBatches: AUTOMATIC_REVIEW_LIMITS.batches, maxAICalls: AUTOMATIC_REVIEW_LIMITS.aiCalls };
-    run.reviewBudget = { calls: 0, inputChars: 0 };
-    let anchor = initial;
-    let batch = initial;
-    let current = held;
-    let failure: unknown;
-    const assertCurrent = () => {
-      signal.throwIfAborted();
-      if (run.generation !== (this.generations.get(run.chatId) ?? 0)) throw new Error('The conversation changed. Automatic review stopped.');
-      if (selected.some(account => !this.accounts().some(value => value.id === account.id && value.email === account.email))) throw new Error('A selected account changed. Automatic review stopped.');
-      if (this.deps.reviewCacheIdentity?.() !== identity) throw new Error('Your AI provider changed. Start another review with the new settings.');
-    };
-    const saveProgress = () => {
-      held.review.automation = { ...progress };
-      anchor = { ...anchor, review: held.review, updatedAt: Date.now() };
-      this.persistRun(run, anchor);
-      this.reportRun(run, { stage: 'action', status: progress.status === 'running' ? 'running' : progress.status === 'completed' ? 'done' : 'warning',
-        message: progress.status === 'running' ? `Automatic unread review · Batch ${Math.max(1, progress.batchesReviewed)}` : progress.status === 'completed' ? 'Automatic unread review finished' : 'Automatic unread review stopped',
-        detail: progress.reason ?? `${progress.reviewedConversations} conversations reviewed · ${progress.markedEmails} emails marked as read${progress.queuedEmails ? ` · ${progress.queuedEmails} queued for sync` : ''}`,
-        reviewAutomation: { ...progress } }, onActivity);
-    };
-    const prepareNext = async (excludedThreads: Record<string, string[]>) => {
-      const next = await waitForAbortableOperation(prepareInboxAssistantReview(selected, held.review.kind, deps, signal,
-        activity => this.reportRun(run, activity, onActivity), { excludeThreadIds: excludedThreads, recommendationCache: this.recommendationCache, reviewCacheIdentity: identity,
-          isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === identity, ...(held.reviewPreferences ? { reviewPreferences: held.reviewPreferences } : {}),
-          ...(held.dateFilter ? { dateFilter: { ...held.dateFilter } } : {}) }), signal);
-      assertCurrent();
-      batch = { id: randomUUID(), chatId: run.chatId, question: initial.question, reviewBatch: { runId: run.id, number: progress.batchesReviewed + 1 },
-        accountIds: selected.map(account => account.id), createdAt: Date.now(), status: 'completed', review: next,
-        answer: { text: reviewText(next), sources: [], coverage: [], warnings: next.coverage.flatMap(account => account.warnings) } };
-      this.rememberReview(run.chatId, batch.id, next, excludedThreads, held.reviewPreferences, held.dateFilter);
-      current = this.actionReviews.get(next.id)!;
-      // Every expanded batch card can continue independently. Its checkpoint
-      // starts before this batch, so a changed/skipped/failed source is freshly
-      // reviewed instead of being excluded by that card's display snapshot.
-      current.automaticCheckpoint = excludedThreads;
-      this.persistRun(run, batch);
-    };
-    try {
-      saveProgress();
-      if (held.automaticCheckpoint || resuming) await prepareNext(held.automaticCheckpoint ?? held.excludedThreads);
-      else if (held.review.items.some(item => item.needsRetry) && !held.review.items.some(item => item.status === 'pending'
-        && item.recommendation === 'mark_read' && item.confidence >= 0.9 && !item.protectedReasons.length && !item.bodyUnavailable && !item.attachmentsUnknown)) {
-        // A first explicit start on a retry-only review must do the pending AI
-        // work now, not require another click to reach the normal resume path.
-        const excludedThreads: Record<string, string[]> = {};
-        for (const account of selected) excludedThreads[account.id] = [...new Set([
-          ...(held.excludedThreads[account.id] ?? []), ...held.review.items.filter(item => item.accountId === account.id
-            && !item.needsRetry && item.status !== 'failed' && item.status !== 'skipped').map(item => item.threadId),
-        ])];
-        held.automaticCheckpoint = excludedThreads;
-        held.excludedThreads = excludedThreads;
-        await prepareNext(excludedThreads);
-      }
-      while (progress.batchesReviewed < AUTOMATIC_REVIEW_LIMITS.batches) {
-        assertCurrent();
-        const review = current.review;
-        progress.batchesReviewed++;
-        progress.reviewedConversations += review.items.filter(item => !item.needsRetry).length;
-        saveProgress();
-        // A renderer selection, cached authority or an LLM can never widen this
-        // action. The mutation helper rechecks full source snapshots as well.
-        const ids = review.items.filter(item => item.status === 'pending' && item.recommendation === 'mark_read' && item.confidence >= 0.9
-          && !item.protectedReasons.length && !item.bodyUnavailable && !item.attachmentsUnknown).map(item => item.id);
-        if (ids.length) {
-          const result = await this.withMailActions(run, () => {
-            assertCurrent();
-            return applyInboxAssistantReview(review, ids, deps, signal);
-          });
-          batch = { ...batch, review, reviewResult: result, answer: { ...batch.answer, text: reviewText(review) }, updatedAt: Date.now() };
-          if (batch.id === anchor.id) anchor = batch;
-          // Even Stop during a write must save acknowledged changes before
-          // observing cancellation or attempting another batch.
-          this.persistRun(run, batch);
-          progress.markedConversations += result.items.filter(item => item.appliedIds.length > 0).length;
-          progress.markedEmails += result.items.reduce((sum, item) => sum + item.appliedIds.length, 0);
-          progress.queuedEmails += result.items.reduce((sum, item) => sum + item.queuedIds.length, 0);
-          saveProgress();
-          assertCurrent();
-          if (result.failedCount || result.skippedCount) {
-            progress.status = 'stopped'; progress.reason = 'Some conversations changed or could not be updated. Check the saved receipts before continuing.'; break;
-          }
-        }
-        assertCurrent();
-        if (review.coverage.some(account => account.status === 'unavailable')) {
-          progress.status = 'stopped'; progress.reason = 'A selected account could not be reviewed. Reconnect it before continuing.'; break;
-        }
-        const excludedThreads: Record<string, string[]> = {};
-        for (const account of selected) excludedThreads[account.id] = [...new Set([
-          ...(current.excludedThreads[account.id] ?? []), ...review.items.filter(item => item.accountId === account.id && !item.needsRetry).map(item => item.threadId),
-        ])];
-        held.automaticCheckpoint = excludedThreads;
-        held.excludedThreads = excludedThreads;
-        current.automaticCheckpoint = excludedThreads;
-        current.excludedThreads = excludedThreads;
-        if (run.reviewBudget.reason) { progress.status = 'stopped'; progress.reason = run.reviewBudget.reason; break; }
-        const unverified = review.items.filter(item => item.needsRetry).length;
-        if (unverified) {
-          progress.status = 'stopped'; progress.reason = `The AI review did not finish for ${unverified} ${unverified === 1 ? 'conversation. It stayed' : 'conversations. They stayed'} unread. Continue to retry; verified results are saved.`; break;
-        }
-        if (!review.coverage.some(account => account.hasMore)) { held.automaticExhausted = true; current.automaticExhausted = true; progress.status = 'completed'; progress.reason = `All available unread conversations${held.dateFilter ? ` with emails ${inboxAssistantReviewDateLabel(held.dateFilter)}` : ''} in the selected accounts were reviewed. Important and uncertain mail stayed unread.`; break; }
-        if (!review.items.length) { progress.status = 'stopped'; progress.reason = 'No new conversations were found within the scan limit. More mail may remain; narrow the account scope or refresh later.'; break; }
-        if (progress.batchesReviewed >= AUTOMATIC_REVIEW_LIMITS.batches) {
-          progress.status = 'stopped'; progress.reason = 'Reached the 10-batch limit. Start another automatic run to continue.'; break;
-        }
-        if (run.reviewBudget.calls >= AUTOMATIC_REVIEW_LIMITS.aiCalls) {
-          progress.status = 'stopped'; progress.reason = 'Reached the AI budget for this run. Start another automatic run to continue.'; break;
-        }
-        await prepareNext(excludedThreads);
-      }
-    } catch (error) {
-      failure = error;
-      progress.status = run.cancelled ? 'stopped' : 'failed';
-      progress.reason = run.cancelled ? 'Stopped. Changes already acknowledged are saved below; no further batches were started.'
-        : error instanceof Error ? error.message : 'Automatic review could not finish. Check the saved receipts.';
-    }
-    saveProgress();
-    return this.settleRun(run, failure, anchor)!;
-  }
-
-  async applyReview(value: unknown, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantExchange> {
-    const request = value as InboxAssistantReviewActionRequest;
-    if (!request || !Object.keys(request).every(key => ['requestId', 'chatId', 'exchangeId', 'reviewId', 'itemIds', 'undo', 'manualSelection', 'action', 'autoContinue'].includes(key))
-      || ![request.requestId, request.chatId, request.exchangeId, request.reviewId].every(id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(id))
-      || !Array.isArray(request.itemIds) || (!request.itemIds.length && !request.autoContinue) || request.itemIds.length > 600
-      || request.itemIds.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id))
-      || (request.undo !== undefined && typeof request.undo !== 'boolean')
-      || (request.manualSelection !== undefined && typeof request.manualSelection !== 'boolean')
-      || (request.autoContinue !== undefined && typeof request.autoContinue !== 'boolean')
-      || (request.autoContinue && (request.itemIds.length > 0 || request.undo || request.manualSelection || request.action !== undefined))
-      || (request.action !== undefined && !['mark_read', 'mark_unread', 'archive', 'trash'].includes(request.action))
-      || ((request.action === 'archive' || request.action === 'trash') && request.manualSelection !== true)
-      || (request.undo && (request.manualSelection || request.action !== undefined))) throw new Error('Choose valid reviewed conversations.');
+  /** The user's decision on one of the agent's change-set cards: approve (all or some rows), cancel, or undo. */
+  async decideChangeSet(value: unknown, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantExchange> {
+    const request = value as InboxAgentChangeSetRequest;
+    const id = /^[a-zA-Z0-9_-]{1,100}$/;
+    if (!request || typeof request !== 'object' || Array.isArray(request)
+      || !Object.keys(request).every(key => ['requestId', 'chatId', 'exchangeId', 'changeSetId', 'decision', 'itemIds', 'includeExisting'].includes(key))
+      || (request.includeExisting !== undefined && (request.decision !== 'approve' || typeof request.includeExisting !== 'boolean'))
+      || ![request.requestId, request.chatId, request.exchangeId, request.changeSetId].every(value => typeof value === 'string' && id.test(value))
+      || !['approve', 'cancel', 'undo'].includes(request.decision)
+      || (request.itemIds !== undefined && (request.decision === 'cancel' || !Array.isArray(request.itemIds) || request.itemIds.length > INBOX_AGENT_CHANGE_LIMITS.perSet
+        || request.itemIds.some(item => typeof item !== 'string' || !/^c\d{1,2}-\d{1,5}$/.test(item))))) throw new Error('Choose valid changes.');
     this.assertIdle(request.chatId, request.requestId);
-    const held = this.actionReviews.get(request.reviewId);
+    if (this.settingChanges.has(request.changeSetId)) {
+      if (request.itemIds) throw new Error('Choose valid changes.');
+      return this.decideSettingChange(request, onActivity);
+    }
+    if (request.includeExisting !== undefined) throw new Error('Choose valid changes.');
+    const entry = this.changeSets.get(request.changeSetId);
     const chat = this.deps.history.load(request.chatId, { select: false });
-    const exchange = chat.exchanges.find(item => item.id === request.exchangeId && item.review?.id === request.reviewId);
-    if (!held || held.chatId !== request.chatId || held.exchangeId !== request.exchangeId || !exchange
-      || held.review.expiresAt <= Date.now()) throw new Error('This review has expired. Prepare a fresh review before changing mail.');
-    if (exchange.accountIds.some(id => !this.accounts().some(account => account.id === id))) throw new Error('A review account is no longer connected.');
-    if (request.autoContinue && !['unread', 'uncategorized'].includes(held.review.kind)) throw new Error('Automatic review is available for unread and uncategorized mail only.');
-    if (request.autoContinue && held.automaticExhausted) throw new Error('This automatic review is complete. Refresh the review to check newly arrived mail.');
+    const exchange = chat.exchanges.find(item => item.id === request.exchangeId && item.changeSets?.some(set => set.id === request.changeSetId));
+    if (!entry || entry.chatId !== request.chatId || entry.exchangeId !== request.exchangeId || !exchange) {
+      throw new Error('These changes are no longer available. Ask again to prepare them fresh.');
+    }
+    if (exchange.accountIds.some(accountId => !this.accounts().some(account => account.id === accountId))) throw new Error('An account in this change is no longer connected.');
+    const { held } = entry;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error('Mail action took too long.')), request.autoContinue ? AUTOMATIC_REVIEW_LIMITS.durationMs : 300_000);
+    const timeout = setTimeout(() => controller.abort(new Error('Mail action took too long.')), 300_000);
     timeout.unref?.();
-    const actionText = request.autoContinue ? 'Automatically mark recommended mail read and review the next batches' : request.undo ? 'Undo the previous read action' : request.action === 'trash' ? 'Move selected conversations to Trash'
-      : request.action === 'archive' ? 'Archive selected conversations' : held.review.kind === 'mark_unread' ? 'Mark selected emails unread' : 'Mark selected conversations read';
-    const run = this.beginRequest(request.requestId, request.chatId, controller, 'action', actionText, [...exchange.accountIds], exchange.id);
+    const label = request.decision === 'approve' ? held.set.summary : request.decision === 'undo' ? `Undo: ${held.set.summary}` : `Cancel: ${held.set.summary}`;
+    const run = this.beginRequest(request.requestId, request.chatId, controller, 'action', label, [...exchange.accountIds], exchange.id);
+    const saved = (): InboxAssistantExchange => ({ ...exchange, changeSets: exchange.changeSets!.map(set => set.id === held.set.id ? structuredClone(held.set) : set) });
     try {
-      if (request.autoContinue) return await this.automaticallyReview(run, exchange, held, onActivity);
-      this.reportRun(run, { stage: 'action', status: 'running', message: actionText }, onActivity);
-      const ids = [...new Set(request.itemIds)];
-      const result = await this.withMailActions(run, async () => request.undo
-        ? await undoInboxAssistantReview(held.review, ids, this.reviewDeps(controller.signal), controller.signal)
-        : await applyInboxAssistantReview(held.review, ids, this.reviewDeps(controller.signal), controller.signal, { manualSelection: request.manualSelection === true, action: request.action }));
-      const completed: InboxAssistantExchange = { ...exchange, review: held.review, reviewResult: result,
-        answer: { ...exchange.answer, text: reviewText(held.review) } };
-      return this.settleRun(run, undefined, completed)!;
+      this.reportRun(run, { stage: 'action', status: 'running', message: label }, onActivity);
+      const now = this.deps.now?.() ?? Date.now();
+      if (request.decision === 'cancel') cancelChangeSet(held);
+      else {
+        const options = { ...this.agentMail(controller.signal, entry.accounts), nowMs: now, signal: controller.signal, ...(request.itemIds ? { itemIds: request.itemIds } : {}) };
+        await this.withMailActions(run, () => request.decision === 'approve' ? applyChangeSet(held, options) : undoChangeSet(held, options));
+      }
+      const counts = changeCounts(held.set);
+      const changed = counts.applied + counts.queued;
+      this.reportRun(run, { stage: 'action', status: counts.failed ? 'warning' : 'done',
+        message: request.decision === 'cancel' ? 'Changes cancelled' : request.decision === 'undo' ? `${counts.undone} put back` : `${changed} changed`,
+        ...(request.decision === 'approve' ? { detail: [counts.queued ? `${counts.queued} will sync when the account is online` : '', counts.unchanged ? `${counts.unchanged} were already as asked` : '',
+          counts.skipped ? `${counts.skipped} left out` : '', counts.failed ? `${counts.failed} failed` : ''].filter(Boolean).join('; ') || undefined } : {}) }, onActivity);
+      return this.settleRun(run, undefined, saved())!;
     } catch (error) {
-      this.settleRun(run, error);
+      // The set may have changed before the failure (rows applied, or expired).
+      this.settleRun(run, error, saved());
       throw error;
     } finally {
       clearTimeout(timeout);
       this.finishRequest(controller);
+      this.saveJournal();
+    }
+  }
+
+  /** The user's decision on a setting-change card: approve (optionally with its existing mail), cancel, or undo. */
+  private async decideSettingChange(request: InboxAgentChangeSetRequest, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantExchange> {
+    const entry = this.settingChanges.get(request.changeSetId)!;
+    const chat = this.deps.history.load(request.chatId, { select: false });
+    const exchange = chat.exchanges.find(item => item.id === request.exchangeId && item.settingChanges?.some(change => change.id === request.changeSetId));
+    if (entry.chatId !== request.chatId || entry.exchangeId !== request.exchangeId || !exchange) {
+      throw new Error('These changes are no longer available. Ask again to prepare them fresh.');
+    }
+    if (exchange.accountIds.some(accountId => !this.accounts().some(account => account.id === accountId))) throw new Error('An account in this change is no longer connected.');
+    const { held } = entry;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error('Mail action took too long.')), 300_000);
+    timeout.unref?.();
+    const label = request.decision === 'approve' ? held.change.summary : request.decision === 'undo' ? `Undo: ${held.change.summary}` : `Cancel: ${held.change.summary}`;
+    const run = this.beginRequest(request.requestId, request.chatId, controller, 'action', label, [...exchange.accountIds], exchange.id);
+    const saved = (): InboxAssistantExchange => ({ ...exchange, settingChanges: exchange.settingChanges!.map(change => change.id === held.change.id ? structuredClone(held.change) : change) });
+    try {
+      this.reportRun(run, { stage: 'action', status: 'running', message: label }, onActivity);
+      const nowMs = this.deps.now?.() ?? Date.now();
+      if (request.decision === 'cancel') cancelSettingChange(held);
+      else {
+        const { actions: mail, readEmail } = this.agentMail(controller.signal, entry.accounts);
+        const options = { settings: this.agentSettings(controller.signal, entry.accounts), mail, readEmail, nowMs, signal: controller.signal };
+        await this.withMailActions(run, () => request.decision === 'approve'
+          ? applySettingChange(held, { ...options, ...(request.includeExisting ? { includeExisting: true } : {}) })
+          : undoSettingChange(held, options));
+      }
+      const { change } = held;
+      const failed = !!change.detail && change.status === 'pending';
+      this.reportRun(run, { stage: 'action', status: failed || /failed/.test(change.existing?.result ?? '') ? 'warning' : 'done',
+        message: request.decision === 'cancel' ? 'Change cancelled' : failed ? 'Not saved' : request.decision === 'undo' ? 'Change undone' : 'Change saved',
+        ...(change.existing?.result && change.existingApplied ? { detail: change.existing.result } : change.detail ? { detail: change.detail } : {}) }, onActivity);
+      return this.settleRun(run, undefined, saved())!;
+    } catch (error) {
+      this.settleRun(run, error, saved());
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      this.finishRequest(controller);
+      this.saveJournal();
     }
   }
 
@@ -810,174 +805,122 @@ export class InboxAssistantService {
     const diagnostics: InboxAssistantRunDiagnostics = { version: 1 };
     run.record.diagnostics = diagnostics;
     let stage: NonNullable<InboxAssistantRunDiagnostics['failure']>['stage'] = 'route';
+    // The agent's change sets, kept even if the run fails afterwards: one it
+    // already applied must keep its Undo.
+    const agentChangeSets: HeldChangeSet[] = [];
+    const agentSettingChanges: HeldSettingChange[] = [];
+    const agentUndoRequests: InboxAgentChangeContext['undoRequests'] = [];
+    let knownCards = new Map<string, string>();
     const conclude = (outcome: NonNullable<InboxAssistantRunDiagnostics['outcome']>) => {
       diagnostics.outcome = outcome;
       diagnostics.durationMs = Math.max(0, Date.now() - run.record.startedAt);
     };
     try {
-      const capabilityReply = !request.reviewKind && !request.continueReviewId ? inboxAssistantCapabilityReply(request.question) : undefined;
-      if (capabilityReply) {
-        diagnostics.route = 'capability';
-        conclude('capability');
-        const exchange: InboxAssistantExchange = { id: run.record.exchangeId!, chatId: request.chatId, question: request.question,
-          accountIds: request.accountIds, createdAt: run.record.startedAt,
-          answer: { text: capabilityReply, sources: [], coverage: [], warnings: [] } };
-        report({ stage: 'complete', status: 'done', message: 'Inbox Agent capabilities', detail: 'No email search or AI request was needed.' });
-        return this.settleRun(run, undefined, exchange)!;
-      }
-      if (historyContext) report({ stage: 'context', status: 'done', message: 'Loaded conversation context', detail: 'Earlier questions supply context; original emails and attachments are checked again for facts.' });
-      report({ stage: 'search', status: 'running', message: 'Preparing email search', detail: `Searching ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}, including Sent and Archive.` });
-      const callAI = (prompt: string, purpose: InboxAssistantAIPurpose = 'answer') => { assertCurrent(); return this.callRunAI(run, prompt, controller.signal, INBOX_ASSISTANT_OUTPUT_TOKENS.answer, undefined, purpose); };
-      const command = parseInboxAssistantReadCommand(request.question);
-      const datedReview = parseInboxAssistantReviewDate(request.question, this.deps.now?.() ?? Date.now());
-      const requestedReviewKind = request.reviewKind ?? inboxAssistantReviewIntent(request.question);
-      if (!command && (datedReview.invalid || datedReview.dateFilter) && /\bunread\b/iu.test(request.question)
-        && /\b(?:review|triage|check|look|process)\b/iu.test(request.question)
-        && (datedReview.invalid || !inboxAssistantGenericReviewRequest(request.question))) {
-        throw new Error('These review restrictions are not supported. Use one older-than-days condition with a general unread review. No mail was changed.');
-      }
-      const broadReview = !command && (requestedReviewKind === 'unread' || requestedReviewKind === 'uncategorized')
-        && /\b(?:review|triage|check|look|process)\b/iu.test(request.question) && inboxAssistantGenericReviewRequest(request.question);
-      // Inspect the first flag word after each actual mark clause. A later
-      // "keep unread" preference is not a mark-unread command, while a genuine
-      // mark-unread or mixed-direction request must never enter read triage.
-      const requestsMarkUnread = /\bmark\b(?:(?!\b(?:mark|read|unread)\b)[\s\S])*\bunread\b/iu.test(request.question);
-      // Never reinterpret a rejected mark-unread command as low-value triage
-      // (which has the opposite flag direction). Only parsed literal scopes can
-      // enter the explicit flag tool.
-      // “Mark all as read”, “Mark them as read”: the scope is a pointing word,
-      // not a sender or subject. Searching for that word would change mail the
-      // user never referred to, so explain instead. Never routed to triage.
-      const reference = command ? undefined : inboxAssistantReadCommandReference(request.question);
-      if (reference !== undefined && !request.reviewKind) throw new Error(unscopedReadCommandMessage(reference));
-      if ((!command && (requestsMarkUnread
-          || (!broadReview && /^(?:(?:please|can you|could you|would you)\s+)?mark\b[\s\S]*\bread\b/iu.test(request.question))))
-        || (request.reviewKind?.startsWith('mark_') && command?.kind !== request.reviewKind)
-        || (command && request.reviewKind && command.kind !== request.reviewKind)) {
-        throw new Error('Specify the matching sender, subject or phrase, for example “Mark all BigBlueButton emails unread”. Date, category and combined restrictions are not supported by this command yet. No mail was changed.');
-      }
-      const reviewKind = command?.kind ?? requestedReviewKind;
-      if (reviewKind) {
-        if (!command && !inboxAssistantGenericReviewRequest(request.question)) {
-          // The review can only suggest marking mail read; it must not stand in
-          // for a request to categorize, even one combined with a review.
-          if (/\b(?:categori[sz]e|classify|label|tag)\b/iu.test(request.question)) throw new Error('I cannot assign categories from this chat, so nothing was started and no mail was changed. Ask “Review my unread emails” to review unread mail, or “Review my uncategorized unread emails” to see what sorting has not reached.');
-          throw new Error('This unread review uses the selected accounts. Sender, category and other date restrictions are not supported yet, so no mail was changed. Use “Review my unread emails older than 15 days” or choose fewer accounts.');
-        }
-        if (/\ball\s+accounts\b/i.test(request.question) && selected.length !== known.length) throw new Error('Select all accounts before reviewing mail across all accounts. No mail was changed.');
-        const excludedThreads: Record<string, string[]> = {};
-        let reviewPreferences = command ? undefined : inboxAssistantReviewPreferences(datedReview.question);
-        let dateFilter = command ? undefined : datedReview.dateFilter;
-        if (request.continueReviewId) {
-          const prior = this.actionReviews.get(request.continueReviewId);
-          if (!prior || prior.chatId !== request.chatId || prior.review.kind !== reviewKind || prior.review.expiresAt <= Date.now()
-            || JSON.stringify(prior.review.scope) !== JSON.stringify(command?.scope)
-            || (dateFilter && dateFilter.olderThanDays !== prior.dateFilter?.olderThanDays)
-            || prior.review.accounts.length !== selected.length || prior.review.accounts.some(account => !request.accountIds.includes(account.id))) {
-            throw new Error('This review continuation expired or its account scope changed. Start a fresh review.');
-          }
-          for (const account of selected) excludedThreads[account.id] = [...new Set(prior.automaticCheckpoint?.[account.id]
-            ?? [...(prior.excludedThreads[account.id] ?? []), ...(prior.review.automation ? []
-              : prior.review.items.filter(item => item.accountId === account.id && !item.needsRetry).map(item => item.threadId))])];
-          reviewPreferences = prior.reviewPreferences;
-          dateFilter = prior.dateFilter ? { ...prior.dateFilter } : undefined;
-        }
-        diagnostics.route = command ? 'mail_command' : 'review';
-        diagnostics.reviewKind = reviewKind;
-        stage = 'review';
-        report({ stage: 'search', status: 'running', message: command ? 'Finding matching emails' : 'Reviewing unread conversations', detail: command ? `Matching “${command.scope.query}” in ${command.scope.field === 'any' ? 'sender, subject and original body' : command.scope.field}. Preparing mark as ${command.kind === 'mark_unread' ? 'unread' : 'read'}.` : `${dateFilter ? `Unread emails ${inboxAssistantReviewDateLabel(dateFilter)}. ` : ''}Including uncategorized mail and checking complete conversations.` });
-        const reviewCacheIdentity = this.deps.reviewCacheIdentity?.();
-        const review = await waitForAbortableOperation(prepareInboxAssistantReview(selected, reviewKind, this.reviewDeps(controller.signal), controller.signal, report, { excludeThreadIds: excludedThreads,
-          recommendationCache: this.recommendationCache, reviewCacheIdentity, isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === reviewCacheIdentity,
-          ...(reviewPreferences ? { reviewPreferences } : {}),
-          ...(dateFilter ? { dateFilter } : {}),
-          ...(command ? { scope: command.scope } : {}) }), controller.signal);
-        assertCurrent();
-        const exchange: InboxAssistantExchange = {
-          id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt, review,
-          answer: { text: reviewText(review), sources: [], coverage: [], warnings: review.coverage.flatMap(account => account.warnings) },
-        };
-        this.rememberReview(request.chatId, exchange.id, review, excludedThreads, reviewPreferences, dateFilter);
-        // Approval is a saved choice for user requests in this conversation.
-        // Changing it never starts work by itself or enables a mail daemon.
-        const mode = this.deps.history.load(request.chatId, { select: false }).actionMode ?? 'review';
-        if (mode === 'approve_for_me' && !request.reviewOnly && !(command ? false : viewOnlyReviewRequest(request, reviewKind))) {
-          // A bare phrase (“Mark all Acme emails read”) is applied without asking
-          // only where it matched a sender or subject. Conversations that merely
-          // contain the word in a body stay on the card for the user to approve,
-          // so an unforeseen common word cannot silently flip unrelated mail.
-          const anchored = command?.scope.field === 'any' ? inboxAssistantHeaderMatchedItems(review) : undefined;
-          const ids = review.items.filter(item => command
-            ? item.recommendation === command.kind && item.confidence === 1 && (item.targetEmailIds?.length ?? 0) > 0 && (!anchored || anchored.has(item.id))
-            : item.recommendation === 'mark_read' && item.confidence >= 0.9
-              && !item.protectedReasons.length && !item.bodyUnavailable && !item.attachmentsUnknown).map(item => item.id);
-          if (ids.length) {
-            report({ stage: 'action', status: 'running', message: command ? `Marking matching emails as ${command.kind === 'mark_unread' ? 'unread' : 'read'}` : 'Marking high-confidence low-value conversations as read', detail: command ? 'Changing only the matching messages in the reviewed account scope.' : 'Protected and uncertain conversations stay unread.' });
-            exchange.reviewResult = await this.withMailActions(run, () => applyInboxAssistantReview(review, ids, this.reviewDeps(controller.signal), controller.signal));
-            exchange.answer.text = reviewText(review);
-          }
-          const held = anchored ? review.items.filter(item => item.recommendation === command!.kind && item.status === 'pending' && !anchored.has(item.id)).length : 0;
-          if (held) exchange.answer.text += `\n\n${held} ${held === 1 ? 'conversation matches' : 'conversations match'} only inside the message text, not in the sender or subject, so ${held === 1 ? 'it was' : 'they were'} not changed. Select ${held === 1 ? 'it' : 'them'} below to apply.`;
-        }
-        const unverified = review.items.filter(item => item.needsRetry).length;
-        report({ stage: 'complete', status: unverified ? 'warning' : 'done', message: unverified ? 'Unread review needs another attempt' : command ? 'Matching email review ready' : 'Unread review ready',
-          detail: unverified ? `${review.items.length - unverified} conversations reviewed; ${unverified} stay unread until the AI review is retried.` : `${review.items.length} conversations reviewed.` });
-        conclude('review');
-        return this.settleRun(run, undefined, exchange)!;
-      }
-      diagnostics.route = 'search';
-      stage = 'plan';
+      diagnostics.route = 'agent';
+      stage = 'agent';
       const timeZone = researchTimeZone(this.deps);
-      const plan = await planInboxAssistantSearch(context.contextualizedQuestion, prompt => {
-        assertCurrent();
-        return this.callRunAI(run, prompt, controller.signal, INBOX_ASSISTANT_OUTPUT_TOKENS.plan, undefined, 'plan');
-      }, {
-        historyContext, topicTerms: context.topicTerms, participantTerms: context.participantTerms, intent: context.intent,
-        nowMs: this.deps.now?.() ?? Date.now(),
-        timeZone, diagnostics,
+      const nowMs = this.deps.now?.() ?? Date.now();
+      const identity = this.deps.providerIdentity?.() ?? 'default';
+      if (historyContext) report({ stage: 'context', status: 'done', message: 'Loaded conversation context', detail: 'Earlier questions supply context; original emails and attachments are checked again for facts.' });
+      report({ stage: 'search', status: 'running', message: 'Working on your request', detail: `Using ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}.` });
+      const now = () => this.deps.now?.() ?? Date.now();
+      knownCards = this.cardExchanges(request.chatId);
+      const changes: InboxAgentChangeContext | undefined = this.deps.mailActions ? {
+        mode: this.deps.history.load(request.chatId, { select: false }).actionMode ?? 'review',
+        sets: agentChangeSets, autoApplied: 0, autoUndone: 0, atStart: new Map(), nowMs: now, settingChanges: agentSettingChanges, undoRequests: agentUndoRequests,
+        ...this.earlierChanges(request.chatId),
+        ...(this.deps.settingActions ? { settings: this.agentSettings(controller.signal, selected) } : {}),
+        apply: held => this.withMailActions(run, async () => {
+          try { await applyChangeSet(held, { ...this.agentMail(controller.signal, selected), nowMs: now(), auto: true, signal: controller.signal }); }
+          finally { this.keepRunSet(run, selected, held, true); }
+        }, true),
+        // An earlier set is checked against the accounts it was prepared for, not this request's.
+        undo: held => this.withMailActions(run, async () => {
+          try { await undoChangeSet(held, { ...this.agentMail(controller.signal, this.changeSets.get(held.set.id)?.accounts ?? selected), nowMs: now(), signal: controller.signal }); }
+          finally { this.keepRunSet(run, selected, held, agentChangeSets.includes(held)); }
+        }, true),
+      } : undefined;
+      if (changes) run.changes = changes;
+      const result = await runInboxAgent({
+        question: request.question, ...(historyContext ? { historyContext } : {}), accounts: selected, timeZone, nowMs,
+        signal: controller.signal, protocol: this.agentProtocols.get(identity), diagnostics, ...(changes ? { changes } : {}),
+        deps: {
+          research: this.deps,
+          progress: report,
+          chat: chatRequest => { assertCurrent(); return this.callRunChat(run, chatRequest, controller.signal); },
+          // Through the chat call, whose retry gives a reasoning model that
+          // spent its whole budget thinking a second, larger budget.
+          classify: async prompt => {
+            assertCurrent();
+            const reply = await this.callRunChat(run, { messages: [{ role: 'system', content: INBOX_ASSISTANT_SYSTEM_PROMPT }, { role: 'user', content: prompt }],
+              maxOutputTokens: 4_000 }, controller.signal, 'classify');
+            return reply.text;
+          },
+          // The run keeps its latest deep search's plan and per-account
+          // coverage (content-free), as the one-shot search did.
+          deepSearch: async question => {
+            assertCurrent();
+            const plan = await planInboxAssistantSearch(question, prompt => {
+              assertCurrent();
+              return this.callRunAI(run, prompt, controller.signal, INBOX_ASSISTANT_OUTPUT_TOKENS.plan, undefined, 'plan');
+            }, { nowMs, timeZone, diagnostics,
+              // A follow-up (by the user's own words) keeps the earlier topic, people and
+              // direction, however the model phrased its search.
+              ...(context.isFollowUp ? { historyContext, topicTerms: context.topicTerms, participantTerms: context.participantTerms, intent: context.intent } : {}) });
+            // A plan call interrupted by Stop or the time limit is not a planner failure.
+            if (controller.signal.aborted) delete diagnostics.plan;
+            assertCurrent();
+            // The latest search's coverage replaces an earlier one's, never adds to it.
+            delete diagnostics.accounts;
+            delete diagnostics.searchBroadened;
+            const research = await waitForAbortableOperation(researchInboxAssistant(selected, plan, this.deps, controller.signal, {
+              // A follow-up reopens the emails the earlier answers rested on.
+              onProgress: report, diagnostics, ...(context.isFollowUp ? { sourceRefs: context.sourceRefs } : {}),
+            }), controller.signal);
+            // Excerpts carry their local date and time, as the prompt promises.
+            return { ...research, evidence: research.evidence.map(source => ({ ...source, dateTimeZone: timeZone })) };
+          },
+        },
       });
-      // A plan call interrupted by Stop is not a planner failure. The fallback
-      // it produced is never searched, so do not record it as one.
-      if (controller.signal.aborted) delete diagnostics.plan;
+      this.agentProtocols.set(identity, result.protocol);
       assertCurrent();
-      stage = 'search';
-      const research = await waitForAbortableOperation(researchInboxAssistant(selected, plan, this.deps, controller.signal, {
-        onProgress: report, sourceRefs: context.sourceRefs, diagnostics,
-      }), controller.signal);
-      assertCurrent();
-      stage = 'answer';
-      report({ stage: 'answer', status: 'running', message: 'Preparing answer from sources', detail: `${research.evidence.length} source excerpts collected.` });
-      const answerEvidence = research.evidence.map(source => ({ ...source, dateTimeZone: timeZone }));
-      const grounded = await answerInboxAssistant(request.question, answerEvidence, research.coverage, callAI, historyContext, plan.scope, diagnostics);
-      assertCurrent();
-      const used = new Set(grounded.sourceIds);
-      // Unverified originals remain inspectable as explicitly related mail.
-      // They are never presented as sources supporting a successful answer.
-      const sources = (used.size ? research.evidence.filter(source => used.has(source.id)) : research.evidence.slice(0, 6))
-        .map(({ text: _text, ...source }) => ({ ...source,
-          excerpt: grounded.facts.flatMap(fact => fact.quotes).find(quote => quote.sourceId === source.id)?.text.slice(0, 1000) || source.excerpt,
-        }));
+      // Before rememberChangeSets drops cards whose windows ended during the run.
+      const undoRequests = this.undoRequests(agentUndoRequests, knownCards);
+      // Before the cards are copied into the exchange: their windows open here.
+      this.rememberChangeSets(request.chatId, run.record.exchangeId!, selected, agentChangeSets, agentSettingChanges);
       const exchange: InboxAssistantExchange = {
         id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt,
-        answer: { text: grounded.answer, sources, sourceStatus: used.size ? 'verified' : 'related', coverage: research.coverage,
-          warnings: grounded.warnings },
+        answer: result.answer, ...(agentChangeSets.length ? { changeSets: agentChangeSets.map(held => structuredClone(held.set)) } : {}),
+        ...(agentSettingChanges.length ? { settingChanges: agentSettingChanges.map(held => structuredClone(held.change)) } : {}),
+        ...(undoRequests.length ? { undoRequests } : {}),
       };
-      assertCurrent();
-      report({ stage: 'complete', status: used.size ? 'done' : 'warning', message: used.size ? 'Answer verified against sources' : sources.length ? 'Related emails found; answer not verified' : 'No supporting email found',
-        detail: used.size ? `${sources.length} cited ${sources.length === 1 ? 'source' : 'sources'}.`
-          : sources.length ? 'Related originals are available to inspect. They do not support a verified answer.' : 'Check the search coverage and account scope before concluding that no email exists.' });
-      conclude(used.size ? 'verified' : sources.length ? 'related' : 'no_evidence');
+      const verified = result.outcome === 'verified' || result.outcome === 'answered';
+      report({ stage: 'complete', status: verified ? 'done' : 'warning',
+        message: result.outcome === 'verified' ? 'Answer verified against sources' : result.outcome === 'answered' ? 'Answer ready'
+          : result.outcome === 'related' ? 'Related emails found; answer not verified' : 'No supporting email found',
+        detail: result.outcome === 'verified' ? `${result.answer.sources.length} cited ${result.answer.sources.length === 1 ? 'source' : 'sources'}.`
+          : result.answer.sources.length ? 'Related originals are available to inspect. They do not support a verified answer.' : 'No email was cited.' });
+      conclude(result.outcome);
       return this.settleRun(run, undefined, exchange)!;
     } catch (error) {
       if (!controller.signal.aborted && generation === (this.generations.get(request.chatId) ?? 0)) {
         report({ stage: 'complete', status: 'warning', message: 'Could not finish this question', detail: error instanceof Error ? error.message : 'Please try again.' });
       }
-      // Stopping is the user's choice, and a host refusal ("which emails?") is
-      // an answer. Only a run that broke records a failure, and only its class.
+      // Stopping is the user's choice. A run that broke records a failure, and
+      // only its class.
       if (run.cancelled) conclude('stopped');
-      else if (!diagnostics.route) { diagnostics.route = 'refused'; conclude('refused'); }
       else { diagnostics.failure = { stage, error: errorDiagnostic(error) }; conclude('failed'); }
-      this.settleRun(run, error);
+      if (agentChangeSets.length || agentSettingChanges.length || agentUndoRequests.length) {
+        // Cards for what was staged, applied or undone before the run stopped.
+        const exchangeId = run.record.exchangeId!;
+        const undoRequests = this.undoRequests(agentUndoRequests, knownCards);
+        this.rememberChangeSets(request.chatId, exchangeId, selected, agentChangeSets, agentSettingChanges);
+        this.settleRun(run, error, { id: exchangeId, chatId: request.chatId, question: request.question, accountIds: request.accountIds,
+          createdAt: run.record.startedAt, answer: { text: '', sources: [], coverage: [], warnings: [] },
+          ...(agentChangeSets.length ? { changeSets: agentChangeSets.map(held => structuredClone(held.set)) } : {}),
+          ...(agentSettingChanges.length ? { settingChanges: agentSettingChanges.map(held => structuredClone(held.change)) } : {}),
+          ...(undoRequests.length ? { undoRequests } : {}) });
+      } else this.settleRun(run, error);
       throw error;
     } finally {
       clearTimeout(timeout);

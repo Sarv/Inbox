@@ -1,6 +1,5 @@
 import type { InboxAssistantExchange, InboxAssistantRequest, InboxAssistantSource } from '../../src/types/inbox-assistant';
 
-import { inboxAssistantCapabilityReply } from './inbox-assistant-capabilities';
 
 export const INBOX_ASSISTANT_FOLLOWUP_SEPARATOR = '\nEarlier user question for this follow-up: ';
 const MAX_CONTEXT = 6_000;
@@ -9,6 +8,11 @@ const TOPIC_WORDS = new Set('a aabout about all an and are as at be by can check
 const FOLLOW_UP = /\b(?:it|its|that|this|these|those|them|their|same|again|earlier|previous|latest|last|revised|revision|revisions|validity|valid|expiry|expires|expired|changed|difference|differences|compared|compare)\b|\b(?:which one|what about|how about|how much|tell me more|more details|break (?:it|that) down|the (?:(?:actual|full|complete|original|updated) )?(?:quote|quotation|proposal|attachment|document|email|message|amount|price|customer))\b|^(?:read|summari[sz]e|explain|extract)\s+(?:(?:the|an)\s+)?(?:(?:actual|full|complete|original)\s+)?(?:proposal|attachment|document|email|message)\b|^(?:amount|price|total|currency|tax|gst|recipient|recipients|validity|when|who|why)\??$/i;
 const EXPLICIT_OLD_SOURCE = /\b(?:back to|return to|go back to|earlier|previous|compare|compared)\b|\bsource\s+S\d+\b|\[S\d+\]/i;
 const EXPLICIT_SOURCE_RETURN = /\b(?:back to|return to|go back to)\b|\bsource\s+S\d+\b|\[S\d+\]/i;
+/** Answered without searching or reading mail, and changed nothing. */
+function readNoMail(exchange: InboxAssistantExchange): boolean {
+  return !exchange.answer.sources.length && !exchange.answer.coverage.length && !exchange.changeSets?.length && !exchange.settingChanges?.length && !exchange.review;
+}
+
 const ACKNOWLEDGEMENT = /^(?:(?:thanks|thank you)(?:\s+(?:very much|so much|a lot))?|ok(?:ay)?(?:,?\s+thanks)?|got it|understood)[!.?]*$/i;
 const CONTENT_SUBJECTS = [
   /\b(?:quotes?|quotations?|proposals?|propsal|tenders?)\b/i,
@@ -122,10 +126,10 @@ export function buildInboxAssistantContext(
   const chatHistory = history.filter(exchange => !exchange.chatId || exchange.chatId === request.chatId);
   const cut = chatHistory.findIndex(exchange => exchange.id === request.previousExchangeId);
   if (cut < 0) return empty;
-  // App guidance and acknowledgements do not establish mailbox topics. Skip
-  // them before rebuilding the chain, including histories saved before this
-  // distinction existed, while preserving the preceding research question.
-  const researchHistory = chatHistory.slice(0, cut + 1).filter(exchange => !inboxAssistantCapabilityReply(exchange.question)
+  // A reply that read no mail (a greeting, what the agent can do) and
+  // acknowledgements do not establish mailbox topics. Skip them before
+  // rebuilding the chain, while preserving the preceding research question.
+  const researchHistory = chatHistory.slice(0, cut + 1).filter(exchange => !readNoMail(exchange)
     && !ACKNOWLEDGEMENT.test(exchange.question.trim()));
   if (!researchHistory.length) return empty;
   const selected = new Set(request.accountIds);

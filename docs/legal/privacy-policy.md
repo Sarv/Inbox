@@ -29,7 +29,7 @@ compare the policy against the app, and a mismatch fails verification.
 
 # Sarv Inbox Privacy Policy
 
-**Effective date:** 23 November 2026
+**Effective date:** 24 November 2026
 
 Sarv Inbox ("the app") is a desktop email client for macOS, Windows and Linux,
 published by Sarv Webs Private Limited ("Sarv", "we", "us"), IT-10, EPIP RIICO
@@ -80,7 +80,17 @@ password.
   creates a "Sarv Inbox" label for each of its categories in your mailbox
   (folders on providers without labels) and files categorised mail under them;
   turn this off, or remove those labels, in Settings → General → Mirror AI
-  categories to my mailbox.
+  categories to my mailbox. Changes the Inbox Agent makes for you (see 4.1)
+  are made the same way as changes you make yourself. It changes mail only
+  after you approve the change on its card, except in a conversation you have
+  set to **Approve for me**: there it makes reversible changes (marking read
+  or unread, starring, archiving, moving to Trash or a folder and back,
+  labels, categories and snoozing) without asking, up to 200 emails per
+  request, each with Undo for 24 hours. Even then, marking read, moving or
+  snoozing protected emails (such as security codes or financial records),
+  spam reports, new labels, filters and changes to how a sender is treated
+  wait for your approval, and the agent never sends mail or deletes it
+  permanently.
 - **Not with us.** Sarv does not receive, store or sync a copy of your mailbox
   or your settings, except for the features described in section 4 that you
   use.
@@ -120,9 +130,10 @@ including the Limited Use requirements.**
 ### 4.1 AI features
 
 The app's AI features (sorting mail into categories, suggesting reply drafts,
-extracting conversations, detecting signatures, filling in contact details, and
-AI search) work by sending parts of your mail to the AI provider you choose. **No
-mail is sent to any AI provider until you connect one.**
+extracting conversations, detecting signatures, filling in contact details, AI
+search, and the Inbox Agent) work by sending parts of your mail to the AI
+provider you choose. **No mail is sent to any AI provider until you connect
+one.**
 
 - **Which provider:** Sarv AI, or your own account with OpenAI, Google Gemini or
   another OpenAI-compatible service. Signing in with Sarv does not turn Sarv AI
@@ -133,12 +144,35 @@ mail is sent to any AI provider until you connect one.**
     text (the first 1,000 characters, for sorting);
   - for reply drafts, the message and the rest of its conversation;
   - your search query, for AI search;
-  - a contact's name, address and signature details, for contact details.
+  - a contact's name, address and signature details, for contact details;
+  - for the Inbox Agent, what it looks up to answer your request: your
+    question (in a follow-up, also your earlier questions in that
+    conversation, short parts of its latest answers, and the subjects and
+    senders of the emails they cited); the names and addresses of the
+    accounts you selected, and your time zone; the messages it finds or
+    lists, each with its sender, recipients, subject, date, folder, flags and
+    up to 200 characters of its text; the text of each message it reads (up to
+    12,000 characters), the messages in a conversation it opens, and the
+    excerpts of messages and attachments its in-depth search reads; the text
+    of attachments it reads; matching entries from your contacts (name,
+    address, organisation, job title, phone number and how much mail you
+    exchanged); a sender's mail history (how much they sent, how much of it
+    you read and replied to) and whether they are blocked, a VIP, trusted or
+    on the spam list; the names of your folders, labels and categories, and
+    your filters' names and rules; when it sorts many messages at once, each
+    one's sender, subject, date and up to 1,500 characters of its text, ten
+    messages at a time; and, when you ask it to draft an email from a
+    conversation, that conversation (your questions, its answers and the
+    excerpts they cite), your instructions and, for a meeting, the free times
+    it found in the app's calendar.
 - **When:** connecting a provider turns AI sorting on: from then on, new mail
   is sent to that provider as it arrives, for every connected account.
   Sorting, conversation extraction, signature detection, contact details and
   reply drafts run automatically on new mail while AI is on. AI search runs
-  when you search.
+  when you search. The Inbox Agent sends nothing until you ask it something,
+  and then only what it looks up for that request, from the accounts you
+  selected for the conversation and from your contacts (one address book for
+  all accounts); it does not go through your mail on its own.
 - **Sarv AI:** requests are processed by Sarv's AI gateway and models that run
   on servers Sarv operates in India. Sarv does not keep prompts or responses
   after answering them, and does not use them to train models.
@@ -152,8 +186,9 @@ mail is sent to any AI provider until you connect one.**
   sorting (AI Assist) and reply drafts (Draft replies automatically) under Email
   Agent, conversation extraction under Conversation Mode, and signature
   detection under Signatures. Contact details and AI search run whenever a
-  provider is connected. Suggested drafts are saved to your mailbox's Drafts
-  folder and are never sent without you.
+  provider is connected, and the Inbox Agent whenever you ask it something.
+  Suggested drafts are saved to your mailbox's Drafts folder and are never
+  sent without you.
 
 If you enable **web research** for drafts, the search query goes to Tavily
 (api.tavily.com) using your own Tavily key. It is off by default.
@@ -353,6 +388,20 @@ app.
   Google you can revoke access with the link below. Microsoft has no way for an
   app to revoke its own access, so for Outlook accounts also use the link below.
   Removing a Sarv account also stops Sarv AI if it uses that same sign-in.
+- **Inbox Agent conversations:** your questions, the agent's answers (with
+  short excerpts of the emails they cite), what it did, and its change cards
+  are kept on your device in the app's own encrypted database, separate from
+  each account's mail database, until you delete the conversation. **Delete
+  conversation**, beside it in the Inbox Agent's list of conversations,
+  removes it together with the earlier versions kept when you edit a
+  question. Removing an account does not delete the conversations that used
+  it. So that a card can still be approved or undone after the app restarts,
+  the app also keeps a record of each change it can still act on (which
+  emails, their state before and after, and a filter's or a sender's earlier
+  settings) in the same database, only for as long as the change can be
+  approved (30 minutes) or undone (24 hours); after that the app no longer
+  uses it and removes it the next time it updates the record. Deleting a
+  conversation removes its changes from the record too.
 - **Revoke access:** you can revoke the app's access at any time, whether or not
   it is installed:
   - Google: <https://myaccount.google.com/permissions>

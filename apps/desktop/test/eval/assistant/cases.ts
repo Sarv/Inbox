@@ -6,17 +6,20 @@
  * evaluation fails when a listed case starts passing so that it gets promoted.
  * Never weaken a case here to make it pass: fix the agent, or list the gap.
  *
- * `route` is the path that should handle the request:
+ * `route` says what kind of request it is, as the retired router named its
+ * paths (kept so the cases read as before; the agent has no router):
  *   search        look in the mailbox and answer from it
  *   review        review unread mail and suggest what to mark as read
  *   mail_command  a scoped "mark X as read / unread"
- *   capability    answered in chat without searching (what the agent can do, a greeting, a thank-you, a polite "I can't do that here")
- *   refused       the host asks for what it needs ("which emails?") and changes nothing
- *   structured    answered from mailbox state, not keyword search (counts, unread, starred). Not built yet.
- *   draft         writes a reply. Cannot be asked for in chat yet.
+ *   capability    answered in chat without searching (what the agent can do, a greeting, a thank-you)
+ *   refused       nothing says which emails: change nothing, ask
+ *   structured    answered from mailbox state, not keyword search (counts, unread, starred)
+ *   draft         writes a reply
+ * A case with `gold` is scored as a question; every other case is a task in
+ * agent-tasks.ts.
  *
  * `gold` is the email that holds the answer and the exact words that must
- * reach the model. It is checked in the evidence of the answer prompt, after
+ * reach the model. It is checked in what the tools showed the model, after
  * every host filter and excerpt limit, because mail that was found and then
  * dropped or trimmed is still a miss.
  *

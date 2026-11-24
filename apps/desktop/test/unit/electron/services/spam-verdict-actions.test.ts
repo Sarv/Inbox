@@ -2,7 +2,7 @@ import { getLogLevel, setLogLevel, setLogSink, type EmailRecord, type FolderReco
 import { describe, expect, it, vi } from 'vitest';
 
 import { captureLogs } from '../../../../../../packages/core/src/test-support/log-capture';
-import { applyUserSpamVerdict, senderDomainOf, trustSender, type VerdictStorage } from '../../../../electron/services/spam-verdict-actions';
+import { applyUserSpamVerdict, revertUserSpamVerdict, senderDomainOf, trustSender, type VerdictStorage } from '../../../../electron/services/spam-verdict-actions';
 
 /**
  * Report spam / Not spam, the one implementation behind three doors.
@@ -259,3 +259,64 @@ describe('trust — "I trust this sender" and its undoing', () => {
   });
 });
 
+
+// The Inbox Agent's Undo of a verdict. A regression here is an Undo that
+// leaves mail in Spam, loses a verdict the message had, leaves the sender
+// listed (their mail keeps going to Spam), or moves only the local copy.
+describe('revertUserSpamVerdict', () => {
+  const before = { emailId: 'e1', tags: '|INBOX|', folderId: 'f-inbox', verdict: null };
+
+  it('moves the message back, drops only the verdict\'s tag, restores the verdict and the sender lists, and queues the server move', async () => {
+    const h = harness(email({ folderId: 'f-spam', tags: '|spam|Spam|read|', uid: 77 }));
+    const out = await revertUserSpamVerdict(h.deps, { ...before, sender: { address: 'spammer@evil.example', spammer: false, trusted: true } });
+    expect(out).toMatchObject({ success: true, moved: true });
+    // read stays: a flag changed since the verdict is the user's.
+    expect(h.storage.updateEmail).toHaveBeenCalledWith('e1', { tags: '|read|INBOX|', folderId: 'f-inbox' });
+    expect(h.calls).toEqual(expect.arrayContaining(['verdict e1 null', 'removeSpammer spammer@evil.example', 'trust spammer@evil.example', 'recount']));
+    expect(h.queue.move).toHaveBeenCalledWith('Spam', 77, 'INBOX');
+    // Undo is never reported anywhere.
+    expect(h.reports).toEqual([]);
+  });
+
+  it('puts back a "not spam" verdict: spam tag, folder, earlier verdict and spammer listing', async () => {
+    const h = harness(email({ folderId: 'f-inbox', tags: '|INBOX|', uid: 9 }));
+    const out = await revertUserSpamVerdict(h.deps, { emailId: 'e1', tags: '|spam|Spam|', folderId: 'f-spam', verdict: 'spam',
+      sender: { address: 'spammer@evil.example', spammer: true, trusted: false } });
+    expect(out.success).toBe(true);
+    expect(h.storage.updateEmail).toHaveBeenCalledWith('e1', { tags: '|spam|Spam|', folderId: 'f-spam' });
+    expect(h.calls).toEqual(expect.arrayContaining(['verdict e1 spam', 'addSpammer spammer@evil.example', 'untrust spammer@evil.example']));
+    expect(h.queue.move).toHaveBeenCalledWith('INBOX', 9, 'Spam');
+  });
+
+  it('restores a verdict on mail that never moved (no spam folder) without a server move or a sender change when none was given', async () => {
+    const h = harness(email({ folderId: 'f-inbox', tags: '|INBOX|spam|' }), [INBOX, ARCHIVE]);
+    const out = await revertUserSpamVerdict(h.deps, { ...before, verdict: 'ham' });
+    expect(out).toMatchObject({ success: true, moved: false });
+    expect(h.storage.updateEmail).toHaveBeenCalledWith('e1', { tags: '|INBOX|', folderId: 'f-inbox' });
+    expect(h.calls).toContain('verdict e1 ham');
+    expect(h.calls.some(call => /Spammer|trust/.test(call))).toBe(false);
+    expect(h.queue.move).not.toHaveBeenCalled();
+  });
+
+  // Breaks: an Undo right after the verdict moves only the local copy, and the next sync puts the mail back in Spam.
+  it('refuses to move a message whose new server UID sync has not reported yet', async () => {
+    const h = harness(email({ folderId: 'f-spam', tags: '|spam|Spam|', uid: 0 }));
+    expect(await revertUserSpamVerdict(h.deps, before)).toEqual({ success: false, error: 'Not synced yet', moved: false });
+    expect(h.storage.updateEmail).not.toHaveBeenCalled();
+    // Offline with no queue at all, the local move is all there is, as for the verdict itself.
+    const offline = harness(email({ folderId: 'f-spam', tags: '|spam|Spam|', uid: 0 }));
+    expect((await revertUserSpamVerdict({ ...offline.deps, queue: null }, before)).success).toBe(true);
+  });
+
+  it('fails cleanly for a message or folder that is gone, and survives a failing recount, sender list or server move', async () => {
+    expect(await revertUserSpamVerdict(harness(null).deps, before)).toMatchObject({ success: false, error: 'Email not found' });
+    expect(await revertUserSpamVerdict(harness(email()).deps, { ...before, folderId: 'f-gone' })).toMatchObject({ success: false, error: 'Its folder no longer exists' });
+    const h = harness(email({ folderId: 'f-spam', tags: '|spam|Spam|', uid: 5 }));
+    vi.mocked(h.storage.recalculateFolderCounts).mockRejectedValue(new Error('busy'));
+    vi.mocked(h.storage.removeSpammer).mockRejectedValue(new Error('locked'));
+    h.queue.move.mockRejectedValue(new Error('offline'));
+    const out = await revertUserSpamVerdict(h.deps, { ...before, sender: { address: 'a@b.example', spammer: false, trusted: false } });
+    expect(out.success).toBe(true);
+    await Promise.resolve();
+  });
+});

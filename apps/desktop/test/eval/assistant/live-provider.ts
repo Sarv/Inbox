@@ -1,62 +1,65 @@
-import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { AIProviderConfig } from '@sarvinbox/core';
 
-import {
-  answerInboxAssistant, buildInboxAssistantAnswerPrompt, INBOX_ASSISTANT_OUTPUT_TOKENS, inboxAssistantAnswerPass, planInboxAssistantSearch,
-} from '../../../electron/services/inbox-assistant-answer';
-import { researchInboxAssistant } from '../../../electron/services/inbox-assistant-retrieval';
-import { callInboxAssistantAI, INBOX_ASSISTANT_SYSTEM_PROMPT } from '../../../electron/services/inbox-assistant-usage';
-import type {
-  InboxAssistantAccountCoverage, InboxAssistantAIPurpose, InboxAssistantAnswerPassDiagnostics, InboxAssistantEvidence, InboxAssistantRunDiagnostics,
-} from '../../../src/types/inbox-assistant';
-import type { AssistantHarness } from '../../helpers/assistant-harness';
+import type { InboxAssistantAIPurpose, InboxAssistantExchange } from '../../../src/types/inbox-assistant';
+import { scriptedPurpose, type AgentReply, type AssistantHarness } from '../../helpers/assistant-harness';
 
 import type { EvalCase } from './cases';
-import { NOW_MS, TIME_ZONE } from './mailbox';
-import { squash } from './seed';
+import { createEvalHarness, squash } from './seed';
 
 /**
- * The opt-in half of the evaluation: the same questions, asked of a REAL model.
+ * The opt-in half of the evaluation: the same questions, asked of a REAL model
+ * driving the real Inbox Agent.
  *
- * The deterministic run (assistant-eval.test.ts) shows what the host does with
- * a refused plan and with an ideal one. It cannot show what a particular model
- * actually returns: whether its plan is accepted, whether it quotes exactly,
- * how often the repair call is needed. This runs each search case through the
- * production plan, search and answer functions with the production system
- * prompt, output limits and provider call path, against the seeded mailbox
- * only, and saves every raw reply.
+ * The deterministic run (agent-eval.test.ts) shows what the host does for a
+ * model that calls the right tools. It cannot show what a particular model
+ * actually does: whether it calls deep_search or guesses, whether it quotes
+ * exactly, whether it needs the JSON protocol. This runs each retrieval case
+ * through the production agent loop, tools, planner and provider call path
+ * against the seeded mailbox only, and saves every model reply.
  *
- * The saved replies are then worth more than the run: replayed through the
- * verifier in CI (recordings.test.ts) they are fixtures of what real models
- * really write, which hand-written test replies are not.
+ * The saved replies are then worth more than the run. Replayed in CI
+ * (recordings.test.ts), the model's own turns drive the CURRENT host on the
+ * same mailbox, so a recording is a fixture of what a real model really does:
+ * a change to a tool, a result format or the grounding check that would turn
+ * a real model's correct answer into a wrong one shows up there.
+ *
+ * Turns are recorded from the OpenAI-compatible wire format (OpenAI, Sarv,
+ * custom and local endpoints). A Gemini run is scored but its turns are not
+ * saved, so it has no replay.
  *
  * It never runs in CI and never gates anything. It prints counts.
  */
 
+export interface LiveOutcome {
+  /** The words that answer the question reached the model in a tool result. */
+  needleShown: boolean;
+  /** The words that answer the question are in the verified answer. */
+  needleInAnswer: boolean;
+  sourceStatus: string;
+  /** The emails the answer cites, by id. */
+  cited: string[];
+  /** Tool calls by name, the answer excluded. */
+  tools: Record<string, number>;
+}
+
 export interface LiveRecording {
-  version: 1;
+  version: 2;
   case: string;
   run: number;
   model: string;
   recordedAt: string;
-  /** Identifies the answer prompt's wording. A recording made under other wording is still a valid verifier fixture. */
-  promptHash: string;
   question: string;
   needle: string;
-  replies: Array<{ purpose: InboxAssistantAIPurpose; raw: string }>;
-  /** Exactly what the verifier was given for the first answer, so a replay is exact. */
-  sources: InboxAssistantEvidence[];
-  coverage: InboxAssistantAccountCoverage[];
-  diagnostics: InboxAssistantRunDiagnostics;
-  /** What the verifier made of the first answer when it was recorded. */
-  firstPass: InboxAssistantAnswerPassDiagnostics | null;
-  /** The words that answer the question reached the model. */
-  needleInEvidence: boolean;
-  /** The words that answer the question are in a verified fact or its quotes. */
-  needleInAnswer: boolean;
+  /** The model's turns in the agent loop, in order. Empty when they could not be read (Gemini wire format). */
+  turns: AgentReply[];
+  /** Its replies to the planner and the classifier, in order. */
+  replies: Array<{ purpose: InboxAssistantAIPurpose; raw: string } | { purpose: InboxAssistantAIPurpose; status: number }>;
+  outcome: LiveOutcome | null;
+  /** The agent's own diagnostics for the run: protocol, steps, stop reason (content-free). */
+  agent?: unknown;
   error?: string;
 }
 
@@ -64,19 +67,12 @@ export interface LiveSummary {
   runs: number;
   planFromModel: number;
   planFallbackBy: Record<string, number>;
-  needleInEvidence: number;
-  answersMalformed: number;
-  factsReturned: number;
-  factsVerified: number;
-  rejectedBy: Record<string, number>;
-  repairsRun: number;
-  factsRecovered: number;
+  usedDeepSearch: number;
+  jsonProtocol: number;
+  needleShown: number;
   needleInAnswer: number;
+  verified: number;
   errors: number;
-}
-
-export function inboxAssistantPromptHash(): string {
-  return createHash('sha256').update(buildInboxAssistantAnswerPrompt('', [], [])).digest('hex').slice(0, 16);
 }
 
 export function modelSlug(model: string): string {
@@ -87,67 +83,109 @@ function tally(target: Record<string, number>, key: string, amount = 1): void {
   target[key] = (target[key] ?? 0) + amount;
 }
 
+interface WireMessage { role: string; content: string | null }
+
+/** One request and response, read as the harness's scripted endpoint reads them. */
+function readExchange(request: string, status: number, response: string): { kind: 'agent'; reply: AgentReply; messages: WireMessage[] } | { kind: 'ai'; purpose: InboxAssistantAIPurpose; reply: LiveRecording['replies'][number] } | undefined {
+  let body: { messages?: WireMessage[] };
+  try { body = JSON.parse(request) as typeof body; } catch { return undefined; }
+  if (!Array.isArray(body.messages)) return undefined;
+  const agent = typeof body.messages[0]?.content === 'string' && body.messages[0].content.startsWith('You are Inbox Agent inside');
+  let message: { content?: string | null; tool_calls?: Array<{ function: { name: string; arguments: string } }> } | undefined;
+  let finish: string | undefined;
+  try {
+    const parsed = JSON.parse(response) as { choices?: Array<{ message?: typeof message; finish_reason?: string }> };
+    message = parsed.choices?.[0]?.message;
+    finish = parsed.choices?.[0]?.finish_reason;
+  } catch { /* An error body: only its status is kept. */ }
+  if (agent) {
+    // A provider's error body is its own text and may echo the prompt: keep the status only.
+    const reply: AgentReply = status !== 200 || !message ? { status }
+      : message.tool_calls?.length ? { tools: message.tool_calls.map(call => ({ name: call.function.name, arguments: call.function.arguments })), ...(message.content ? { text: message.content } : {}) }
+        : { text: message.content ?? '', ...(finish && finish !== 'stop' ? { finish } : {}) };
+    return { kind: 'agent', reply, messages: body.messages };
+  }
+  const purpose = scriptedPurpose(body.messages[1]?.content ?? '');
+  return { kind: 'ai', purpose, reply: status === 200 && typeof message?.content === 'string' ? { purpose, raw: message.content } : { purpose, status } };
+}
+
+/** What a finished run shows: the same measure for a live run and its replay. */
+export function liveOutcome(exchange: InboxAssistantExchange, shown: string[], needle: string): LiveOutcome {
+  const tools: Record<string, number> = {};
+  for (const [name, count] of Object.entries(exchange.diagnostics?.agent?.toolCalls ?? {})) if (name !== 'answer') tools[name] = count;
+  return {
+    needleShown: squash(shown.join('\n')).includes(needle),
+    needleInAnswer: squash(exchange.answer.text).includes(needle),
+    sourceStatus: exchange.answer.sourceStatus ?? 'none',
+    cited: [...new Set(exchange.answer.sources.map(source => source.emailId))].sort(),
+    tools,
+  };
+}
+
+/** The tool results in the last request the model received: everything a tool showed it in this run. */
+export function shownToModel(messages: WireMessage[]): string[] {
+  return messages.filter(message => message.role === 'tool' || (message.role === 'user' && (message.content ?? '').startsWith('Result T'))).map(message => message.content ?? '');
+}
+
 export async function recordLiveProvider(options: {
-  harness: AssistantHarness;
   config: AIProviderConfig;
   cases: readonly EvalCase[];
-  /** Local models vary run to run: three runs show whether a result is stable. */
+  /** Models vary run to run: three runs show whether a result is stable. */
   runs: number;
   outDir: string;
   now?: () => Date;
 }): Promise<{ summary: LiveSummary; recordings: LiveRecording[] }> {
-  const { harness, config } = options;
-  const dir = join(options.outDir, modelSlug(config.model));
+  const dir = join(options.outDir, modelSlug(options.config.model));
   await mkdir(dir, { recursive: true });
-  const summary: LiveSummary = { runs: 0, planFromModel: 0, planFallbackBy: {}, needleInEvidence: 0, answersMalformed: 0, factsReturned: 0,
-    factsVerified: 0, rejectedBy: {}, repairsRun: 0, factsRecovered: 0, needleInAnswer: 0, errors: 0 };
+  const summary: LiveSummary = { runs: 0, planFromModel: 0, planFallbackBy: {}, usedDeepSearch: 0, jsonProtocol: 0, needleShown: 0, needleInAnswer: 0, verified: 0, errors: 0 };
   const recordings: LiveRecording[] = [];
-  for (const item of options.cases) {
-    if (!item.gold) continue;
-    for (let run = 1; run <= options.runs; run++) {
-      const replies: LiveRecording['replies'] = [];
-      const callAI = async (prompt: string, purpose: InboxAssistantAIPurpose = 'answer'): Promise<string> => {
-        const raw = await callInboxAssistantAI({ ...config, maxOutputTokens: INBOX_ASSISTANT_OUTPUT_TOKENS[purpose === 'plan' ? 'plan' : 'answer'] },
-          INBOX_ASSISTANT_SYSTEM_PROMPT, prompt);
-        replies.push({ purpose, raw });
-        return raw;
-      };
-      const diagnostics: InboxAssistantRunDiagnostics = { version: 1, route: 'search' };
-      const recording: LiveRecording = { version: 1, case: item.id, run, model: config.model, recordedAt: (options.now?.() ?? new Date()).toISOString(),
-        promptHash: inboxAssistantPromptHash(), question: item.ask, needle: item.gold.needle, replies, sources: [], coverage: [], diagnostics,
-        firstPass: null, needleInEvidence: false, needleInAnswer: false };
-      try {
-        const plan = await planInboxAssistantSearch(item.ask, callAI, { nowMs: NOW_MS, timeZone: TIME_ZONE, diagnostics });
-        const research = await researchInboxAssistant(harness.accounts, plan, harness.deps, undefined, { diagnostics });
-        recording.sources = research.evidence.map(source => ({ ...source, dateTimeZone: TIME_ZONE }));
-        recording.coverage = research.coverage;
-        recording.needleInEvidence = squash(recording.sources.map(source => source.text).join('\n')).includes(item.gold.needle);
-        const grounded = await answerInboxAssistant(item.ask, recording.sources, research.coverage, callAI, undefined, plan.scope, diagnostics);
-        const first = replies.find(reply => reply.purpose === 'answer');
-        recording.firstPass = first ? inboxAssistantAnswerPass(first.raw, recording.sources, research.coverage) : null;
-        recording.needleInAnswer = squash(grounded.facts.flatMap(fact => [fact.text, ...fact.quotes.map(quote => quote.text)]).join('\n')).includes(item.gold.needle);
-      } catch (error) {
-        // A provider failure is a result too. Only its class is kept: the message is the endpoint's own text.
-        recording.error = error instanceof Error ? error.name : typeof error;
-        summary.errors++;
+  let recording: LiveRecording | undefined;
+  let lastMessages: WireMessage[] = [];
+  const harness: AssistantHarness = await createEvalHarness(undefined, {
+    provider: {
+      config: options.config,
+      onExchange: ({ request, status, response }) => {
+        const read = readExchange(request, status, response);
+        if (!read || !recording) return;
+        if (read.kind === 'agent') { recording.turns.push(read.reply); lastMessages = read.messages; }
+        else recording.replies.push(read.reply);
+      },
+    },
+  });
+  try {
+    for (const item of options.cases) {
+      if (!item.gold) continue;
+      for (let run = 1; run <= options.runs; run++) {
+        harness.newChat();
+        lastMessages = [];
+        recording = { version: 2, case: item.id, run, model: options.config.model, recordedAt: (options.now?.() ?? new Date()).toISOString(),
+          question: item.ask, needle: item.gold.needle, turns: [], replies: [], outcome: null };
+        try {
+          const exchange = await harness.ask(item.ask);
+          recording.outcome = liveOutcome(exchange, shownToModel(lastMessages), item.gold.needle);
+          recording.agent = exchange.diagnostics?.agent;
+          const plan = exchange.diagnostics?.plan;
+          if (plan?.source === 'model') summary.planFromModel++;
+          else if (plan) tally(summary.planFallbackBy, plan.failure ?? 'unknown');
+          if (exchange.diagnostics?.agent?.mode === 'json') summary.jsonProtocol++;
+        } catch (error) {
+          // A provider failure is a result too. Only its class is kept: the message is the endpoint's own text.
+          recording.error = error instanceof Error ? error.name : typeof error;
+          summary.errors++;
+        }
+        // The Gemini wire format is not read: such a run has no turns and no replay.
+        if (options.config.type === 'gemini') recording.turns = [];
+        summary.runs++;
+        if (recording.outcome?.tools.deep_search) summary.usedDeepSearch++;
+        if (recording.outcome?.needleShown) summary.needleShown++;
+        if (recording.outcome?.needleInAnswer) summary.needleInAnswer++;
+        if (recording.outcome?.sourceStatus === 'verified') summary.verified++;
+        recordings.push(recording);
+        await writeFile(join(dir, `${item.id}.${run}.json`), `${JSON.stringify(recording, null, 2)}\n`);
       }
-      summary.runs++;
-      if (diagnostics.plan?.source === 'model') summary.planFromModel++;
-      else if (diagnostics.plan) tally(summary.planFallbackBy, diagnostics.plan.failure ?? 'unknown');
-      if (recording.needleInEvidence) summary.needleInEvidence++;
-      const answer = diagnostics.answer;
-      if (answer?.first?.format === 'malformed') summary.answersMalformed++;
-      for (const pass of [answer?.first, answer?.repair?.pass]) {
-        if (!pass) continue;
-        summary.factsReturned += pass.factsReturned;
-        for (const [reason, amount] of Object.entries(pass.rejected)) tally(summary.rejectedBy, reason, amount);
-      }
-      summary.factsVerified += answer?.factsFinal ?? 0;
-      if (answer?.repair && !answer.repair.skipped) { summary.repairsRun++; summary.factsRecovered += answer.repair.factsRecovered; }
-      if (recording.needleInAnswer) summary.needleInAnswer++;
-      recordings.push(recording);
-      await writeFile(join(dir, `${item.id}.${run}.json`), `${JSON.stringify(recording, null, 2)}\n`);
     }
+  } finally {
+    await harness.close();
   }
   return { summary, recordings };
 }
@@ -158,10 +196,9 @@ export function formatLiveSummary(model: string, summary: LiveSummary): string {
   return [
     `[assistant-eval:live] ${model}: ${summary.runs} runs`,
     `  plan accepted from the model   ${summary.planFromModel}/${summary.runs}   (fallback because: ${reasons(summary.planFallbackBy)})`,
-    `  answer reached the model       ${summary.needleInEvidence}/${summary.runs}`,
-    `  answer in a verified statement ${summary.needleInAnswer}/${summary.runs}`,
-    `  statements returned ${summary.factsReturned}, verified ${summary.factsVerified}   (rejected because: ${reasons(summary.rejectedBy)})`,
-    `  replies that broke the JSON contract ${summary.answersMalformed}; repair calls ${summary.repairsRun}, statements recovered ${summary.factsRecovered}`,
+    `  called deep_search             ${summary.usedDeepSearch}/${summary.runs}   (JSON protocol: ${summary.jsonProtocol})`,
+    `  answer reached the model       ${summary.needleShown}/${summary.runs}`,
+    `  answer in the verified reply   ${summary.needleInAnswer}/${summary.runs}   (replies with verified sources: ${summary.verified})`,
     `  runs that failed outright      ${summary.errors}`,
   ].join('\n');
 }
@@ -178,10 +215,26 @@ export async function loadRecordings(root: string): Promise<Array<{ file: string
   return result;
 }
 
-/** What the verifier makes of a recording's first answer NOW. Compare with `firstPass`. */
-export function replayRecording(recording: LiveRecording): InboxAssistantAnswerPassDiagnostics | null {
-  const first = recording.replies.find(reply => reply.purpose === 'answer');
-  return first ? inboxAssistantAnswerPass(first.raw, recording.sources, recording.coverage) : null;
+/**
+ * Drive the current host with a recording's model turns and replies, on the
+ * same seeded mailbox, and measure the outcome as the live run did. Null for a
+ * recording with nothing to replay (no turns, or a run that failed).
+ */
+export async function replayRecording(harness: AssistantHarness, recording: LiveRecording): Promise<LiveOutcome | null> {
+  if (recording.version !== 2 || !recording.turns.length || !recording.outcome) return null;
+  let turn = 0;
+  harness.newChat();
+  harness.agentTurns.length = 0;
+  // Past the recorded turns the replay answers with nothing, so it ends rather than loops.
+  harness.agent = () => recording.turns[turn++] ?? { tools: [{ name: 'answer', arguments: { facts: [] } }] };
+  const queues = new Map<string, LiveRecording['replies']>();
+  for (const reply of recording.replies) queues.set(reply.purpose, [...(queues.get(reply.purpose) ?? []), reply]);
+  harness.ai = (_prompt, purpose) => {
+    const next = queues.get(purpose)?.shift();
+    return !next ? { status: 400 } : 'raw' in next ? next.raw : { status: next.status };
+  };
+  const exchange = await harness.ask(recording.question);
+  return liveOutcome(exchange, shownToModel(harness.agentTurns.at(-1)?.messages ?? []), recording.needle);
 }
 
 /** The provider to evaluate, from the environment. Undefined when the run was not asked for. */

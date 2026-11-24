@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 
 import type { InboxAssistantActionMode, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantExchange, InboxAssistantRunRecord, InboxAssistantUsage } from '../../src/types/inbox-assistant';
+import { APPROVE_FOR_ME_SCOPE } from '../../src/utils/inbox-assistant-approval';
 import { readInboxAssistantAIWorkload } from '../../src/utils/inbox-assistant-workload';
 
 import { getCoreDb } from './core-db';
@@ -15,7 +16,15 @@ const REWIND_PREFIX = 'inbox-assistant-rewind-v1:';
 const REWIND_AUDIT_PREFIX = 'inbox-assistant-rewind-audit-v1:';
 const NEW_TITLE = 'New chat';
 type HistoryDb = Pick<Database.Database, 'prepare' | 'transaction'>;
-interface StoredSummary extends InboxAssistantChatSummary { customTitle?: boolean }
+interface StoredSummary extends InboxAssistantChatSummary {
+  customTitle?: boolean;
+  /**
+   * The meaning of "Approve for me" (APPROVE_FOR_ME_SCOPE) the user chose it
+   * for in this chat. Index-only: never in a chat body or an IPC result. An
+   * 'approve_for_me' without the current scope loads as 'review'.
+   */
+  approvalScope?: string;
+}
 interface ChatIndex { version: 2; actionModeVersion?: 2; chats: StoredSummary[]; activeChatId: string | null }
 interface RewindSnapshot { version: 1; chat: InboxAssistantChat }
 
@@ -74,7 +83,7 @@ function validRuns(value: unknown): value is InboxAssistantRunRecord[] | undefin
     && (item.exchangeId === undefined || typeof item.exchangeId === 'string') && (item.error === undefined || typeof item.error === 'string')));
 }
 
-function publicSummary({ customTitle: _customTitle, ...summary }: StoredSummary): InboxAssistantChatSummary {
+function publicSummary({ customTitle: _customTitle, approvalScope: _approvalScope, ...summary }: StoredSummary): InboxAssistantChatSummary {
   return { ...summary, pinned: summary.pinned ?? false };
 }
 
@@ -94,6 +103,23 @@ function withSafeChatUsage(chat: InboxAssistantChat): InboxAssistantChat {
     ...(chat.runs ? { runs: chat.runs.map(run => run.usage ? { ...run, usage: withSafeWorkloads(run.usage) } : run) } : {}),
     ...(chat.usage ? { usage: withSafeWorkloads(chat.usage) } : {}),
   };
+}
+
+/**
+ * Keep "Approve for me" only where the user chose it for what it means now.
+ * 1.4.11 saved the same value when it meant marking reviewed mail read; the
+ * agent's version archives, moves to Trash and more. Any grant without the
+ * current scope becomes "Ask for approval" (the user can turn it on again,
+ * knowingly), and a scope record without a grant is dropped, so an older
+ * build's re-enable cannot inherit it. Answers whether anything changed.
+ */
+function normalizeApprovals(chats: StoredSummary[]): boolean {
+  let changed = false;
+  for (const chat of chats) {
+    if (chat.actionMode === 'approve_for_me' && chat.approvalScope !== APPROVE_FOR_ME_SCOPE) { chat.actionMode = 'review'; changed = true; }
+    if (chat.approvalScope !== undefined && chat.actionMode !== 'approve_for_me') { delete chat.approvalScope; changed = true; }
+  }
+  return changed;
 }
 
 /** One encrypted blob per chat; the lightweight index never contains questions, answers or source excerpts. */
@@ -140,17 +166,24 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
         || (stored.activeChatId !== null && !stored.chats.some(chat => chat.id === stored.activeChatId))) {
         throw new Error('The saved Inbox Agent chat list could not be read. Its stored data has been preserved.');
       }
+      let changed = false;
       if (stored.actionModeVersion === undefined) {
         for (const chat of stored.chats) {
           const legacyMode = chat.actionMode as string | undefined;
-          // Earlier approve_for_me meant one request. Never turn that old
-          // delegation into persistent approval without a fresh user choice.
-          if (legacyMode === 'approve_for_me') chat.actionMode = 'review';
-          else if (legacyMode === 'auto') chat.actionMode = 'approve_for_me';
+          // Before 1.4.11, approve_for_me meant one request and Auto was the
+          // review's delegation. Neither is consent to what Approve for me
+          // does now, so both ask first until the user chooses again.
+          if (legacyMode === 'approve_for_me' || legacyMode === 'auto') chat.actionMode = 'review';
         }
+        // The marker stays 2: 1.4.11 refuses any other, so a downgraded app could not read the chat list.
         stored.actionModeVersion = 2;
-        writeBlob(INDEX_KEY, stored);
+        changed = true;
       }
+      // In the same transaction: a failed write leaves nothing half-saved and
+      // throws, so no chat is served as delegating meanwhile. Order, titles,
+      // pins and the active chat are untouched; chat bodies are not rewritten.
+      if (normalizeApprovals(stored.chats)) changed = true;
+      if (changed) writeBlob(INDEX_KEY, stored);
       return stored;
     }
     const legacy = readBlob(LEGACY_KEY);
@@ -231,6 +264,9 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
         if (!summary) throw new Error('This Inbox Agent chat is no longer available.');
         if (changes.pinned !== undefined) summary.pinned = changes.pinned;
         if (changes.actionMode !== undefined) summary.actionMode = changes.actionMode;
+        // The user's choice now, for what Approve for me means now (see normalizeApprovals).
+        if (changes.actionMode === 'approve_for_me') summary.approvalScope = APPROVE_FOR_ME_SCOPE;
+        else if (changes.actionMode === 'review') delete summary.approvalScope;
         summary.updatedAt = Math.max(Date.now(), summary.updatedAt + 1);
         // Pin state is index metadata only. Never load or rewrite answers.
         writeBlob(INDEX_KEY, current);

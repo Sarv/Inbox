@@ -334,3 +334,44 @@ describe('parseSearchQuery: tag: operator', () => {
     expect(result.query.textQuery).toBe('netflix');
   });
 });
+
+// A reasoning model can spend its whole token budget thinking and return no
+// text (finish_reason "length"). Contact enrichment asked for 1000 tokens and
+// got nothing back, every time, from such a model. What breaks if this goes
+// red: those calls fail again, or the empty-reply log writes the model's
+// reasoning (which quotes the mail it was given) to app.log.
+describe('an empty reply at the token limit', () => {
+  const reply = (content: string, finish: string, extra: Record<string, unknown> = {}) => ({
+    ok: true, status: 200, statusText: '', contentType: 'application/json',
+    body: JSON.stringify({ choices: [{ message: { content, ...extra }, finish_reason: finish }], usage: { completion_tokens: 1000 } }),
+  });
+  const proxy = () => (globalThis as any).window.electronAPI.aiProxy.fetch as ReturnType<typeof vi.fn>;
+  const budgets = () => proxy().mock.calls.map(call => JSON.parse(call[0].body).max_completion_tokens);
+
+  it('is retried once with twice the budget, and the answer used', async () => {
+    addProvider('openai', 'key-123', 'reasoning-model');
+    proxy().mockResolvedValueOnce(reply('', 'length', { reasoning_content: 'the secret invoice says 4,000' })).mockResolvedValueOnce(reply('{"ok":true}', 'stop'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await makeAICompletion({ systemPrompt: 's', userPrompt: 'u', maxTokens: 1000 })).toBe('{"ok":true}');
+    expect(budgets()).toEqual([1000, 2000]);
+    const written = [...warn.mock.calls, ...error.mock.calls, ...log.mock.calls].flat().join('\n');
+    expect(written).not.toContain('secret invoice');
+  });
+
+  it('is retried only once, and never for an empty reply that did not hit the limit', async () => {
+    addProvider('openai', 'key-123', 'reasoning-model');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    proxy().mockResolvedValue(reply('', 'length', { reasoning_content: 'private thoughts' }));
+    expect(await makeAICompletion({ systemPrompt: 's', userPrompt: 'u', maxTokens: 1000 })).toBe('');
+    expect(budgets()).toEqual([1000, 2000]);
+    proxy().mockReset().mockResolvedValue(reply('', 'stop'));
+    expect(await makeAICompletion({ systemPrompt: 's', userPrompt: 'u', maxTokens: 1000 })).toBe('');
+    expect(budgets()).toEqual([1000]);
+    // A budget already at the ceiling is not grown.
+    proxy().mockReset().mockResolvedValue(reply('', 'length'));
+    await makeAICompletion({ systemPrompt: 's', userPrompt: 'u', maxTokens: 32_000 });
+    expect(budgets()).toEqual([32_000]);
+  });
+});

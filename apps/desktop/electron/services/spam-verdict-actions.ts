@@ -18,6 +18,7 @@ import {
   createLogger,
   failureCause,
   findFolderByType,
+  hasTag,
   removeTag,
   type EmailRecord,
   type FolderRecord,
@@ -172,6 +173,72 @@ export async function applyUserSpamVerdict(deps: VerdictDeps, emailId: string, v
   }
 
   deps.report?.({ domain: senderDomainOf(email.fromAddress), ip: email.originIp ?? null, verdict });
+  return { success: true, email, moved };
+}
+
+/** What a verdict's Undo restores for one message (see revertUserSpamVerdict). */
+export interface VerdictRevert {
+  emailId: string;
+  /** The message's tags and folder before the verdict. */
+  tags: string;
+  folderId: string;
+  /** Its stored verdict before. */
+  verdict: SpamUserVerdict | null;
+  /** The sender's listing before, when the verdict changed it. */
+  sender?: { address: string; spammer: boolean; trusted: boolean };
+}
+
+/**
+ * Put a message back as it was before a verdict (the Inbox Agent's Undo): its
+ * spam tag and folder, its stored verdict, and its sender's spammer and trusted
+ * listing. Only the verdict's own tag moves back; flags changed since (read,
+ * starred) stay as they are now. A report already sent to the reputation
+ * service cannot be taken back, and is not.
+ */
+export async function revertUserSpamVerdict(deps: VerdictDeps, row: VerdictRevert): Promise<VerdictOutcome> {
+  const { storage } = deps;
+  const email = await storage.getEmail(row.emailId);
+  if (!email) return { success: false, error: 'Email not found', moved: false };
+  const folders = await storage.getFolders();
+  const source = folders.find((f) => f.id === email.folderId) ?? null;
+  const dest = folders.find((f) => f.id === row.folderId) ?? null;
+  if (!dest) return { success: false, error: 'Its folder no longer exists', moved: false };
+  // A move back needs the server's UID for where the message is now, which a
+  // recent move has not reported yet. Moving it here alone would leave the
+  // server copy behind (and the next sync undoing the undo), so refuse until
+  // sync has caught up; Undo can be tried again then.
+  if (email.folderId !== row.folderId && deps.queue && !(email.uid > 0)) {
+    return { success: false, error: 'Not synced yet', moved: false };
+  }
+
+  const current = email.tags || '||';
+  let tags = hasTag(row.tags || '||', 'spam') ? addTag(current, 'spam') : removeTag(current, 'spam');
+  let folderId = email.folderId;
+  if (email.folderId !== row.folderId) {
+    const result = computeFilterActionResult({ tags, folderId }, [{ type: 'moveToFolder', value: dest.path }], folders);
+    tags = result.tags;
+    folderId = result.folderId;
+  }
+  const moved = folderId !== email.folderId;
+  if (tags !== current || moved) await storage.updateEmail(row.emailId, { tags, folderId });
+  await storage.setSpamUserVerdict(row.emailId, row.verdict);
+  try { await storage.recalculateFolderCounts(); } catch { /* ignore */ }
+
+  if (row.sender?.address) {
+    const { address, spammer, trusted } = row.sender;
+    try {
+      if (spammer) await storage.addSpammer({ email: address, name: email.fromName || undefined, reason: 'Marked as spam by user' });
+      else await storage.removeSpammer(address);
+      if (trusted) await storage.trustSender(address);
+      else await storage.untrustSender(address);
+    } catch (e) {
+      logger.warn(`[SpamVerdict] sender lists not restored: ${(e as Error).name}`);
+    }
+  }
+
+  if (moved && deps.queue && email.uid > 0 && source) {
+    deps.queue.move(source.path, email.uid, dest.path).catch((err: unknown) => logger.error(`[SpamVerdict] IMAP move (undo) failed: ${(err as Error)?.name ?? 'Error'}`));
+  }
   return { success: true, email, moved };
 }
 

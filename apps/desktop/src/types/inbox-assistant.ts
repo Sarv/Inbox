@@ -1,4 +1,5 @@
-import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from './inbox-assistant-actions';
+import type { InboxAssistantReview, InboxAssistantReviewApplyResult } from './inbox-assistant-actions';
+import type { InboxAgentChangeSet, InboxAgentChangeSetRequest, InboxAgentSettingChange, InboxAgentUndoRequest } from './inbox-assistant-changes';
 import type { InboxAssistantDashboard, InboxAssistantDashboardRequest } from './inbox-assistant-dashboard';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest } from './local-calendar';
 
@@ -70,7 +71,6 @@ export interface InboxAssistantProgress {
   accountId?: string;
   emailId?: string;
   filename?: string;
-  reviewAutomation?: InboxAssistantReviewAutomation;
 }
 
 export interface InboxAssistantActivity extends InboxAssistantProgress {
@@ -92,7 +92,7 @@ export interface InboxAssistantAIWorkload {
   behaviorContextChars?: number;
 }
 
-export type InboxAssistantAIPurpose = 'plan' | 'answer' | 'repair' | 'review' | 'draft';
+export type InboxAssistantAIPurpose = 'plan' | 'answer' | 'repair' | 'review' | 'draft' | 'agent' | 'classify';
 
 /** Provider-reported accounting, with optional host-recorded workload. Prompts and API credentials are excluded. */
 export interface InboxAssistantAIUsage {
@@ -218,10 +218,30 @@ export interface InboxAssistantAccountDiagnostics {
  * and durations, plus the search words under `plan.terms`. Never mail text,
  * model output or an error message.
  */
+/**
+ * The agent loop, content-free: which protocol it used, how many turns, and
+ * which tools it called or got wrong, by fixed tool name and error class.
+ */
+export interface InboxAssistantAgentDiagnostics {
+  mode: 'native' | 'json';
+  /** The provider refused tool definitions, so the run switched to the JSON protocol. */
+  fallback?: 'tools_refused';
+  /** Reasoning was turned off so the model would accept tools (`native` mode only). */
+  reasoning?: 'off';
+  steps: number;
+  toolCalls: Record<string, number>;
+  toolErrors: Record<string, number>;
+  /** Times the model replied in prose and was asked to use a tool. */
+  nudges?: number;
+  stop?: 'answered' | 'step_limit';
+  /** Change sets the run staged, the messages in them, how many "Approve for me" applied without a card, and standing changes asked for. */
+  changes?: { sets: number; messages: number; autoApplied: number; settings?: number };
+}
+
 export interface InboxAssistantRunDiagnostics {
   version: 1;
-  /** Which path handled the request. `refused`: the host declined it before doing any work. */
-  route?: 'capability' | 'review' | 'mail_command' | 'search' | 'refused';
+  /** Which path handled the request: always `agent` now. The others are in runs saved before the fixed paths were retired. */
+  route?: 'capability' | 'review' | 'mail_command' | 'search' | 'agent' | 'refused';
   reviewKind?: string;
   plan?: InboxAssistantPlanDiagnostics;
   /**
@@ -246,9 +266,12 @@ export interface InboxAssistantRunDiagnostics {
     };
     factsFinal: number;
   };
-  outcome?: 'verified' | 'related' | 'no_evidence' | 'capability' | 'review' | 'refused' | 'failed' | 'stopped';
+  /** How the agent loop went (route `agent`). */
+  agent?: InboxAssistantAgentDiagnostics;
+  /** `answered`: the agent replied from tool results or a plain message, with no email cited. */
+  outcome?: 'verified' | 'related' | 'no_evidence' | 'answered' | 'capability' | 'review' | 'refused' | 'failed' | 'stopped';
   /** Set when the run threw. `stage` is the last step that had started. */
-  failure?: { stage: 'route' | 'plan' | 'search' | 'answer' | 'review'; error: InboxAssistantErrorDiagnostic };
+  failure?: { stage: 'route' | 'plan' | 'search' | 'answer' | 'review' | 'agent'; error: InboxAssistantErrorDiagnostic };
   durationMs?: number;
 }
 
@@ -279,8 +302,15 @@ export interface InboxAssistantExchange {
   answer: InboxAssistantAnswer;
   createdAt: number; // Unix milliseconds for conversation ordering.
   activities?: InboxAssistantActivity[];
+  /** Saved by the retired unread review (before 3b): shown, never acted on. */
   review?: InboxAssistantReview;
   reviewResult?: InboxAssistantReviewApplyResult;
+  /** Mail changes the agent staged or applied in this exchange, one card each. */
+  changeSets?: InboxAgentChangeSet[];
+  /** Settings the agent asked to change (filters, sender blocks), one card each. */
+  settingChanges?: InboxAgentSettingChange[];
+  /** Earlier changes the agent undid, or asked the user to undo, in this exchange: each shows the earlier card with only its Undo. */
+  undoRequests?: InboxAgentUndoRequest[];
   /** Compact receipt presentation for batches produced by one automatic run. */
   reviewBatch?: { runId: string; number: number };
   requestId?: string;
@@ -297,25 +327,6 @@ export interface InboxAssistantRequest {
   question: string;
   accountIds: string[];
   previousExchangeId?: string;
-  reviewKind?: InboxAssistantReviewKind;
-  continueReviewId?: string;
-  /** Prepare/refresh a review without applying saved delegated approval. */
-  reviewOnly?: boolean;
-}
-
-export interface InboxAssistantReviewActionRequest {
-  requestId: string;
-  chatId: string;
-  exchangeId: string;
-  reviewId: string;
-  itemIds: string[];
-  undo?: boolean;
-  /** Set only by a user's explicit selection, never by delegated approval. */
-  manualSelection?: boolean;
-  /** Manual mail actions never alter the review's automatic recommendation. */
-  action?: InboxAssistantReviewAction;
-  /** Explicit one-run consent: mark verified recommendations read, then continue. */
-  autoContinue?: boolean;
 }
 
 export interface InboxAssistantChatSummary {
@@ -391,7 +402,8 @@ export interface InboxAssistantAPI {
   draftEmail(request: InboxAssistantDraftRequest): Promise<InboxAssistantResult<InboxAssistantDraft>>;
   history(): Promise<InboxAssistantResult<InboxAssistantExchange[]>>;
   ask(request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
-  applyReview(request: InboxAssistantReviewActionRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
+  /** Approve, cancel or undo one of the agent's change sets. */
+  changeSet(request: InboxAgentChangeSetRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
   cancel(requestId: string): Promise<InboxAssistantResult<InboxAssistantCancellation>>;
   clearHistory(): Promise<InboxAssistantResult<null>>;
   onActivity(listener: (activity: InboxAssistantActivity) => void): () => void;

@@ -6,6 +6,7 @@ vi.mock('../../../../electron/services/core-db', () => ({ getCoreDb: () => { thr
 import { createInboxAssistantHistoryStore, type InboxAssistantHistoryStore } from '../../../../electron/services/inbox-assistant-history';
 import { aggregateInboxAssistantUsage } from '../../../../electron/services/inbox-assistant-usage';
 import type { InboxAssistantAIWorkload, InboxAssistantExchange, InboxAssistantRunRecord } from '../../../../src/types/inbox-assistant';
+import { APPROVE_FOR_ME_SCOPE } from '../../../../src/utils/inbox-assistant-approval';
 
 let db: Database.Database;
 let store: InboxAssistantHistoryStore;
@@ -147,7 +148,11 @@ describe('separate encrypted-store Inbox Agent chats', () => {
     expect(blob(`${CHAT}${origin.id}`)).toBe(before);
   });
 
-  it('migrates legacy persistent Auto and one-request approval safely without rewriting conversations or recovery data', () => {
+  // Breaks: delegation saved before 1.4.11 (persistent Auto, or a one-request
+  // approval) is carried into the agent's wider Approve for me, or the
+  // migration rewrites conversations and recovery data.
+  // Changed on purpose: Auto used to become Approve for me; it now asks first.
+  it('migrates legacy persistent Auto and one-request approval to Ask for approval without rewriting conversations or recovery data', () => {
     const ongoing = store.create(); store.writeChat({ ...ongoing, exchanges: [exchange()] });
     store.update(ongoing.id, { pinned: true }); store.rename(ongoing.id, 'Ongoing delegation');
     const oneRequest = store.create(); store.writeChat({ ...oneRequest, exchanges: [exchange(1), exchange(2)] });
@@ -169,7 +174,7 @@ describe('separate encrypted-store Inbox Agent chats', () => {
     const restarted = createInboxAssistantHistoryStore(() => db);
     const listing = restarted.list();
     expect(listing.activeChatId).toBe(unset.id);
-    expect(listing.chats.find(chat => chat.id === ongoing.id)).toMatchObject({ title: 'Ongoing delegation', actionMode: 'approve_for_me', pinned: true });
+    expect(listing.chats.find(chat => chat.id === ongoing.id)).toMatchObject({ title: 'Ongoing delegation', actionMode: 'review', pinned: true });
     expect(listing.chats.find(chat => chat.id === oneRequest.id)).toMatchObject({ actionMode: 'review', rewindAvailable: true });
     expect(listing.chats.find(chat => chat.id === review.id)?.actionMode).toBe('review');
     expect(listing.chats.find(chat => chat.id === unset.id)?.actionMode ?? 'review').toBe('review');
@@ -181,7 +186,7 @@ describe('separate encrypted-store Inbox Agent chats', () => {
     expect(blob(`${REWIND}${oneRequest.id}`)).toBe(originalRecovery);
     const migratedIndex = blob(INDEX);
     const secondRestart = createInboxAssistantHistoryStore(() => db);
-    expect(secondRestart.load(ongoing.id, { select: false }).actionMode).toBe('approve_for_me');
+    expect(secondRestart.load(ongoing.id, { select: false }).actionMode).toBe('review');
     expect(secondRestart.load(oneRequest.id, { select: false }).actionMode).toBe('review');
     expect(blob(INDEX)).toBe(migratedIndex);
     expect(secondRestart.restoreRewind(oneRequest.id)).toMatchObject({ actionMode: 'review', exchangeCount: 2 });
@@ -211,6 +216,8 @@ describe('separate encrypted-store Inbox Agent chats', () => {
     expect(createInboxAssistantHistoryStore(() => db).load(chat.id)).toMatchObject({ actionMode: 'approve_for_me', exchangeCount: 2 });
   });
 
+  // Breaks: a failed migration write saves half of it, or the retried migration delegates.
+  // Changed on purpose: the retried migration now ends at Ask for approval (was Approve for me).
   it('rolls back the complete mode migration if writing the private marker fails', () => {
     const chat = store.create();
     const legacy = JSON.parse(blob(INDEX)!);
@@ -220,7 +227,7 @@ describe('separate encrypted-store Inbox Agent chats', () => {
     expect(() => createInboxAssistantHistoryStore(() => db).list()).toThrow('synthetic mode migration failure');
     expect(blob(INDEX)).toBe(before); expect(blob(`${CHAT}${chat.id}`)).toBe(body);
     db.exec('DROP TRIGGER reject_mode_migration');
-    expect(createInboxAssistantHistoryStore(() => db).list().chats[0]?.actionMode).toBe('approve_for_me');
+    expect(createInboxAssistantHistoryStore(() => db).list().chats[0]?.actionMode).toBe('review');
     expect(JSON.parse(blob(INDEX)!).actionModeVersion).toBe(2);
   });
 
@@ -678,5 +685,169 @@ describe('separate encrypted-store Inbox Agent chats', () => {
     for (const title of ['', '   ', 'x'.repeat(121)]) expect(() => store.rename(chat.id, title)).toThrow();
     expect(store.list().chats).toHaveLength(1);
     expect(store.list().chats[0]?.title).toBe('New chat');
+  });
+});
+
+// 1.4.11 saved 'approve_for_me' when it meant marking reviewed mail read. The
+// agent reads the same value as leave to archive, Trash, move, label, snooze
+// and star up to 200 emails. Consent now carries the meaning it was given for
+// (APPROVE_FOR_ME_SCOPE, index-only); without it a chat asks first.
+describe('consent to Approve for me carries its meaning', () => {
+  type StoredChat = { id: string; actionMode?: string; approvalScope?: unknown; updatedAt: number; title: string; pinned?: boolean };
+  const index = () => JSON.parse(blob(INDEX)!) as { actionModeVersion: number; activeChatId: string | null; chats: StoredChat[] };
+  /** Rewrite the stored index entry of one chat, as an older build would have left it. */
+  function storeAs(chatId: string, change: (chat: StoredChat) => void): void {
+    const current = index();
+    change(current.chats.find(chat => chat.id === chatId)!);
+    seed(INDEX, current);
+  }
+  const as1411 = (chat: StoredChat) => { chat.actionMode = 'approve_for_me'; delete chat.approvalScope; };
+
+  // Breaks: a 1.4.11 consent to mark reviewed mail read silently becomes archive/Trash
+  // of 200 emails, or every launch rewrites and reorders the chat list.
+  it('loads a chat delegated in 1.4.11 as Ask for approval, saves that once, and leaves bodies, recovery, order and other chats alone', () => {
+    const delegated = store.create(); store.writeChat({ ...delegated, exchanges: [exchange(), exchange(1)] });
+    store.rename(delegated.id, 'Delegated cleanup'); store.update(delegated.id, { pinned: true });
+    store.rewind(delegated.id, 'exchange-1');
+    const fresh = store.create(); store.update(fresh.id, { actionMode: 'approve_for_me' });
+    const review = store.create(); store.update(review.id, { actionMode: 'review' });
+    const unset = store.create(); store.writeChat({ ...unset, exchanges: [exchange(2)] });
+    storeAs(delegated.id, as1411);
+    const before = index();
+    expect(before.actionModeVersion).toBe(2);
+    const bodies = new Map(before.chats.map(chat => [chat.id, blob(`${CHAT}${chat.id}`)]));
+    const recovery = blob(`${REWIND}${delegated.id}`);
+
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    const listing = restarted.list();
+    expect(listing.chats.find(chat => chat.id === delegated.id)).toMatchObject({ actionMode: 'review', title: 'Delegated cleanup', pinned: true, rewindAvailable: true });
+    expect(restarted.load(delegated.id, { select: false }).actionMode).toBe('review');
+    expect(listing.chats.find(chat => chat.id === fresh.id)?.actionMode).toBe('approve_for_me');
+    expect(listing.chats.find(chat => chat.id === review.id)?.actionMode).toBe('review');
+    expect(listing.chats.find(chat => chat.id === unset.id)?.actionMode).toBeUndefined();
+    expect(listing.activeChatId).toBe(before.activeChatId);
+    const after = index();
+    expect(after.actionModeVersion).toBe(2);
+    expect(after.activeChatId).toBe(before.activeChatId);
+    expect(after.chats.map(chat => [chat.id, chat.updatedAt, chat.title, chat.pinned ?? false]))
+      .toEqual(before.chats.map(chat => [chat.id, chat.updatedAt, chat.title, chat.pinned ?? false]));
+    expect(after.chats.find(chat => chat.id === delegated.id)?.actionMode).toBe('review');
+    expect(after.chats.find(chat => chat.id === delegated.id)).not.toHaveProperty('approvalScope');
+    expect(after.chats.find(chat => chat.id === fresh.id)).toMatchObject({ actionMode: 'approve_for_me', approvalScope: APPROVE_FOR_ME_SCOPE });
+    expect(after.chats.find(chat => chat.id === unset.id)).not.toHaveProperty('actionMode');
+    for (const [id, body] of bodies) expect(blob(`${CHAT}${id}`)).toBe(body);
+    expect(blob(`${REWIND}${delegated.id}`)).toBe(recovery);
+
+    // Saved once: a second launch reads without writing the index at all.
+    db.exec(`CREATE TRIGGER forbid_index_rewrite BEFORE UPDATE ON core_blobs WHEN NEW.key = '${INDEX}' BEGIN SELECT RAISE(ABORT, 'index rewritten'); END`);
+    const migrated = blob(INDEX);
+    const second = createInboxAssistantHistoryStore(() => db);
+    expect(second.list().chats.find(chat => chat.id === delegated.id)?.actionMode).toBe('review');
+    expect(second.load(fresh.id, { select: false }).actionMode).toBe('approve_for_me');
+    expect(blob(INDEX)).toBe(migrated);
+  });
+
+  // Breaks: the user's fresh choice resets on every launch, or the internal record leaks over IPC or into chat bodies.
+  it('keeps Approve for me chosen in this version across restart and records its scope only in the index', () => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange(), exchange(1)] });
+    const updated = store.update(chat.id, { actionMode: 'approve_for_me' });
+    expect(updated.actionMode).toBe('approve_for_me');
+    expect(updated).not.toHaveProperty('approvalScope');
+    expect(index().chats[0]!.approvalScope).toBe(APPROVE_FOR_ME_SCOPE);
+    // Writes that copy the summary into the body: rename, a new answer, a rewind.
+    store.rename(chat.id, 'Kept delegation');
+    store.writeChat({ ...store.load(chat.id), exchanges: [exchange(), exchange(1), exchange(2)] });
+    store.rewind(chat.id, 'exchange-2');
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    expect(restarted.list().chats[0]).toMatchObject({ actionMode: 'approve_for_me', title: 'Kept delegation' });
+    expect(restarted.list().chats[0]).not.toHaveProperty('approvalScope');
+    const loaded = restarted.load(chat.id);
+    expect(loaded.actionMode).toBe('approve_for_me');
+    expect(loaded).not.toHaveProperty('approvalScope');
+    expect(blob(`${CHAT}${chat.id}`)).not.toContain('approvalScope');
+    expect(blob(`${REWIND}${chat.id}`)).not.toContain('approvalScope');
+    expect(restarted.clear(chat.id)).not.toHaveProperty('approvalScope');
+    // A pin change alone keeps the consent.
+    expect(restarted.update(chat.id, { pinned: true })).toMatchObject({ pinned: true, actionMode: 'approve_for_me' });
+    expect(createInboxAssistantHistoryStore(() => db).load(chat.id).actionMode).toBe('approve_for_me');
+  });
+
+  // Breaks: consent recorded for a narrower (or different) Approve for me covers a wider one, or a malformed record locks the chat list.
+  it.each([
+    ['an older meaning', 'agent-0:200:mark_read'],
+    ['a different cap', APPROVE_FOR_ME_SCOPE.replace(':200:', ':500:')],
+    ['a longer action list', `${APPROVE_FOR_ME_SCOPE},delete_forever`],
+    ['an empty string', ''],
+    ['a number', 7],
+    ['null', null],
+    ['an object', { scope: APPROVE_FOR_ME_SCOPE }],
+  ])('reads a scope record from %s as Ask for approval', (_name, approvalScope) => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange()] });
+    storeAs(chat.id, stored => { stored.actionMode = 'approve_for_me'; stored.approvalScope = approvalScope; });
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    expect(restarted.list().chats[0]?.actionMode).toBe('review');
+    expect(restarted.load(chat.id).exchanges[0]?.answer).toEqual(exchange().answer);
+    expect(index().chats[0]).toMatchObject({ actionMode: 'review' });
+    expect(index().chats[0]).not.toHaveProperty('approvalScope');
+  });
+
+  // Breaks: a stale consent record lets a later re-enable from an older build inherit the wider scope.
+  it('drops the scope record when the chat switches to Ask for approval', () => {
+    const chat = store.create();
+    store.update(chat.id, { actionMode: 'approve_for_me' });
+    expect(store.update(chat.id, { actionMode: 'review' })).toMatchObject({ actionMode: 'review' });
+    expect(index().chats[0]).not.toHaveProperty('approvalScope');
+    // 1.4.11 (after a downgrade) turns it on again without knowing the record.
+    storeAs(chat.id, stored => { stored.actionMode = 'approve_for_me'; });
+    expect(createInboxAssistantHistoryStore(() => db).load(chat.id).actionMode).toBe('review');
+  });
+
+  // Breaks: a record left behind with no grant (an older build switched the chat off) is kept and later re-armed.
+  it('drops a scope record that no longer goes with Approve for me', () => {
+    const chat = store.create();
+    store.update(chat.id, { actionMode: 'approve_for_me' });
+    // 1.4.11 switches it off and keeps the field it does not know.
+    storeAs(chat.id, stored => { stored.actionMode = 'review'; });
+    expect(index().chats[0]!.approvalScope).toBe(APPROVE_FOR_ME_SCOPE);
+    expect(createInboxAssistantHistoryStore(() => db).list().chats[0]?.actionMode).toBe('review');
+    expect(index().chats[0]).not.toHaveProperty('approvalScope');
+    storeAs(chat.id, stored => { stored.actionMode = 'approve_for_me'; });
+    expect(createInboxAssistantHistoryStore(() => db).list().chats[0]?.actionMode).toBe('review');
+  });
+
+  // Breaks: a failed write leaves the chat delegating, or saves half the reset.
+  it('rolls back the consent reset when the index write fails and never reports Approve for me meanwhile', () => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange()] });
+    const other = store.create(); store.update(other.id, { actionMode: 'approve_for_me' });
+    storeAs(chat.id, as1411);
+    const before = blob(INDEX); const body = blob(`${CHAT}${chat.id}`);
+    db.exec(`CREATE TRIGGER reject_consent_reset BEFORE UPDATE ON core_blobs WHEN NEW.key = '${INDEX}' BEGIN SELECT RAISE(ABORT, 'synthetic consent reset failure'); END`);
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    expect(() => restarted.list()).toThrow('synthetic consent reset failure');
+    expect(() => restarted.load(chat.id, { select: false })).toThrow('synthetic consent reset failure');
+    expect(() => restarted.load(other.id, { select: false })).toThrow('synthetic consent reset failure');
+    expect(blob(INDEX)).toBe(before); expect(blob(`${CHAT}${chat.id}`)).toBe(body);
+    db.exec('DROP TRIGGER reject_consent_reset');
+    const retried = createInboxAssistantHistoryStore(() => db).list();
+    expect(retried.chats.find(item => item.id === chat.id)?.actionMode).toBe('review');
+    expect(retried.chats.find(item => item.id === other.id)?.actionMode).toBe('approve_for_me');
+  });
+
+  // Breaks: recovery resurrects old consent from the snapshot's copy of the summary.
+  it('keeps Ask for approval when restoring a rewind saved while Approve for me was on', () => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange(), exchange(1)] });
+    store.update(chat.id, { actionMode: 'approve_for_me' });
+    store.rewind(chat.id, 'exchange-1');
+    expect(JSON.parse(blob(`${REWIND}${chat.id}`)!).chat.actionMode).toBe('approve_for_me');
+    store.update(chat.id, { actionMode: 'review' });
+    expect(store.restoreRewind(chat.id)).toMatchObject({ actionMode: 'review', exchangeCount: 2 });
+    // Even a snapshot carrying a current-looking record is not read back.
+    const snapshot = JSON.parse(blob(`${REWIND}${chat.id}`)!);
+    snapshot.chat = { ...snapshot.chat, actionMode: 'approve_for_me', approvalScope: APPROVE_FOR_ME_SCOPE };
+    seed(`${REWIND}${chat.id}`, snapshot);
+    const restored = createInboxAssistantHistoryStore(() => db).restoreRewind(chat.id);
+    expect(restored.actionMode).toBe('review');
+    expect(restored).not.toHaveProperty('approvalScope');
+    expect(createInboxAssistantHistoryStore(() => db).load(chat.id).actionMode).toBe('review');
   });
 });

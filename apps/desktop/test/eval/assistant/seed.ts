@@ -1,6 +1,6 @@
 import type { EmailRecord } from '@sarvinbox/core';
 
-import { createAssistantHarness, type AssistantHarness } from '../../helpers/assistant-harness';
+import { createAssistantHarness, type AssistantHarness, type HarnessProvider, type ScriptedAgent } from '../../helpers/assistant-harness';
 
 import { A1, A2, BASE_MAILS, ist, NOW_MS, TIME_ZONE, TRIAGE_MAILS, type Mail } from './mailbox';
 
@@ -26,25 +26,33 @@ function wrap76(text: string): string {
 const escapeHtml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const toHtml = (text: string) => `<div dir="ltr">${text.split('\n\n').map(part => `<p>${escapeHtml(part).replace(/\n/g, '<br>')}</p>`).join('')}</div>`;
 
-export function mailRecord(mail: Mail): Partial<EmailRecord> & { id: string } {
+export function mailRecord(mail: Mail, uid?: number): Partial<EmailRecord> & { id: string } {
   const text = wrap76(mail.body);
   const folderTag = mail.folder === 'sent' ? 'Sent' : 'INBOX';
   return {
-    id: mail.id, folderId: mail.folder === 'sent' ? 'f-sent' : 'f-inbox', tags: mail.unread ? `|${folderTag}|` : `|${folderTag}|read|`,
+    id: mail.id, ...(uid ? { uid } : {}), folderId: mail.folder === 'sent' ? 'f-sent' : 'f-inbox', tags: mail.unread ? `|${folderTag}|` : `|${folderTag}|read|`,
     subject: mail.subject, fromAddress: mail.from[0], fromName: mail.from[1], toAddress: mail.to, ccAddress: mail.cc ?? null,
-    date: ist(mail.at), receivedDate: ist(mail.at), cleanBody: text, rawBody: mail.format === 'text' ? text : toHtml(mail.body),
+    date: ist(mail.at), receivedDate: ist(mail.at), ...(mail.bodyMissing ? { cleanBody: '', rawBody: '', hasBody: false }
+      : { cleanBody: text, rawBody: mail.format === 'text' ? text : toHtml(mail.body) }),
     contentType: mail.format === 'text' ? 'text' : 'html', hasAttachments: Boolean(mail.attachments?.length),
     attachmentCount: mail.attachments?.length ?? 0, attachmentNames: mail.attachments?.length ? JSON.stringify(mail.attachments) : null,
     ...(mail.ics ? { calendarIcs: mail.ics } : {}),
   };
 }
 
-/** A harness over the seeded mailbox, with the clock fixed at the mailbox's "now". */
-export async function createEvalHarness(mails: readonly Mail[] = [...BASE_MAILS, ...TRIAGE_MAILS]): Promise<AssistantHarness> {
-  const harness = await createAssistantHarness({ accounts: [A1, A2], now: () => NOW_MS, timeZone: TIME_ZONE });
+/**
+ * A harness over the seeded mailbox, with the clock fixed at the mailbox's "now".
+ * `agent` runs the agent with that scripted model, `provider` with a real one
+ * (live-provider.ts); either way with its write tools, and every email then
+ * has a server UID, as synced mail does.
+ */
+export async function createEvalHarness(mails: readonly Mail[] = [...BASE_MAILS, ...TRIAGE_MAILS], options: { agent?: ScriptedAgent; provider?: HarnessProvider } = {}): Promise<AssistantHarness> {
+  const harness = await createAssistantHarness({ accounts: [A1, A2], now: () => NOW_MS, timeZone: TIME_ZONE,
+    ...(options.agent ? { agent: options.agent, mailActions: true } : {}), ...(options.provider ? { provider: options.provider, mailActions: true } : {}) });
+  let uid = 0;
   for (const mail of mails) {
     const account = harness.mailbox(mail.acct === 'A1' ? A1.id : A2.id);
-    await account.add(mail.thread ?? `t-${mail.id}`, mailRecord(mail));
+    await account.add(mail.thread ?? `t-${mail.id}`, mailRecord(mail, options.agent || options.provider ? ++uid : undefined));
     const stored = await account.storage.getEmail(mail.id);
     if (stored) await account.storage.extractContactsFromEmail(stored, mail.folder === 'sent' ? 'sent' : 'received');
   }

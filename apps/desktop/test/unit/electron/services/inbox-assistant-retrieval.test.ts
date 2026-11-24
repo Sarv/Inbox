@@ -2,7 +2,7 @@ import type { EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AssistantAttachmentRef, AssistantAttachmentResult } from '../../../../electron/services/assistant-attachment-types';
-import { buildInboxAssistantAnswerPrompt, planInboxAssistantSearch, type InboxAssistantSearchPlan } from '../../../../electron/services/inbox-assistant-answer';
+import { inboxAssistantEvidenceText, planInboxAssistantSearch, type InboxAssistantSearchPlan } from '../../../../electron/services/inbox-assistant-answer';
 import { researchInboxAssistant, type AssistantResearchMailbox, type AssistantResearchStorage } from '../../../../electron/services/inbox-assistant-retrieval';
 import { resolveInboxAssistantSearchScope } from '../../../../electron/services/inbox-assistant-search-scope';
 import type { InboxAssistantAccount, InboxAssistantProgress } from '../../../../src/types/inbox-assistant';
@@ -53,7 +53,9 @@ function ready(ref: AssistantAttachmentRef, text = 'TCS quotation total INR 90,0
 }
 
 describe('Inbox Agent bounded retrieval priorities', () => {
-  it('packs repeated raw HTML thread quotes after shared HTML-to-text conversion without altering stored evidence', async () => {
+  // Breaks: HTML-to-text conversion of a quoted thread drops authored replies, the signature or the amount the model
+  // must read, or the evidence the agent shows is mutated after research.
+  it('converts repeated raw HTML thread quotes to text the model sees, without altering stored evidence', async () => {
     const original = '<p>TCS directory quotation Q-204: INR 270,000 excluding GST.</p>'
       + `<p>${'Deployment includes migration and support. '.repeat(25)}</p>`
       + '<p>Regards, Alice<br>Solutions Director<br>Phone +91 90000 00123</p>';
@@ -64,13 +66,12 @@ describe('Inbox Agent bounded retrieval priorities', () => {
     const primary = mailbox(rows);
     const research = await researchInboxAssistant([ACCOUNTS[0]!], PLAN, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
     const snapshot = structuredClone(research.evidence);
-    const prompt = buildInboxAssistantAnswerPrompt('What TCS quotation did I send?', research.evidence, research.coverage);
-    expect(prompt).toContain('shared with');
-    expect(prompt).toContain('First authored reply.');
-    expect(prompt).toContain('Second authored reply.');
-    expect(prompt).toContain('Solutions Director');
-    expect(prompt).toContain('90000 00123');
-    expect(prompt).toContain('270,000 excluding GST');
+    const shown = research.evidence.map(inboxAssistantEvidenceText).join('\n');
+    expect(shown).toContain('First authored reply.');
+    expect(shown).toContain('Second authored reply.');
+    expect(shown).toContain('Solutions Director');
+    expect(shown).toContain('90000 00123');
+    expect(shown).toContain('270,000 excluding GST');
     expect(research.evidence).toEqual(snapshot);
     expect(rows[1]!.rawBody).toContain('<blockquote>');
   });

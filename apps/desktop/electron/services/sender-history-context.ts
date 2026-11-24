@@ -1,11 +1,9 @@
-import type { SenderSignals } from '@sarvinbox/core';
-
-import type { UnreadReviewBehaviorSignals } from './inbox-assistant-review-behavior';
+import type { SenderBehaviorSignals, SenderSignals } from '@sarvinbox/core';
 
 /** Both AI paths use the named mailbox's durable human-action evidence. */
 export function readCategorizationSenderHistory(senders: string[], query: {
   legacy(senders: string[]): Record<string, Partial<SenderSignals>>;
-  human(senders: string[]): Record<string, UnreadReviewBehaviorSignals>;
+  human(senders: string[]): Record<string, SenderBehaviorSignals>;
 }): Record<string, SenderSignals> {
   const addresses = [...new Set(senders.filter(value => typeof value === 'string' && value.length <= 254)
     .map(value => value.trim().toLowerCase()).filter(value => /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/u.test(value)))].slice(0, 1000);
@@ -13,7 +11,7 @@ export function readCategorizationSenderHistory(senders: string[], query: {
   for (let offset = 0; offset < addresses.length; offset += 100) {
     const chunk = addresses.slice(offset, offset + 100);
     let legacy: Record<string, Partial<SenderSignals>> = {};
-    let human: Record<string, UnreadReviewBehaviorSignals> = {};
+    let human: Record<string, SenderBehaviorSignals> = {};
     try { legacy = query.legacy(chunk); } catch { /* Relationship context is optional. */ }
     try { human = query.human(chunk); } catch { /* Missing evidence stays explicitly unavailable. */ }
     for (const sender of chunk) {

@@ -10,7 +10,8 @@ import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, R
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
 import type { DefaultAppsAPI } from '../src/types/default-apps';
-import type { InboxAssistantAPI, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantDashboardRequest, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
+import type { InboxAssistantAPI, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantDashboardRequest, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
+import type { InboxAgentChangeSetRequest } from '../src/types/inbox-assistant-changes';
 import type { LocalCalendarAPI, LocalCalendarAvailability, LocalCalendarOpenEvent } from '../src/types/local-calendar';
 import type { LocalDataAPI } from '../src/types/local-data';
 import type { SecureStorageAccessResult, SecureStorageStatus } from '../src/types/secure-storage';
@@ -171,7 +172,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     draftEmail: (request: InboxAssistantDraftRequest) => ipcRenderer.invoke('inboxAssistant:draftEmail', request),
     history: () => ipcRenderer.invoke('inboxAssistant:history'),
     ask: (request: InboxAssistantRequest) => ipcRenderer.invoke('inboxAssistant:ask', request),
-    applyReview: (request: InboxAssistantReviewActionRequest) => ipcRenderer.invoke('inboxAssistant:applyReview', request),
+    changeSet: (request: InboxAgentChangeSetRequest) => ipcRenderer.invoke('inboxAssistant:changeSet', request),
     cancel: (requestId: string) => ipcRenderer.invoke('inboxAssistant:cancel', requestId),
     clearHistory: () => ipcRenderer.invoke('inboxAssistant:clearHistory'),
     onActivity: (listener: (activity: InboxAssistantActivity) => void) => {
