@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-24
+
 ### Added
 - **Inbox Agent works through a request step by step.** It now decides for
   itself what to look up before it answers: it searches with exact filters
@@ -1589,7 +1591,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.12...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/Sarv/Inbox/releases/tag/v1.5.0
 [1.4.12]: https://github.com/Sarv/Inbox/releases/tag/v1.4.12
 [1.4.11]: https://github.com/Sarv/Inbox/releases/tag/v1.4.11
 [1.4.10]: https://github.com/Sarv/Inbox/releases/tag/v1.4.10
