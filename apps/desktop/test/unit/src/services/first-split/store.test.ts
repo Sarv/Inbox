@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 // The run splits real bodies (regions, cleaning) with the DOM.
 import { isUsableSplit, parseFirstSplitParts } from '@sarvinbox/core/first-split';
+import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core/logger';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { captureLogs } from '../../../../../../../packages/core/src/test-support/log-capture';
 import type { AIProvider } from '../../../../../src/services/ai-service';
 import type { CompleteFn } from '../../../../../src/services/first-split/split-first-email';
 import {
@@ -364,5 +366,38 @@ describe('runFirstSplit — IPC edges', () => {
     const got = (await bridge.get('acct-a', 't1', { withSource: true })).data!;
     const { roster: _roster, ...withoutRoster } = got;
     expect((await runFirstSplit(A, { trigger: 'background', prefetched: withoutRoster }, deps())).state).toBe('saved');
+  });
+});
+
+describe('runFirstSplit — the log line of a run that threw', () => {
+  const SENTINEL = 'SENTINEL-SPLIT-91d3';
+
+  // Breaks: `threw: <message>` comes back. A split that throws can be quoting
+  // the email it was splitting, and a provider's error carries its response
+  // body, which can quote the mail; a renderer warn line reaches a release
+  // app.log. The caller still gets the message (it is shown, not logged), and
+  // the failure's class, code and status still reach the log.
+  it('logs the failure by class, code and status, never its message', async () => {
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      const throwing = { ...deps(), split: async () => { throw new Error(`could not split <p>${SENTINEL} quarterly figures</p>`); } };
+      expect(await runFirstSplit(A, { trigger: 'manual' }, throwing))
+        .toEqual({ state: 'error', error: `could not split <p>${SENTINEL} quarterly figures</p>` });
+
+      // A transient provider failure that escaped as a throw: code and status kept.
+      const transient = Object.assign(new Error(`API request failed: 503 - ${SENTINEL}`), { code: 'ETIMEDOUT', status: 503 });
+      const flaky = { ...deps(), bridge: { ...bridge, get: async () => { throw transient; } } };
+      expect(await runFirstSplit(B, { trigger: 'manual' }, flaky)).toMatchObject({ state: 'error' });
+
+      expect(logs.containing(SENTINEL)).toEqual([]);
+      expect(logs.containing('split acct=acct-a thread=t1 threw')).toEqual([
+        "[WARN] [FirstSplit] split acct=acct-a thread=t1 threw { name: 'Error' }",
+      ]);
+      expect(logs.containing('split acct=acct-b thread=t1 threw')).toEqual([
+        "[WARN] [FirstSplit] split acct=acct-b thread=t1 threw { name: 'Error', code: 'ETIMEDOUT', status: 503 }",
+      ]);
+    } finally {
+      logs.stop();
+    }
   });
 });

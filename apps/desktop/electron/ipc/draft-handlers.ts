@@ -4,7 +4,9 @@
  * Handles saving, deleting, and managing drafts on the IMAP server.
  */
 
-import { emailContentHash, resolveStandardFolder, createLogger, messageIdKey, withFolderSelected } from '@sarvinbox/core';
+import { basename } from 'path';
+
+import { emailContentHash, errorDiagnostic, resolveStandardFolder, createLogger, messageIdKey, withFolderSelected } from '@sarvinbox/core';
 import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, accountDraftRowSql, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
@@ -33,14 +35,67 @@ function removeCalendarMetadata(db: any, owner: string | null, messageIds: strin
   catch (error) { logger.warn('[Drafts] Could not remove local meeting draft metadata:', error instanceof Error ? error.message : 'Local metadata unavailable'); }
 }
 
-// Draft diagnostic log (from the "immortal draft" investigation). Kept as a
-// plain console log — the previous version did a SYNCHRONOUS fs.appendFileSync
-// on every draft save/delete, blocking the main-process event loop per action.
-function draftLog(event: string, data: Record<string, unknown>): void {
-  logger.info('[DraftDebug]', event, data);
+/** A value a draft diagnostic line may carry: never text the user typed or mail held. */
+type DraftLogValue = string | number | boolean | null | undefined;
+
+// Draft diagnostic log (from the "immortal draft" investigation). DEBUG, which
+// the release log level drops: it is for a developer chasing a draft that
+// would not go away, not for every user's app.log. Callers pass explicit
+// scalars (ids' presence, counts, booleans, error class) — never an options
+// object, whose subject and recipients the user typed.
+function draftLog(event: string, data: Record<string, DraftLogValue | ReturnType<typeof errorDiagnostic>>): void {
+  logger.debug('[DraftDebug]', event, data);
 }
+/** The account database's file name, never its path (which names the OS user's home folder). */
 function dbFileOf(storage: unknown): string {
-  try { return (storage as any)?.db?.name || 'unknown'; } catch { return 'error'; }
+  try {
+    const name = (storage as any)?.db?.name;
+    return typeof name === 'string' && name ? basename(name) : 'unknown';
+  } catch { return 'error'; }
+}
+
+/**
+ * What the renderer's `drafts:debug` events may put in the log, per event: the
+ * booleans and counts named here as they are, and the ids named here only as
+ * present or absent (and, for account ids, whether they name the same account).
+ * Anything else the renderer sends is dropped, and so is an event not listed.
+ */
+const RENDERER_DRAFT_DEBUG_FIELDS: Record<string, {
+  flags: readonly string[];
+  counts: readonly string[];
+  present: readonly string[];
+  sameAccount: ReadonlyArray<readonly [string, string]>;
+}> = {
+  'InlineReply.handleDismiss': {
+    flags: ['isUnifiedView'],
+    counts: [],
+    present: ['messageId', 'draftMessageId', 'threadId', 'replyAccountId', 'viewAccountId', 'activeAccountId'],
+    sameAccount: [['replyAccountId', 'activeAccountId'], ['viewAccountId', 'activeAccountId']],
+  },
+  'store.discardDraft': {
+    flags: ['snapshotFound'],
+    counts: ['removedCount'],
+    present: ['messageId', 'threadId', 'passedAccountId', 'resolvedAcct'],
+    sameAccount: [['passedAccountId', 'resolvedAcct']],
+  },
+};
+
+/** The renderer's debug payload reduced to the allowlisted scalars of its event. Exported for tests. */
+export function rendererDraftDebugFields(event: unknown, data: unknown): { event: string; fields: Record<string, DraftLogValue> } {
+  const spec = typeof event === 'string' && Object.prototype.hasOwnProperty.call(RENDERER_DRAFT_DEBUG_FIELDS, event) ? RENDERER_DRAFT_DEBUG_FIELDS[event] : undefined;
+  if (!spec) return { event: 'unlisted', fields: {} };
+  const source: Record<string, unknown> = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+  const fields: Record<string, DraftLogValue> = {};
+  for (const key of spec.flags) if (typeof source[key] === 'boolean') fields[key] = source[key] as boolean;
+  for (const key of spec.counts) {
+    const value = source[key];
+    if (typeof value === 'number' && Number.isFinite(value)) fields[key] = value;
+  }
+  for (const key of spec.present) fields[`has_${key}`] = typeof source[key] === 'string' && source[key] !== '';
+  for (const [a, b] of spec.sameAccount) {
+    if (typeof source[a] === 'string' && typeof source[b] === 'string') fields[`${a}_is_${b}`] = source[a] === source[b];
+  }
+  return { event: event as string, fields };
 }
 
 /**
@@ -363,7 +418,7 @@ export async function saveDraftToIMAP(draft: {
       try {
         (storage as any).db?.prepare?.('UPDATE emails SET uid = ? WHERE message_id = ?').run(appendedUid, messageId);
       } catch (e) {
-        draftLog('save:uid-update:error', { err: String(e) });
+        draftLog('save:uid-update:error', { error: errorDiagnostic(e) });
       }
     }
     logger.info('[Drafts] Draft saved to IMAP', folderPath, messageId, 'uid', appendedUid);
@@ -627,12 +682,12 @@ export async function deleteDraftsForThread(accountId: string | undefined, threa
       `SELECT message_id, COALESCE(uid,0) as uid FROM emails WHERE thread_id = ? AND ${accountDraftRowSql(db, 'emails')}`,
     ).all(threadId) as Array<{ message_id: string; uid: number }>;
   } catch (e) {
-    draftLog('sendCleanup:collect:error', { err: String(e) });
+    draftLog('sendCleanup:collect:error', { error: errorDiagnostic(e) });
     return;
   }
   if (draftRows.length === 0) return;
   const messageIds = draftRows.map((r) => r.message_id).filter(Boolean);
-  draftLog('sendCleanup:start', { threadId, count: messageIds.length });
+  draftLog('sendCleanup:start', { count: messageIds.length });
 
   // 1. Local delete first (instant truth; works offline).
   try {
@@ -770,14 +825,21 @@ export function registerDraftHandlers(): void {
     accountId?: string;
     savedAt?: number;
   }) => {
-    draftLog('delete:start', { options, currentAccountId: getCurrentAccountId() });
+    // Never `options` whole: on the subject-only cleanup path it carries the
+    // draft's subject and recipient, as the user typed them.
+    draftLog('delete:start', {
+      hasMessageId: !!options.messageId,
+      hasThreadId: !!options.threadId,
+      bySubject: !!(options.subject && options.to),
+      namedAccount: !!options.accountId,
+      namedAccountIsActive: options.accountId ? options.accountId === getCurrentAccountId() : null,
+    });
     // Resolve the draft's OWNING account (falls back to active). Without this the
     // delete ran against the active account's DB/engine — the wrong ones when the
     // draft belongs to another account (e.g. opened from All Inboxes) — so it
     // removed 0 rows and the draft was undeletable ("immortal draft").
     const { storage, syncEngine, accountId: owner } = await resolveAccountTarget(options.accountId);
     draftLog('delete:resolved', {
-      requestedAccountId: options.accountId,
       dbFile: dbFileOf(storage),
       hasSyncEngine: !!syncEngine,
       imapConnected: (() => { try { return !!syncEngine?.isConnected?.(); } catch { return 'err'; } })(),
@@ -809,10 +871,10 @@ export function registerDraftHandlers(): void {
         }
       }
     } catch (e) {
-      draftLog('delete:collect:error', { err: String(e) });
+      draftLog('delete:collect:error', { error: errorDiagnostic(e) });
     }
     const messageIds = draftRows.map((r) => r.message_id).filter(Boolean);
-    draftLog('delete:preLocal', { threadId: options.threadId, messageId: options.messageId, draftRows });
+    draftLog('delete:preLocal', { rows: draftRows.length, rowsWithUid: serverDeletableUids(draftRows).length });
 
     // 1. Local delete FIRST (instant UI truth, works even if IMAP is offline).
     try {
@@ -839,7 +901,7 @@ export function registerDraftHandlers(): void {
       }
     } catch (err) {
       logger.error('[Drafts] Local draft cleanup failed:', err);
-      draftLog('delete:local:error', { err: String(err) });
+      draftLog('delete:local:error', { error: errorDiagnostic(err) });
     }
     // Discarding a draft is the case the user sees: without this the row went
     // at once and the Drafts badge kept the old number for up to five seconds.
@@ -873,7 +935,7 @@ export function registerDraftHandlers(): void {
     const queueServerDelete = async (reason: string): Promise<number> => {
       const uids = serverDeletableUids(draftRows);
       if (!folderPath || uids.length === 0 || typeof syncEngine?.deleteEmail !== 'function') {
-        draftLog('delete:queue:skip', { reason, folderPath, uids: uids.length, hasEngine: !!syncEngine });
+        draftLog('delete:queue:skip', { reason, hasFolder: !!folderPath, uids: uids.length, hasEngine: !!syncEngine });
         return 0;
       }
       let queued = 0;
@@ -882,10 +944,10 @@ export function registerDraftHandlers(): void {
           await syncEngine.deleteEmail(folderPath, uid);
           queued += 1;
         } catch (e) {
-          draftLog('delete:queue:error', { uid, err: String(e) });
+          draftLog('delete:queue:error', { uid, error: errorDiagnostic(e) });
         }
       }
-      draftLog('delete:queued', { reason, folderPath, uids, queued });
+      draftLog('delete:queued', { reason, uids: uids.length, queued });
       return queued;
     };
 
@@ -915,12 +977,11 @@ export function registerDraftHandlers(): void {
       }
 
       draftLog('delete:imap:resolve', {
-        folderPath,
-        storedUids: draftRows.map((r) => r.uid),
+        storedUids: serverDeletableUids(draftRows).length,
         scanned: resolved.scanned,
         widened: resolved.widened,
         unresolved: resolved.unresolved,
-        uidsToDelete: [...uidsToDelete],
+        uidsToDelete: uidsToDelete.size,
       });
 
       let totalDeleted = 0;
@@ -939,7 +1000,7 @@ export function registerDraftHandlers(): void {
       // one and the scan still found nothing, say so — the caller must not treat
       // that as a completed removal.
       const unscannable = !resolved.scanned && resolved.unresolved > 0;
-      draftLog('delete:imap:done', { folderPath, deletedUids: totalDeleted, unscannable });
+      draftLog('delete:imap:done', { deletedUids: totalDeleted, unscannable });
       return { success: true, imap: true, deleted: totalDeleted, unscannable };
     });
     try {
@@ -950,11 +1011,14 @@ export function registerDraftHandlers(): void {
         : await runDelete(syncEngine.getClient()); // fallback: no pool
       return result;
     } catch (error: any) {
-      logger.error('[Drafts] Failed to delete draft from IMAP:', error);
+      // The error's class and code only: an ImapFlow command error carries the
+      // command it ran, and the subject-only fallback's SEARCH names the
+      // draft's subject.
+      logger.error('[Drafts] Failed to delete draft from IMAP:', errorDiagnostic(error));
       // The connection died mid-delete. Local rows are already gone, so without
       // a durable retry the server copy would re-sync as a brand-new draft.
       const queued = await queueServerDelete('imap delete failed');
-      draftLog('delete:imap:error', { err: error?.message || String(error), queued });
+      draftLog('delete:imap:error', { error: errorDiagnostic(error), queued });
       return { success: true, imap: false, queued, error: error.message };
     }
     });
@@ -1030,7 +1094,7 @@ export function registerDraftHandlers(): void {
                     const dateUids = await conn.search(crit);
                     (dateUids || []).forEach((u: number) => uids.add(u));
                   } catch (e) {
-                    draftLog('cleanup:datesearch:error', { accountId, err: String(e) });
+                    draftLog('cleanup:datesearch:error', { error: errorDiagnostic(e) });
                   }
                 }
 
@@ -1044,10 +1108,10 @@ export function registerDraftHandlers(): void {
           }
         }
         const r = { accountId, dbFile: dbFileOf(storage), localDeleted: rows.length, imapDeleted };
-        draftLog('cleanup', r);
+        draftLog('cleanup', { dbFile: r.dbFile, localDeleted: rows.length, imapDeleted });
         results.push(r);
       } catch (e: any) {
-        draftLog('cleanup:error', { accountId, err: e?.message || String(e) });
+        draftLog('cleanup:error', { error: errorDiagnostic(e) });
         results.push({ accountId, error: e?.message || String(e) });
       }
     }
@@ -1055,9 +1119,12 @@ export function registerDraftHandlers(): void {
   });
 
   // TEMP: let the renderer append to the same debug log so one file captures the
-  // whole discard flow (renderer args + main-process delete result).
-  ipcMain.handle('drafts:debug', async (_event, event: string, data?: Record<string, unknown>) => {
-    draftLog('renderer:' + event, data || {});
+  // whole discard flow (renderer args + main-process delete result). Only the
+  // allowlisted scalars of a listed event reach the line (see
+  // rendererDraftDebugFields), whatever the renderer sends.
+  ipcMain.handle('drafts:debug', async (_event, event: unknown, data?: unknown) => {
+    const reduced = rendererDraftDebugFields(event, data);
+    draftLog('renderer:' + reduced.event, reduced.fields);
     return { success: true };
   });
 

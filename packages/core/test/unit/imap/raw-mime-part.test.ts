@@ -1,11 +1,13 @@
 import { simpleParser } from 'mailparser';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   attachmentBytesFromSource,
   attachmentSizesFromSource,
   readRawMimeParts,
 } from '../../../src/imap/raw-mime-part';
+import { captureLogs, type CapturedLogs } from '../../../src/test-support/log-capture';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 // Why this module exists, and what breaks without it:
 //
@@ -315,5 +317,43 @@ describe('attachmentSizesFromSource', () => {
     // One pass over the buffer, not three: the splitter slices as it reads.
     expect(spy.mock.calls.length).toBeLessThan(40);
     spy.mockRestore();
+  });
+});
+
+// An attachment's file name comes from the mail and can name the letter, the
+// person or the company it is about ("Payslip-Jane-Doe.pdf"). Both warn lines
+// here reach a release app.log, so they describe the part by its encoding and
+// sizes and the failure by its class, never by the name.
+describe('raw MIME repair — what reaches the log', () => {
+  const NAME = 'SENTINEL-Payslip-Jane.txt';
+  let logs: CapturedLogs;
+  beforeEach(() => { logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }); });
+  afterEach(() => { logs.stop(); });
+
+  // Breaks: 'Attachment "<name>" declares base64 but decoded to …' names the file.
+  it('reports a repaired part by encoding and sizes, not by name', async () => {
+    const source = message([[attachmentHeaders(NAME, 'base64'), LYING_BODY]]);
+
+    const bytes = await attachmentBytesFromSource(source, NAME, Buffer.alloc(7));
+
+    expect(bytes.toString('utf8')).toBe(LYING_BODY);
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing(`declares base64 but decoded to 7 bytes from ${LYING_BODY.length}`)).toHaveLength(1);
+  });
+
+  // Breaks: a failed walk names the file it was looking for, or quotes the
+  // error's message instead of its class.
+  it('reports a failed walk by message size and error class', async () => {
+    const decoded = Buffer.alloc(7);
+    const source = { length: 1 } as unknown as Buffer;
+
+    expect(await attachmentBytesFromSource(source, NAME, decoded)).toBe(decoded);
+    expect(await attachmentSizesFromSource(source, [{ name: NAME, size: 7 }])).toEqual([7]);
+
+    expect(logs.containing(NAME)).toEqual([]);
+    expect(logs.containing('Could not read MIME parts of a 1-byte message')).toEqual([
+      expect.stringMatching(/\{ name: '\w+'(, code: '[\w.:-]+')? \}$/),
+    ]);
+    expect(logs.containing('Could not measure the MIME parts of a 1-byte message')).toHaveLength(1);
   });
 });

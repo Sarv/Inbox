@@ -21,7 +21,7 @@ import { MAX_MESSAGE_BYTES } from '../utils/json-size';
 import { logger } from '../utils/logger';
 import { SarvApiError, parseSarvApiError, type SarvErrorCode } from '../utils/sarv-api-error';
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray } from './llm-response-utils';
+import { parseLLMJsonArray } from './llm-json-array';
 import { formatSenderBehaviorFacts, SENDER_BEHAVIOR_GUIDANCE, SENDER_BEHAVIOR_UNAVAILABLE, type SenderBehaviorSignals } from './sender-behavior-context';
 
 // ========== Types ==========
@@ -678,56 +678,29 @@ export function validateCategorizationResponse(raw: string, knownSlugs: Set<stri
     if (typeof token !== 'string') return null;
     return canonicalBySlug.get(norm(token)) ?? canonicalBySlug.get(spaced(token)) ?? null;
   };
-  // cleanLLMJsonResponse strips <think>/<thinking>/<reasoning>/<thought>
-  // blocks (thinking models like DeepSeek R1 emit these inline) and
-  // markdown code fences. Without the thinking-tag strip, JSON.parse
-  // throws and the entire batch silently returns [].
-  const clean = cleanLLMJsonResponse(raw);
-
-  // Three-pass parse (mirrors AICategorizationService.validateResponse):
-  //   1. Direct JSON.parse on the cleaned response.
-  //   2. Retry after escaping unescaped control chars (raw \n in reasoning).
-  //   3. Per-object salvage — walk the array, parse each {...} entry
-  //      independently. Survives truncation, a single bad reasoning
-  //      string, and trailing prose that would kill the whole batch.
-  let parsed = tryParseLLMJson<any[]>(clean);
-  if (parsed === null) {
-    const { items: salvaged, diagnostics } = salvageJsonArrayWithDiagnostics<any>(clean);
-    const diagSummary =
-      `inputLen=${diagnostics.inputLength} ` +
-      `attempted=${diagnostics.objectsAttempted} ` +
-      `closed=${diagnostics.objectsClosed} ` +
-      `parsed=${diagnostics.objectsParsed} ` +
-      `truncated=${diagnostics.truncatedMidObject} ` +
-      `reachedEnd=${diagnostics.reachedArrayEnd}`;
-    if (salvaged.length > 0) {
-      logger.warn(`[CategorizationUtils] Whole-array parse failed; salvaged ${salvaged.length} object(s) [${diagSummary}]`);
-      parsed = salvaged;
-    } else {
-      // Last resort: the array may be buried in reasoning prose / model markers
-      // that neither the tag-stripper nor the object-salvage handled (e.g.
-      // gpt-oss's analysis channel). Bracket-match the first balanced [...] and
-      // parse that as a unit.
-      const arr = extractBalancedJsonArray(clean);
-      if (arr && arr !== clean) {
-        const retry = tryParseLLMJson<any[]>(arr);
-        if (Array.isArray(retry)) parsed = retry;
-      }
-      if (parsed === null) {
-        // Not a usable array/object → skip (caller leaves it for retry). Log a
-        // SHORT, single-line preview of what we got so the breaking shape is
-        // visible without dumping the whole response.
-        const got = clean.replace(/\s+/g, ' ').trim().slice(0, 200);
-        logger.error(`[CategorizationUtils] No usable JSON in response [${diagSummary}] got="${got}"`);
-        return [];
-      }
-    }
+  // parseLLMJsonArray strips <think>/<thinking>/<reasoning>/<thought> blocks
+  // (thinking models like DeepSeek R1 emit these inline) and markdown fences,
+  // then reads the array in three passes shared with
+  // AICategorizationService.validateResponse: a whole JSON.parse (retried with
+  // raw control characters escaped), per-object salvage (survives truncation, a
+  // single bad reasoning string and trailing prose), and the first balanced
+  // [...] (an array buried in reasoning prose, e.g. gpt-oss's analysis channel).
+  const read = parseLLMJsonArray(raw);
+  if (read.how === 'salvaged') {
+    logger.warn(`[CategorizationUtils] Whole-array parse failed; salvaged ${read.value.length} object(s) [${read.summary}]`);
+  } else if (read.how === 'none') {
+    // Not a usable array/object → skip (caller leaves it for retry). The walk's
+    // counts say what shape broke; the answer itself is the model's reading of
+    // the user's mail and stays out of the log.
+    logger.error(`[CategorizationUtils] No usable JSON in response [${read.summary}]`);
+    return [];
   }
+  const parsed = read.value;
 
   if (!Array.isArray(parsed)) return [];
 
   const results: CategorizationResult[] = [];
-  for (const item of parsed) {
+  for (const [index, item] of parsed.entries()) {
     if (!item || typeof item !== 'object' || !item.emailId) continue;
 
     let categories: string[];
@@ -741,7 +714,9 @@ export function validateCategorizationResponse(raw: string, knownSlugs: Set<stri
         if (slug) {
           if (!seen.has(slug)) { seen.add(slug); categories.push(slug); }
         } else if (token != null && String(token).trim() !== '') {
-          logger.warn(`[CategorizationUtils] Dropping unmappable category token ${JSON.stringify(token)} for email ${item.emailId}`);
+          // The token and the emailId are the model's free text: the token's
+          // length and the item's position in the answer, never their words.
+          logger.warn(`[CategorizationUtils] Dropping an unmappable category token (${String(token).length} chars) in answer item ${index}`);
         }
       }
     } else {

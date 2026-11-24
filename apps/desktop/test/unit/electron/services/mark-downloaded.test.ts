@@ -77,6 +77,16 @@ describe('markDownloadedFromInternet — Windows', () => {
     expect(h.warn.mock.calls[0]).toHaveLength(1); // no error object (its message carries the path)
   });
 
+  // Breaks: the warning's one word for the failure is read from wherever a
+  // library put it: a `code` that is prose (here the path, so the attachment's
+  // name) is logged as if it were a code. It is described by its class instead.
+  it('logs a failure whose code is not an identifier by its class only', async () => {
+    const error = Object.assign(new TypeError('x'), { code: `cannot open ${SECRET_FILE}` });
+    await markDownloadedFromInternet(SECRET_FILE, { platform: 'win32', writeFile: vi.fn(async () => { throw error; }) });
+    expect(String(h.warn.mock.calls[0][0])).toContain('(win32, TypeError)');
+    expect(String(h.warn.mock.calls[0][0])).not.toContain('salaries');
+  });
+
   // Runs only on a Windows runner: the real NTFS stream is readable back.
   it.runIf(process.platform === 'win32')('really writes the stream on NTFS', async () => {
     const directory = await fs.mkdtemp(path.join(tmpdir(), 'inbox-motw-'));

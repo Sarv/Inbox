@@ -54,6 +54,9 @@ describe('getOAuthProvider', () => {
     expect(sarv.apiBaseUrl).toBe('https://ai.sarv.com');
     expect(sarv.edgeBaseUrl).toBe('https://jpr1-ai-edge.sarv.com');
     expect(sarv.llmBaseUrl).toBe('https://jpr1-ai-edge.sarv.com/edge/v1/llm');
+    // Breaks: a build ships an address for a reputation service that does not
+    // run, and a Sarv bearer is sent there (see the reputation test below).
+    expect(sarv.reputationBaseUrl).toBeUndefined();
   });
 
   // MUTATION ISOLATION: callers pass provider configs around and some overwrite
@@ -302,6 +305,56 @@ describe('setSarvBaseUrl', () => {
     providers.setSarvBaseUrl({ oauthBase: DEV_OAUTH, apiBase: 'http://x', edgeBase: 'http://y' });
 
     expect(providers.getOAuthProvider('gmail')).toEqual(gmailBefore);
+  });
+
+  // Breaks: a build ships a reputation origin while Sarv runs no such service
+  // (a Sarv bearer would go to a name nobody operates); a dev build's origin
+  // is lost when the edge or API URL changes; or an override cannot be cleared.
+  it('has no reputation origin by default, keeps a dev one across other changes, and clears it with an empty value', () => {
+    providers.setSarvBaseUrl({ edgeBase: 'http://localhost:8882', apiBase: 'http://localhost:8881' });
+    expect(providers.getOAuthProvider('sarv').reputationBaseUrl).toBeUndefined();
+
+    providers.setSarvBaseUrl({ reputationBase: 'http://localhost:8787' });
+    providers.setSarvBaseUrl({ oauthBase: DEV_OAUTH });
+    const sarv = providers.getOAuthProvider('sarv');
+    expect(sarv.reputationBaseUrl).toBe('http://localhost:8787');
+    expect(sarv.edgeBaseUrl).toBe('http://localhost:8882');
+
+    providers.setSarvBaseUrl({ reputationBase: '' });
+    expect(providers.getOAuthProvider('sarv').reputationBaseUrl).toBeUndefined();
+  });
+
+  // Breaks: a dev build's reputation override, applied by initializeOAuth after
+  // the reputation stage was built, is never seen by that stage.
+  it('tells every listener after the registry is re-pointed, and stops once unsubscribed', () => {
+    const seen: Array<string | undefined> = [];
+    const unsubscribe = providers.onSarvBaseUrlChanged(() => seen.push(providers.getOAuthProvider('sarv').reputationBaseUrl));
+
+    providers.setSarvBaseUrl({ reputationBase: 'https://rep.dev.example' });
+    providers.setSarvBaseUrl({}); // nothing changed: still told, rebuilding is the listener's call
+    unsubscribe();
+    unsubscribe(); // twice is harmless
+    providers.setSarvBaseUrl({ reputationBase: 'https://reputation.sarv.test' });
+
+    expect(seen).toEqual(['https://rep.dev.example', 'https://rep.dev.example']);
+  });
+
+  // Breaks: startup (initializeOAuth) throws because something that listens for
+  // the change failed, or one failing listener keeps the others from hearing,
+  // or the failure's message (which may quote an address) reaches the log.
+  it('sets the registry and tells the other listeners even when one throws', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const after = vi.fn();
+    providers.onSarvBaseUrlChanged(() => { throw new RangeError('https://user:pw@rep.dev.example broke'); });
+    providers.onSarvBaseUrlChanged(after);
+
+    expect(() => providers.setSarvBaseUrl({ reputationBase: 'https://rep.dev.example' })).not.toThrow();
+    expect(providers.getOAuthProvider('sarv').reputationBaseUrl).toBe('https://rep.dev.example');
+    expect(after).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain('A listener for Sarv address changes failed: RangeError');
+    expect(String(warn.mock.calls[0]![0])).not.toMatch(/user|rep\.dev/);
+    warn.mockRestore();
   });
 
   // The oauthBase is recovered by stripping the /api/oauth/authorize suffix, so

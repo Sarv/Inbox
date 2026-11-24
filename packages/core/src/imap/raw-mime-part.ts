@@ -4,6 +4,7 @@ import { finished } from 'stream/promises';
 import { Splitter } from '@zone-eu/mailsplit';
 import type { SplitterChunk } from '@zone-eu/mailsplit';
 
+import { errorDiagnostic } from '../utils/error-diagnostic';
 import { logger } from '../utils/logger';
 
 import { countNonBase64Bytes, misdeclaredBase64 } from './body-structure';
@@ -141,7 +142,8 @@ export async function attachmentBytesFromSource(
   try {
     part = partsNamed(await readRawMimeParts(source, filename), filename)[0];
   } catch (error) {
-    logger.warn(`Could not read MIME parts for "${filename}": ${(error as Error)?.message ?? error}`);
+    // Sizes and the error's class, never the file name: it comes from the mail.
+    logger.warn(`Could not read MIME parts of a ${source.length}-byte message for an attachment`, errorDiagnostic(error));
     return decoded;
   }
 
@@ -152,7 +154,7 @@ export async function attachmentBytesFromSource(
   if (!part.raw) return decoded;
 
   logger.warn(
-    `Attachment "${filename}" declares ${part.encoding} but decoded to ${decoded.length} bytes ` +
+    `An attachment declares ${part.encoding} but decoded to ${decoded.length} bytes ` +
       `from ${part.encodedLength} — serving the part's raw bytes instead`,
   );
   return part.raw;
@@ -178,7 +180,7 @@ export async function attachmentSizesFromSource(
   try {
     parts = await readRawMimeParts(source);
   } catch (error) {
-    logger.warn(`Could not measure MIME parts: ${(error as Error)?.message ?? error}`);
+    logger.warn(`Could not measure the MIME parts of a ${source.length}-byte message`, errorDiagnostic(error));
     return decodedSizes;
   }
 

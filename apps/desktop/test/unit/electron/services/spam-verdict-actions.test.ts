@@ -1,6 +1,7 @@
-import type { EmailRecord, FolderRecord, SenderReport } from '@sarvinbox/core';
+import { getLogLevel, setLogLevel, setLogSink, type EmailRecord, type FolderRecord, type SenderReport } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
+import { captureLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import { applyUserSpamVerdict, revertUserSpamVerdict, senderDomainOf, trustSender, type VerdictStorage } from '../../../../electron/services/spam-verdict-actions';
 
 /**
@@ -187,6 +188,31 @@ describe('applyUserSpamVerdict — spammer list details', () => {
     await applyUserSpamVerdict(anonymous.deps, 'e1', 'spam');
     expect(anonymous.storage.addSpammer).not.toHaveBeenCalled();
     expect(anonymous.reports).toEqual([{ domain: null, ip: '5.6.7.8', verdict: 'spam' }]);
+  });
+});
+
+describe('applyUserSpamVerdict — what reaches the log', () => {
+  // Breaks: "spammer list not updated for <sender>: <error>" — the reported
+  // sender's address (which the release redaction misses when it is not
+  // plain ASCII) and the store's error text. The line stays, naming the
+  // message, the verdict and the kind of failure; the verdict still applies.
+  it.each(['spam', 'ham'] as const)('logs a failed spammer-list update (%s) without the sender', async (verdict) => {
+    const SENTINEL = 'sentinel-spammer';
+    for (const address of [`${SENTINEL}@evil.example`, `${SENTINEL}-jos\u00e9@b\u00fccher.example`, `${SENTINEL}@localhost`]) {
+      const h = harness(email({ fromAddress: address, fromName: `${SENTINEL} Name` }));
+      const failure = Object.assign(new Error(`UNIQUE constraint failed: ${address}`), { code: 'SQLITE_CONSTRAINT' });
+      (h.storage.addSpammer as ReturnType<typeof vi.fn>).mockRejectedValue(failure);
+      (h.storage.removeSpammer as ReturnType<typeof vi.fn>).mockRejectedValue(failure);
+      const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+      try {
+        expect(await applyUserSpamVerdict(h.deps, 'e1', verdict)).toMatchObject({ success: true });
+        expect(h.calls).toContain(`verdict e1 ${verdict}`);
+        expect(logs.containing(SENTINEL)).toEqual([]);
+        expect(logs.containing(`[SpamVerdict] spammer list not updated for e1 (${verdict}): SQLITE_CONSTRAINT`)).toHaveLength(1);
+      } finally {
+        logs.stop();
+      }
+    }
   });
 });
 

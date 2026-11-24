@@ -81,6 +81,36 @@ unreadable encrypted keys, or leave a plaintext recovery copy. Existing Linux
 `v10` ciphertext is treated as unprotected; `v11` identifies the OS-backed form.
 Any separate legacy credential copies remain visible in the protection report.
 
+## Where sign-in tokens may be sent
+
+An OAuth access token for a mail account also opens that mailbox, so the main
+process decides where each one may go. The window that renders mail and
+settings can name an address (a mail host, an AI address, the reputation
+service address), but the main process checks it against these rules before
+any token is read, and refuses anything else. The rules for mail hosts, Sarv's
+AI edge and Sarv's reputation service live in
+`packages/core/src/oauth/token-destinations.ts`.
+
+- Every provider's token goes to that provider's own OAuth endpoints (token
+  refresh, user info, sign-out) and to its IMAP and SMTP hosts, including the
+  aliases the provider documents.
+- A Gmail token also goes to the Gmail API at `gmail.googleapis.com`, which the
+  main process calls itself to set label colours and Gmail's categories.
+- A Sarv token also goes to the LLM API on Sarv's AI edge hosts and to the
+  catalog API the main process calls itself. It would also go to Sarv's
+  reputation service (paths under `/v1/reputation/`), but that service is not
+  running yet: no build has an address for it, so the token goes to no
+  reputation address. The Blocklists address is a setting the window writes,
+  and it is never trusted as a destination.
+- Any other address is refused with no request at all: no token is minted and
+  nothing else is sent. A user who chose the reputation service gets no
+  blocklist lookups and no spam reports. They do not switch to this computer's
+  DNS instead.
+- Requests that carry a Sarv token to the AI edge, the catalog API or the
+  reputation service do not follow redirects.
+- The environment variables that point Sarv's addresses at another server work
+  in development builds only. A release build ignores them and logs that it did.
+
 ## Dependency advisories
 
 `pnpm audit --audit-level=high` runs on every push and pull request

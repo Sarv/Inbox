@@ -1,4 +1,5 @@
-import { jsonrepair } from 'jsonrepair';
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
+import { jsonrepair, JSONRepairError } from 'jsonrepair';
 
 // Shared helpers for handling raw LLM text output in the renderer.
 //
@@ -9,6 +10,9 @@ import { jsonrepair } from 'jsonrepair';
 // supported". Keeping them here lets ai-service and the first-email split
 // (services/first-split) import the single source of truth without pulling
 // core into the renderer.
+
+// The opening tag of a model "thinking" block, matched case-insensitively.
+const THINKING_OPENER = /<(?:think|thinking|reasoning|thought)>/i;
 
 /**
  * Normalize a raw LLM response into a bare JSON string ready for
@@ -34,7 +38,7 @@ export const cleanLLMJsonResponse = (raw: string): string => {
   out = out.replace(/<reasoning>[\s\S]*?<\/reasoning>\s*/gi, '');
   out = out.replace(/<thought>[\s\S]*?<\/thought>\s*/gi, '');
   // Dangling opener (truncated thinking) — drop everything from it onward.
-  const unclosed = out.search(/<(?:think|thinking|reasoning|thought)>/i);
+  const unclosed = out.search(THINKING_OPENER);
   if (unclosed !== -1) out = out.slice(0, unclosed);
   // Strip a leading ```json / ``` fence and trailing ```.
   let s = out.trim();
@@ -56,6 +60,84 @@ export const truncate = (str: string, max: number, suffix: string): string =>
   str.length > max ? str.substring(0, max) + suffix : str;
 
 /**
+ * Why `parseLLMJson` gave up, as a machine code a log line can carry:
+ * `empty` (nothing left once fences and thinking blocks are gone), `prose` (the
+ * model answered in sentences) or `unrepairable` (it began as JSON and the repair
+ * pass could not make it parse).
+ */
+export type LLMJsonFailure = 'empty' | 'prose' | 'unrepairable';
+
+/**
+ * The error `parseLLMJson` throws. Its message describes the response's SHAPE
+ * (`describeLLMResponseShape`) and never quotes it, and `code` says which way it
+ * failed, so a caller that logs it with `errorDiagnostic` still tells "answered
+ * in prose" from "emitted broken JSON" without a word of the answer.
+ */
+export class LLMJsonError extends Error {
+  readonly code: LLMJsonFailure;
+
+  constructor(code: LLMJsonFailure, message: string) {
+    super(message);
+    this.name = 'LLMJsonError';
+    this.code = code;
+  }
+}
+
+/**
+ * What a model's response LOOKED like — its size, whether it came fenced or with
+ * a thinking block, and what kind of character the answer began with — and not
+ * one word of what it said.
+ *
+ * The answer is built from mail: a signature's HTML, a polished draft, a thread
+ * summary, a search query echoed back. This used to go into the thrown message
+ * as `Response began: "<first 160 chars>"`, and every caller logs that error, so
+ * the head of the answer reached app.log at error level from four features. The
+ * shape still separates the failures that matter (prose, a bare fence, a
+ * thinking block that ate the budget, a cut-off object) and quotes nothing.
+ */
+export function describeLLMResponseShape(raw: string): string {
+  const cleaned = cleanLLMJsonResponse(raw);
+  const parts = [`chars=${raw.length}`];
+  if (cleaned.length !== raw.length) parts.push(`cleanedChars=${cleaned.length}`);
+  if (raw.trimStart().startsWith('```')) parts.push('fenced');
+  if (THINKING_OPENER.test(raw)) parts.push('thinking block');
+  parts.push(`began with ${firstCharKind(cleaned)}`);
+  return parts.join(', ');
+}
+
+/** The kind of character `text` starts with, named without the character itself. */
+function firstCharKind(text: string): string {
+  const first = text.charAt(0);
+  if (!first) return 'nothing';
+  if (first === '{') return 'an object';
+  if (first === '[') return 'an array';
+  if (first === '"') return 'a string';
+  if (first === '<') return 'markup';
+  if (/\p{L}/u.test(first)) return 'a letter';
+  if (/\p{N}/u.test(first)) return 'a digit';
+  return 'a symbol';
+}
+
+// jsonrepair's messages quote the text it stopped at (`Unexpected character "S"`,
+// `Invalid unicode character "\u12SE"`), which is the model's answer again. Only
+// these kinds and the position are kept; any other wording is named by its class.
+const REPAIR_FAILURE_KINDS = [
+  'Invalid character',
+  'Unexpected character',
+  'Unexpected end of json string',
+  'Object key expected',
+  'Colon expected',
+  'Invalid unicode character',
+];
+
+/** Why the repair pass failed, without the text it quoted. */
+function describeRepairFailure(err: unknown): string {
+  if (!(err instanceof JSONRepairError)) return errorDiagnostic(err).name;
+  const kind = REPAIR_FAILURE_KINDS.find((known) => err.message.startsWith(known)) ?? 'JSONRepairError';
+  return `${kind} at position ${err.position}`;
+}
+
+/**
  * Clean a raw LLM response and parse it as JSON, repairing the malformations
  * models routinely produce.
  *
@@ -73,16 +155,17 @@ export const truncate = (str: string, max: number, suffix: string): string =>
  *
  * Throws on unrecoverable input, exactly as `JSON.parse` does, so the existing
  * try/catch at every call site keeps working unchanged — this is strictly more
- * recovery, never a new failure mode. The thrown message carries a bounded head
- * of the response, because "Unexpected token 'T'" without the text tells you
- * nothing about a model that answered in prose.
+ * recovery, never a new failure mode. The thrown `LLMJsonError` says which way
+ * it failed (`code`) and what the response looked like
+ * (`describeLLMResponseShape`), never what it said: callers log it, and the
+ * response is built from mail.
  *
  * @param raw the model's response, fences and thinking blocks included
- * @throws when the response cannot be parsed even after repair
+ * @throws LLMJsonError when the response cannot be parsed even after repair
  */
 export function parseLLMJson<T = unknown>(raw: string): T {
   const cleaned = cleanLLMJsonResponse(raw);
-  if (!cleaned) throw new Error('LLM returned an empty response');
+  if (!cleaned) throw new LLMJsonError('empty', `LLM returned an empty response (${describeLLMResponseShape(raw)})`);
   try {
     return JSON.parse(cleaned) as T;
   } catch {
@@ -97,10 +180,7 @@ export function parseLLMJson<T = unknown>(raw: string): T {
   // fabricated answer where an exception belongs. Three real responses did
   // exactly this.
   if (!/^[{[]/.test(cleaned)) {
-    throw new Error(
-      'LLM answered in prose, not JSON. '
-      + `Response began: ${JSON.stringify(cleaned.slice(0, 160))}`,
-    );
+    throw new LLMJsonError('prose', `LLM answered in prose, not JSON (${describeLLMResponseShape(raw)})`);
   }
 
   let repairError = '';
@@ -118,12 +198,12 @@ export function parseLLMJson<T = unknown>(raw: string): T {
       if (parsed && typeof parsed === 'object') return parsed as T;
       repairError = 'model answered in prose, not JSON';
     } catch (err) {
-      repairError = (err as Error).message;
+      repairError = describeRepairFailure(err);
     }
   }
-  throw new Error(
-    `LLM response was not JSON even after repair (${repairError}). `
-    + `Response began: ${JSON.stringify(cleaned.slice(0, 160))}`,
+  throw new LLMJsonError(
+    'unrepairable',
+    `LLM response was not JSON even after repair (${repairError}; ${describeLLMResponseShape(raw)})`,
   );
 }
 

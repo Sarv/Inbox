@@ -1,3 +1,4 @@
+import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core/logger';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createStore } from 'zustand/vanilla';
 
@@ -8,6 +9,7 @@ vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
   clearCategoryBadgeCache: vi.fn(),
 }));
 
+import { captureLogs } from '../../../../../../../packages/core/src/test-support/log-capture';
 import { getPageSizeForView } from '../../../../../src/store/helpers';
 import { buildEmailReplacementPatch, createEmailsSlice, sectionRowsPatch, selectLoadedEmailIds } from '../../../../../src/store/slices/emails-slice';
 import { createSearchAISlice } from '../../../../../src/store/slices/search-ai-slice';
@@ -1305,5 +1307,76 @@ describe('loadFolders — Spam folders for the remote-image guard', () => {
 
     expect(isSpamFolderMail('|Indésirables|', 'acct-a')).toBe(true);
     expect(isSpamFolderMail('|Indésirables|', 'acct-b')).toBe(false);
+  });
+});
+
+describe('selectEmail — the view log line', () => {
+  // Breaks: the typed search text (`search="<query>"`) is written to app.log on
+  // every email opened while a search is active — release builds included.
+  const SENTINEL = 'SENTINEL-SEARCH-0e4f';
+  const open = (searchQuery: string, emailId: string | null = 'e1', view: Record<string, any> = {}) => {
+    const state: Record<string, any> = {
+      selectedEmailId: null, selectedFolderId: 'f1', selectedVirtualFolder: null, viewingSnoozed: false, viewingAICategory: null,
+      searchQuery, folders: [{ id: 'f1', path: 'INBOX' }], emails: [row('e1')], searchResults: [], threadEmails: [],
+      loadThread: vi.fn(), ...view,
+    };
+    const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
+    const slice: any = sliceOver(createEmailsSlice, set, () => ({ ...slice, ...state }));
+    // Every level and the raw console, not console.log alone: the renderer
+    // logger writes INFO there but WARN/ERROR/DEBUG to their own methods, so a
+    // sentinel check over console.log would miss a slug written at any other.
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      slice.selectEmail(emailId);
+    } finally {
+      logs.stop();
+    }
+    return { lines: logs.lines, state };
+  };
+
+  it('says a search is set, never what it is', () => {
+    const { lines, state } = open(SENTINEL);
+    expect(state.selectedEmailId).toBe('e1');
+    expect(state.loadThread).toHaveBeenCalledWith('t-e1');
+    const line = lines.find((text) => text.includes('[View] selectEmail'));
+    expect(line).toContain('view=INBOX, search=set, pool=1 emails');
+    for (const text of lines) expect(text).not.toContain(SENTINEL);
+  });
+
+  it('says nothing about search when none is active', () => {
+    const { lines } = open('');
+    const line = lines.find((text) => text.includes('[View] selectEmail'));
+    expect(line).toContain('view=INBOX, pool=1 emails');
+    expect(line).not.toContain('search');
+  });
+
+  // Clearing the selection logs `id=null` and loads no thread.
+  it('logs a cleared selection as id=null', () => {
+    const { lines, state } = open(SENTINEL, null);
+    expect(state.loadThread).not.toHaveBeenCalled();
+    expect(lines.find((text) => text.includes('[View] selectEmail'))).toContain('id=null, view=INBOX, search=set');
+    for (const text of lines) expect(text).not.toContain(SENTINEL);
+  });
+
+  // Breaks: the line logs `view=AI:<slug>`, and a custom category's slug is
+  // made from the name the user typed ("Project Falcon" -> project_falcon), so
+  // it reached app.log on every email opened in that category.
+  it('logs an AI category view as AI:category, never its slug', () => {
+    const { lines, state } = open('', 'e1', { viewingAICategory: 'sentinel_project_falcon' });
+    expect(state.selectedEmailId).toBe('e1');
+    const line = lines.find((text) => text.includes('[View] selectEmail'));
+    expect(line).toContain('view=AI:category, pool=1 emails');
+    for (const text of lines) expect(text.toLowerCase()).not.toContain('sentinel');
+  });
+
+  // Breaks: the built-in views lose their names along with the AI slug, so the
+  // log no longer says which of our own views an email was opened from.
+  it.each([
+    [{ selectedFolderId: null, selectedVirtualFolder: 'virtual-starred' }, 'view=virtual-starred'],
+    [{ selectedFolderId: null, viewingSnoozed: true }, 'view=snoozed'],
+    [{ selectedFolderId: null }, 'view=unknown'],
+  ])('keeps a built-in view by name (%o)', (view, expected) => {
+    const { lines } = open('', 'e1', view);
+    expect(lines.find((text) => text.includes('[View] selectEmail'))).toContain(`${expected}, pool=1 emails`);
   });
 });

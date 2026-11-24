@@ -74,6 +74,9 @@ vi.mock('@sarvinbox/core', async () => ({
   },
   LocalDnsblProvider: class { constructor(public deps: unknown) {} },
   SarvReputationProvider: class { constructor(public deps: unknown) {} },
+  // The blocklist service rebuilds its stage when the Sarv registry is
+  // re-pointed; nothing re-points it here.
+  onSarvBaseUrlChanged: () => () => {},
 }));
 
 // The Sarv provider's token and transport, which the blocklist service imports:

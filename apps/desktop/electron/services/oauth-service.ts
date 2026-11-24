@@ -19,6 +19,7 @@ import { AddressInfo } from 'net';
 
 import {
   decodeJwtPayload,
+  describeEndpointOrigin,
   exchangeCodeForTokens,
   generatePkcePair,
   generateState,
@@ -114,22 +115,26 @@ export function initializeOAuth(): void {
   if (yhId) setOAuthClientId('yahoo', yhId);
 
   // Sarv: each base URL is independently dev-switchable — the OAuth server,
-  // the catalog API and the edge LLM gateway can each point at a different
-  // host. See SARV_OAUTH_SETUP.md. A release build takes none of them.
+  // the catalog API, the edge LLM gateway and the reputation service can each
+  // point at a different host. See SARV_OAUTH_SETUP.md. A release build takes
+  // none of them.
   const sarv = sarvEnvOverrides();
   const sarvOauthBase = sarv.SARVINBOX_SARV_OAUTH_BASE_URL;
   const sarvApiBase = sarv.SARVINBOX_SARV_API_BASE_URL;
   const sarvEdgeBase = sarv.SARVINBOX_SARV_EDGE_BASE_URL;
-  if (sarvOauthBase || sarvApiBase || sarvEdgeBase) {
+  const sarvReputationBase = sarv.SARVINBOX_SARV_REPUTATION_BASE_URL;
+  if (sarvOauthBase || sarvApiBase || sarvEdgeBase || sarvReputationBase) {
     setSarvBaseUrl({
       oauthBase: sarvOauthBase,
       apiBase: sarvApiBase,
       edgeBase: sarvEdgeBase,
+      reputationBase: sarvReputationBase,
     });
     logger.info('[OAuth] Sarv base URLs overridden', {
       oauth: sarvOauthBase,
       api: sarvApiBase,
       edge: sarvEdgeBase,
+      reputation: sarvReputationBase,
     });
   }
   // Sarv: env override wins (dev / staging), production constant otherwise.
@@ -154,14 +159,16 @@ export function initializeOAuth(): void {
 /**
  * The environment variables that re-point the Sarv sign-in. Every one of them
  * decides where a Sarv credential goes: the server that hosts the consent page
- * and receives the authorization code, the API and gateway the bearer is sent
- * to (`isSarvAIEndpointAllowed` trusts whatever these name), and the client
- * registration the tokens are issued to.
+ * and receives the authorization code, the API, gateway and reputation service
+ * the bearer is sent to (`isSarvAIEndpointAllowed` and `sarvReputationOrigin`
+ * trust whatever these name), and the client registration the tokens are
+ * issued to.
  */
 const SARV_ENV_OVERRIDES = [
   'SARVINBOX_SARV_OAUTH_BASE_URL',
   'SARVINBOX_SARV_API_BASE_URL',
   'SARVINBOX_SARV_EDGE_BASE_URL',
+  'SARVINBOX_SARV_REPUTATION_BASE_URL',
   'SARVINBOX_SARV_CLIENT_ID',
   'SARVINBOX_SARV_CLIENT_SECRET',
 ] as const;
@@ -811,7 +818,7 @@ export function sarvAIBearerResolver(
 ): ((forceRefresh?: boolean) => Promise<string>) | null {
   if (oauthProvider !== 'sarv' || !isSarvAIEndpointAllowed(url)) {
     logger.warn(
-      `[OAuth] Refused ${describeOAuthProvider(oauthProvider)} token for AI endpoint ${describeEndpoint(url)} — only a Sarv sign-in may authenticate Sarv AI endpoints`,
+      `[OAuth] Refused ${describeOAuthProvider(oauthProvider)} token for AI endpoint ${describeEndpointOrigin(url)} — only a Sarv sign-in may authenticate Sarv AI endpoints`,
     );
     return null;
   }
@@ -821,16 +828,6 @@ export function sarvAIBearerResolver(
 /** "a gmail" for a real provider id; never the renderer's raw text otherwise. */
 function describeOAuthProvider(providerId: unknown): string {
   return listOAuthProviders().some((p) => p.id === providerId) ? `a ${String(providerId)}` : 'an unrecognised provider\'s';
-}
-
-/** The URL's origin (never its path, query or credentials), for a log line. */
-function describeEndpoint(url: string | undefined): string {
-  if (typeof url !== 'string' || url.trim() === '') return '(none)';
-  try {
-    return new URL(url.trim()).origin;
-  } catch {
-    return '(not a URL)';
-  }
 }
 
 // ---------- Internal helpers ----------

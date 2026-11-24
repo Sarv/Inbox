@@ -38,7 +38,7 @@ In dev, put them in the gitignored `.env` at the repo root (see
 [`.env.example`](./.env.example)).
 
 They are **dev-build only.** A release build (`vite build`, i.e. every shipped
-app) ignores all five and uses the built-in production client and endpoints,
+app) ignores all six and uses the built-in production client and endpoints,
 whatever its environment says: a shipped app's environment belongs to whoever
 launched it, and these decide where the sign-in and the Sarv token go. It logs
 `[OAuth] Release build — ignoring <names> …` once, naming each ignored
@@ -51,6 +51,7 @@ variable but never its value.
 | `SARVINBOX_SARV_OAUTH_BASE_URL` | Base URL of the OAuth server; `/api/oauth/authorize`, `/api/oauth/token`, `/api/oauth/userinfo` and `/api/oauth/revoke` are appended | `https://oauth.sarv.com` |
 | `SARVINBOX_SARV_API_BASE_URL` | Base URL of the Sarv API (the LLM provider, model and zone catalog) | `https://ai.sarv.com` |
 | `SARVINBOX_SARV_EDGE_BASE_URL` | Base URL of the LLM gateway; `/edge/v1/llm` is appended | Sarv's production edge |
+| `SARVINBOX_SARV_REPUTATION_BASE_URL` | Origin of the sender-reputation service (no path); `/v1/reputation/lookup` and `/v1/reputation/report` are appended. It is the only address the Blocklists setting may name, so it must be https: that field stores nothing else | none: the service is not running yet, so release builds do not offer it |
 
 ```bash
 cp .env.example .env      # then fill in the SARVINBOX_SARV_* values you need
@@ -167,6 +168,21 @@ port, or the configured edge base URL; only under `/edge/v1/llm`; never a URL
 carrying credentials), fetches the catalog only from its own configured API
 base URL, and refuses redirects. On a 401 it refreshes the token and retries
 once.
+
+The other place the token could go is Sarv's sender-reputation service, when the
+user picks it under Security → Blocklists. That service is not running yet, so
+a release build has no origin for it, does not offer it, and sends the token to
+no reputation address. A dev build can set one with
+`SARVINBOX_SARV_REPUTATION_BASE_URL`. The address in the tab is a setting the
+renderer writes, so main checks it before it reads the token store: it must be
+exactly the configured reputation origin, with no credentials, path, query or
+fragment. Any other address
+is refused, and nothing is sent: no lookup, no report, no token. Requests go to
+`/v1/reputation/lookup` and `/v1/reputation/report` on that origin and do not
+follow redirects. The token used is the first signed-in Sarv account's, and no
+other provider's token is ever minted for this. The check is
+`sarvReputationOrigin()` in
+[`packages/core/src/oauth/token-destinations.ts`](packages/core/src/oauth/token-destinations.ts).
 
 Removing a Sarv account deletes its tokens from this device and then revokes the
 refresh token at `/api/oauth/revoke` (RFC 7009, JSON body). A refresh already in

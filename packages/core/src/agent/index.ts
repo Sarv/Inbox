@@ -25,6 +25,7 @@ export {
   extractBalancedJsonArray,
 } from './llm-response-utils';
 export type { SalvageDiagnostics } from './llm-response-utils';
+export { parseLLMJsonArray, salvageDiagnosticsSummary, type LLMJsonArrayParse } from './llm-json-array';
 export {
   applySecurityGate,
   buildCategorizationPrompt,

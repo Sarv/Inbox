@@ -1,7 +1,9 @@
 // AI Service - Handles AI provider configuration and API calls
 
 import { aiApiKeyHeaders, buildAIAuthHeaders, buildAIChatRequestOptions, checkAIEndpoint, effectiveAIBaseUrl } from '@sarvinbox/core/ai-provider-auth';
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
 import { stripHtmlTags } from '@sarvinbox/core/html-text';
+import { fieldSizesForLog } from '@sarvinbox/core/log-text';
 import { createLogger } from '@sarvinbox/core/logger';
 
 // Canonical AI feature defaults live in settings/types (a types+consts
@@ -11,6 +13,17 @@ import { parseLLMJson, truncate } from '../utils/llm-json';
 
 // A leaf module (it imports nothing back), so a plain value import is no cycle.
 import { compressHtmlToPlainTextForLLM } from './llm-text';
+
+// Everything these features send to and get back from a model is mail or the
+// user's own words: a draft, a signature's HTML, a thread, a search query. Their
+// log lines carry what happened (counts, lengths, booleans, which fields came
+// back, an error's class/code/status via errorDiagnostic) and never that text —
+// the renderer forwards info/warn/error to app.log, release builds included.
+const llmLog = createLogger('AI');
+const polishLog = createLogger('AIPolish');
+const signatureLog = createLogger('SignatureDetection');
+const searchLog = createLogger('AISearch');
+const summaryLog = createLogger('ThreadSummary');
 
 export type AIProviderType = 'openai' | 'gemini' | 'sarv' | 'custom';
 
@@ -314,7 +327,7 @@ export async function hydrateAiSecrets(): Promise<void> {
       aiKeyStorageEncrypted = res.encrypted;
     }
   } catch (error) {
-    console.error('Failed to load AI key status from vault:', error);
+    llmLog.error('failed to load AI key status from the vault', errorDiagnostic(error));
   }
 
   // One-time migration of any plaintext key still on disk → vault, then strip.
@@ -332,7 +345,7 @@ export async function hydrateAiSecrets(): Promise<void> {
     }
     if (migrated) persistStripped(parsed);
   } catch (error) {
-    console.error('Failed to migrate AI keys to vault:', error);
+    llmLog.error('failed to migrate AI keys to the vault', errorDiagnostic(error));
   }
 }
 
@@ -361,7 +374,7 @@ export function loadAISettings(): AISettings {
       };
     }
   } catch (error) {
-    console.error('Failed to load AI settings:', error);
+    llmLog.error('failed to load AI settings', errorDiagnostic(error));
   }
   return { providers: [] };
 }
@@ -381,7 +394,7 @@ export function saveAISettings(settings: AISettings): void {
     persistStripped(settings);
     window.dispatchEvent(new Event('sarvinbox:ai-provider-changed'));
   } catch (error) {
-    console.error('Failed to save AI settings:', error);
+    llmLog.error('failed to save AI settings', errorDiagnostic(error));
   }
 }
 
@@ -863,7 +876,7 @@ export function getUserProfile(): UserProfile | null {
       }
     }
   } catch (error) {
-    console.error('Failed to load user profile:', error);
+    llmLog.error('failed to load the user profile', errorDiagnostic(error));
   }
   return null;
 }
@@ -1042,35 +1055,32 @@ export async function polishText(
       responseText = await callOpenAICompatibleAPI(provider, systemPrompt, userMessage);
     }
 
-    console.log('[AI Service] Raw response:', responseText);
-
     // Parse JSON response
     try {
       // Clean up response - strip thinking blocks and markdown code fences.
       const parsed: any = parseLLMJson(responseText);
-      console.log('[AI Service] Parsed response:', parsed);
 
       const result = {
         subject: parsed.subject || undefined,
         body: parsed.body || '',
       };
 
-      console.log('[AI Service] Final result:', result);
-
       if (!result.body) {
-        console.warn('[AI Service] Body is empty, using raw response');
+        polishLog.warn(`answer had no body, using it whole (responseChars=${responseText.length})`);
         return { body: responseText };
       }
 
+      // The draft, the thread it answers and the rewrite are the user's mail:
+      // what came back is described, never shown.
+      polishLog.info(`polished subject=${!!result.subject} bodyChars=${String(result.body).length}`);
       return result;
     } catch (parseError) {
       // If JSON parsing fails, return as body only
-      console.warn('[AI Service] Failed to parse JSON response:', parseError);
-      console.warn('[AI Service] Raw text was:', responseText);
+      polishLog.warn('answer was not JSON, using it whole', { ...errorDiagnostic(parseError), responseChars: responseText.length });
       return { body: responseText };
     }
   } catch (error) {
-    console.error('[AI Service] AI polish failed:', error);
+    polishLog.error('polish failed', errorDiagnostic(error));
     throw error;
   }
 }
@@ -1084,7 +1094,6 @@ const LLM_REQUEST_TIMEOUT_MS = 60000;
 // Call OpenAI-compatible API (OpenAI, Sarv) with retry for rate limits
 /** The most an empty reply at the token limit grows the budget to on its one retry. */
 const MAX_GROWN_BUDGET = 32_000;
-const aiLog = createLogger('AI');
 
 async function callOpenAICompatibleAPI(
   provider: AIProvider,
@@ -1155,7 +1164,7 @@ async function callOpenAICompatibleAPI(
     // existing fallback logic — heuristic slice, partial marking —
     // engages instead of seeing a bare DOMException.
     if (retryCount < MAX_RETRIES) {
-      console.log(`[AI] Request timed out after ${LLM_REQUEST_TIMEOUT_MS}ms, retry ${retryCount + 1}/${MAX_RETRIES}`);
+      llmLog.info(`request timed out after ${LLM_REQUEST_TIMEOUT_MS}ms, retry ${retryCount + 1}/${MAX_RETRIES}`);
       onStatus?.('Retrying after error…');
       return callOpenAICompatibleAPI(provider, systemPrompt, userMessage, retryCount + 1, maxTokens, responseFormat, onStatus, budgetGrown);
     }
@@ -1189,7 +1198,7 @@ async function callOpenAICompatibleAPI(
       ? Math.min(retryAfterSec * 1000, 30000)
       : Math.min(1000 * Math.pow(2, retryCount + 1), 30000); // 2s, 4s, 8s... max 30s
 
-    console.log(`[AI] Transient ${response.status}, waiting ${waitTime}ms before retry ${retryCount + 1}/${MAX_RETRIES}`);
+    llmLog.info(`transient ${response.status}, waiting ${waitTime}ms before retry ${retryCount + 1}/${MAX_RETRIES}`);
     clearTimeout(abortTimer);
     onStatus?.(
       response.status === 429
@@ -1219,13 +1228,40 @@ async function callOpenAICompatibleAPI(
     // retries for errors are not used up by it.
     const budget = maxTokens || 16000;
     if (choice.finish_reason === 'length' && !budgetGrown && budget < MAX_GROWN_BUDGET) {
-      aiLog.warn(`Empty reply at the token limit (${budget}); retrying once with ${Math.min(budget * 2, MAX_GROWN_BUDGET)}.`);
+      llmLog.warn(`Empty reply at the token limit (${budget}); retrying once with ${Math.min(budget * 2, MAX_GROWN_BUDGET)}.`);
       return callOpenAICompatibleAPI(provider, systemPrompt, userMessage, retryCount, Math.min(budget * 2, MAX_GROWN_BUDGET), responseFormat, onStatus, true);
     }
-    // Content-free: which fields came back and how long, never the text
-    // (a reasoning trace quotes the mail it was given).
-    const fields = Object.entries(choice.message || {}).map(([key, value]) => `${key}${typeof value === 'string' ? `:${value.length}` : ''}`).join(',');
-    aiLog.warn(`Empty reply: provider=${provider.type} finish=${String(choice.finish_reason ?? 'none').slice(0, 40)} fields=${fields.slice(0, 200)} completion_tokens=${Number(data.usage?.completion_tokens) || 0}`);
+    // JSON.stringify so the record appears inline in copy-pasted console
+    // output instead of as a collapsed `{…}`. The message's fields are named
+    // with their sizes only: reasoning_content and a refusal restate the
+    // prompt, which is mail, so which fields came back (and how big) is what
+    // separates "thought until max_tokens" from "filtered" without them.
+    llmLog.warn(
+      'empty content from the model:\n' +
+        JSON.stringify(
+          {
+            provider: provider.type,
+            model: provider.model,
+            finish_reason: choice.finish_reason,
+            usage: data.usage,
+            messageFields: fieldSizesForLog(choice.message),
+          },
+          null,
+          2,
+        ),
+    );
+    // Also dump the request body so we can verify whether the
+    // backend received reasoning_effort / response_format. If the
+    // Sarv proxy is stripping those fields, we'd never know without
+    // this. Truncate the prompts so the log isn't huge.
+    const reqDump = {
+      ...requestBody,
+      messages: (requestBody.messages as any[]).map((m) => ({
+        role: m.role,
+        content_chars: typeof m.content === 'string' ? m.content.length : null,
+      })),
+    };
+    llmLog.warn('request body that produced empty content:\n' + JSON.stringify(reqDump, null, 2));
   }
   return content;
 }
@@ -1507,7 +1543,7 @@ export function loadAIFeatures(): AIFeatureConfig[] {
       }
     }
   } catch (error) {
-    console.error('Failed to load AI features:', error);
+    llmLog.error('failed to load AI features', errorDiagnostic(error));
   }
   return DEFAULT_AI_FEATURES;
 }
@@ -1617,9 +1653,21 @@ export function extractSignatureBySelector(htmlBody: string, selector: string): 
       return element.outerHTML;
     }
   } catch (error) {
-    console.error('[Signature Detection] Failed to extract by selector:', error);
+    warnSelectorFailure('extract a signature', selector, error);
   }
   return null;
+}
+
+/**
+ * A signature selector that would not apply, logged without the selector.
+ *
+ * The selector came from a model that read the sender's HTML (or from the
+ * cache of one), so it names the mail's own classes and ids, and the browser's
+ * SyntaxError quotes it whole. Its class, code and length tell a malformed
+ * selector from anything else.
+ */
+function warnSelectorFailure(action: string, selector: string, error: unknown): void {
+  signatureLog.warn(`could not ${action}: the selector did not apply`, { ...errorDiagnostic(error), selectorChars: selector.length });
 }
 
 /**
@@ -1639,7 +1687,6 @@ function tryCommonSignatureSelectors(htmlBody: string): { selector: string; html
         const element = Array.from(doc.querySelectorAll(selector))
           .find(el => isRemovableSignatureElement(selector, el));
         if (element) {
-          console.log('[Signature Detection] Found common selector:', selector);
           return {
             selector,
             html: element.outerHTML,
@@ -1651,9 +1698,18 @@ function tryCommonSignatureSelectors(htmlBody: string): { selector: string; html
       }
     }
   } catch (error) {
-    console.error('[Signature Detection] Failed to try common selectors:', error);
+    signatureLog.error('failed to try the common selectors', errorDiagnostic(error));
   }
   return null;
+}
+
+/**
+ * The model's `confidence` for a log line: one of the three values it is asked
+ * for, or `other` — the field is the model's to fill, so anything else it puts
+ * there is not ours to print.
+ */
+function confidenceLabel(confidence: unknown): string {
+  return confidence === 'high' || confidence === 'medium' || confidence === 'low' ? confidence : 'other';
 }
 
 /**
@@ -1681,7 +1737,6 @@ export async function detectSignature(
   try {
     const cachedResult = await window.electronAPI.signatures.getByEmail(senderEmail);
     if (cachedResult.success && cachedResult.data) {
-      console.log('[Signature Detection] Found cached selector for:', senderEmail, '->', cachedResult.data.htmlSelector);
       const cached = cachedResult.data;
 
       // Try to extract signature using cached selector
@@ -1692,6 +1747,7 @@ export async function detectSignature(
         const doc = parser.parseFromString(extractedHtml, 'text/html');
         const textContent = doc.body.textContent || '';
 
+        signatureLog.info('found by the cached selector');
         return {
           hasSignature: true,
           htmlSelector: cached.htmlSelector,
@@ -1702,18 +1758,17 @@ export async function detectSignature(
         };
       }
       // Selector didn't match, need to re-detect
-      console.log('[Signature Detection] Cached selector did not match, re-detecting');
+      signatureLog.info('cached selector did not match, re-detecting');
     }
   } catch (error) {
-    console.error('[Signature Detection] Failed to check cache:', error);
+    signatureLog.error('failed to check the cache', errorDiagnostic(error));
   }
 
   // Try common signature selectors first (no AI needed for well-known patterns)
   const commonMatch = tryCommonSignatureSelectors(emailBody);
   if (commonMatch) {
-    console.log('[Signature Detection] Found via common selector:', commonMatch.selector);
-
     // Cache this for future use
+    let savedToCache = false;
     try {
       const saveResult = await window.electronAPI.signatures.save({
         email: senderEmail,
@@ -1722,10 +1777,11 @@ export async function detectSignature(
         emailId: emailId,
         confidence: 'high',
       });
-      console.log('[Signature Detection] Cached selector result:', saveResult);
+      savedToCache = saveResult?.success === true;
     } catch (error) {
-      console.error('[Signature Detection] Failed to cache common selector:', error);
+      signatureLog.error('failed to cache the common selector', errorDiagnostic(error));
     }
+    signatureLog.info(`found by a common selector (cached=${savedToCache})`);
 
     return {
       hasSignature: true,
@@ -1740,7 +1796,7 @@ export async function detectSignature(
   // Check provider availability (only needed for AI fallback)
   const provider = getDefaultProvider();
   if (!provider) {
-    console.warn('[Signature Detection] No AI provider configured and no common selector found');
+    signatureLog.warn('no AI provider configured and no common selector matched');
     return {
       hasSignature: false,
       htmlSelector: null,
@@ -1766,7 +1822,7 @@ export async function detectSignature(
 
   // Call AI for signature detection - ask for HTML selector (fallback for unknown patterns)
   try {
-    console.log('[Signature Detection] Calling AI for unknown signature pattern:', senderEmail);
+    signatureLog.info(`asking the AI (bodyChars=${emailBody.length})`);
 
     // Strip base64 images to save tokens and avoid confusing the LLM
     const cleanedBody = emailBody
@@ -1786,11 +1842,9 @@ export async function detectSignature(
       responseText = await callOpenAICompatibleAPI(provider, prompts.systemPrompt, userMessage);
     }
 
-    console.log('[Signature Detection] Raw AI response:', responseText);
-
     // Handle empty response (token limit reached)
     if (!responseText || responseText.trim() === '') {
-      console.warn('[Signature Detection] AI returned empty response (possibly hit token limit)');
+      signatureLog.warn('AI returned an empty response (possibly hit the token limit)');
       return {
         hasSignature: false,
         htmlSelector: null,
@@ -1803,7 +1857,6 @@ export async function detectSignature(
 
     // Parse JSON response
     const parsed: any = parseLLMJson(responseText);
-    console.log('[Signature Detection] Parsed response:', parsed);
 
     const result: SignatureDetectionResult = {
       hasSignature: parsed.hasSignature === true,
@@ -1815,24 +1868,32 @@ export async function detectSignature(
     };
 
     // Cache the result if signature was found with a valid selector
+    let savedToCache = false;
     if (result.hasSignature && result.htmlSelector) {
       try {
-        await window.electronAPI.signatures.save({
+        const saveResult = await window.electronAPI.signatures.save({
           email: senderEmail,
           htmlSelector: result.htmlSelector,
           sampleHtml: result.sampleHtml || undefined,
           emailId: emailId,
           confidence: result.confidence,
         });
-        console.log('[Signature Detection] Cached selector for:', senderEmail, '->', result.htmlSelector);
+        savedToCache = saveResult?.success === true;
       } catch (error) {
-        console.error('[Signature Detection] Failed to cache signature:', error);
+        signatureLog.error('failed to cache the signature', errorDiagnostic(error));
       }
     }
 
+    // The answer copies the signature out of the sender's HTML (sampleHtml,
+    // signatureText) and names its elements (htmlSelector): it is described
+    // here, never logged.
+    signatureLog.info(
+      `AI answered hasSignature=${!!result.hasSignature} selector=${result.htmlSelector ? 'present' : 'none'}`
+      + ` confidence=${confidenceLabel(result.confidence)} responseChars=${responseText.length} cached=${savedToCache}`,
+    );
     return result;
   } catch (error) {
-    console.error('[Signature Detection] AI detection failed:', error);
+    signatureLog.error('AI detection failed', errorDiagnostic(error));
     return {
       hasSignature: false,
       htmlSelector: null,
@@ -1864,7 +1925,7 @@ export function loadCategorizationPrompts(): CategorizationPrompts {
       return JSON.parse(stored);
     }
   } catch (error) {
-    console.error('Failed to load categorization prompts:', error);
+    llmLog.error('failed to load categorization prompts', errorDiagnostic(error));
   }
   // Default prompt lives in main process (ai-categorization-service.ts)
   // This fallback is only used if the user hasn't customized prompts
@@ -1878,7 +1939,7 @@ export function saveCategorizationPrompts(prompts: CategorizationPrompts): void 
   try {
     localStorage.setItem(CATEGORIZATION_PROMPTS_KEY, JSON.stringify(prompts));
   } catch (error) {
-    console.error('Failed to save categorization prompts:', error);
+    llmLog.error('failed to save categorization prompts', errorDiagnostic(error));
   }
 }
 
@@ -2231,7 +2292,7 @@ export async function parseSearchQuery(query: string): Promise<AISearchResult> {
   // Try fast path first - parse simple queries without AI
   const simpleResult = parseSimpleQuery(query);
   if (simpleResult) {
-    console.log('[AI Search] Fast path: parsed simple query without AI');
+    searchLog.info('fast path: parsed a simple query without AI');
     return simpleResult;
   }
 
@@ -2245,7 +2306,8 @@ export async function parseSearchQuery(query: string): Promise<AISearchResult> {
     };
   }
 
-  console.log('[AI Search] Using AI to parse complex query:', query);
+  // The query is what the user typed: its size, never its words.
+  searchLog.info(`parsing a query with AI (queryChars=${query.length})`);
   const now = Math.floor(Date.now() / 1000);
   const currentDate = new Date().toISOString().split('T')[0];
 
@@ -2262,8 +2324,6 @@ export async function parseSearchQuery(query: string): Promise<AISearchResult> {
     } else {
       responseText = await callOpenAICompatibleAPI(provider, systemPrompt, userMessage);
     }
-
-    console.log('[AI Search] Raw response:', responseText.substring(0, 500));
 
     // Clean and parse response
     const parsed: any = parseLLMJson(responseText);
@@ -2282,13 +2342,15 @@ export async function parseSearchQuery(query: string): Promise<AISearchResult> {
     if (parsed.textQuery) searchQuery.textQuery = parsed.textQuery;
     if (parsed.labels) searchQuery.labels = parsed.labels;
 
+    // Which fields the model filled is logged once, by the search store
+    // (`parsed query fields=…`), for this path and the fast one alike.
     return {
       query: searchQuery,
       interpretation: parsed.interpretation || 'Searching for: ' + query,
       confidence: parsed.confidence || 0.7,
     };
   } catch (error) {
-    console.error('[AI Search] Failed to parse query:', error);
+    searchLog.warn('AI could not parse the query, searching the text as typed', errorDiagnostic(error));
     // Fall back to text search
     return {
       query: { textQuery: query },
@@ -2382,7 +2444,7 @@ export function stripSignaturesSimple(htmlBody: string): string {
 
     return clean;
   } catch (error) {
-    console.error('[Signature Strip] Failed:', error);
+    signatureLog.error('failed to strip signatures', errorDiagnostic(error));
     return htmlBody;
   }
 }
@@ -2395,7 +2457,7 @@ export async function generateThreadSummary(
 ): Promise<ThreadSummary | null> {
   const provider = getDefaultProvider();
   if (!provider) {
-    console.log('[Thread Summary] No AI provider configured');
+    summaryLog.info('no AI provider configured');
     return null;
   }
 
@@ -2438,19 +2500,23 @@ ${emailsText}`;
       responseText = await callOpenAICompatibleAPI(provider, THREAD_SUMMARY_SYSTEM_PROMPT, userMessage);
     }
 
-    console.log('[Thread Summary] Raw response:', responseText.substring(0, 300));
-
     // Clean and parse response
     const parsed: any = parseLLMJson(responseText);
 
-    return {
+    const summary: ThreadSummary = {
       summary: parsed.summary || '',
       keyPoints: parsed.key_points || [],
       participants: parsed.participants || [],
       confidence: parsed.confidence || 0.7,
     };
+    // A summary of the thread is the thread: its size and shape, not its words.
+    summaryLog.info(
+      `summarised ${emails.length} emails (summaryChars=${typeof summary.summary === 'string' ? summary.summary.length : 0}`
+      + `, keyPoints=${Array.isArray(summary.keyPoints) ? summary.keyPoints.length : 0})`,
+    );
+    return summary;
   } catch (error) {
-    console.error('[Thread Summary] Failed to generate:', error);
+    summaryLog.error('failed to generate', errorDiagnostic(error));
     return null;
   }
 }
@@ -2493,7 +2559,7 @@ export function removeSignatureFromBody(
       return { bodyWithoutSignature, signature };
     }
   } catch (error) {
-    console.error('[Signature Detection] Failed to remove signature:', error);
+    warnSelectorFailure('remove a signature', signatureResult.htmlSelector, error);
   }
 
   return { bodyWithoutSignature: emailBody, signature: null };

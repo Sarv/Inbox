@@ -2056,7 +2056,7 @@ export interface ElectronAPI {
   oauth: {
     listProviders: () => Promise<{
       success: boolean;
-      data?: Array<{ id: 'gmail' | 'microsoft' | 'yahoo' | 'sarv'; label: string; purpose: 'email' | 'llm' | 'both'; configured: boolean; imapHost: string | null; smtpHost: string | null; llmBaseUrl: string | null; apiBaseUrl: string | null; edgeBaseUrl: string | null }>;
+      data?: Array<{ id: 'gmail' | 'microsoft' | 'yahoo' | 'sarv'; label: string; purpose: 'email' | 'llm' | 'both'; configured: boolean; imapHost: string | null; smtpHost: string | null; llmBaseUrl: string | null; apiBaseUrl: string | null; edgeBaseUrl: string | null; reputationOrigin: string | null }>;
       error?: string;
     }>;
     startFlow: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv') => Promise<{

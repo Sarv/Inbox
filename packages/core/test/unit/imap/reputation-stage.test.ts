@@ -6,6 +6,7 @@ import {
   type ReputationCacheStore,
   type ReputationItemKind,
 } from '../../../src/imap/reputation-stage';
+import { setSarvBaseUrl } from '../../../src/oauth/providers';
 import { DEFAULT_FAILURE_THRESHOLD, type CircuitBreakerOptions } from '../../../src/utils/circuit-breaker';
 import {
   LocalDnsblProvider,
@@ -322,20 +323,27 @@ describe('ReputationStage', () => {
   });
 
   // The same stage speaks to the Sarv service: whoever the user chose, the
-  // cache and the scoring in front of it are one.
+  // cache and the scoring in front of it are one. (Behaviour changed with the
+  // reputation-token fix: only the configured reputation origin is asked, and
+  // no build has one yet, so the test configures one as a dev build would.)
   it('scores through the Sarv service the same way, from the category it names', async () => {
-    const fetch = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ ips: [{ ip: SENDER_IP, status: 'listed', listed: [{ list: 'Spamhaus ZEN', category: 'spam', detail: 'SBL' }] }], domains: [] }),
-    }));
-    const provider = new SarvReputationProvider({ endpoint: 'https://rep.sarv.example', getToken: async () => 'tok', fetch });
-    const stage = new ReputationStage(provider, memoryCache());
+    setSarvBaseUrl({ reputationBase: 'https://reputation.sarv.test' });
+    try {
+      const fetch = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ ips: [{ ip: SENDER_IP, status: 'listed', listed: [{ list: 'Spamhaus ZEN', category: 'spam', detail: 'SBL' }] }], domains: [] }),
+      }));
+      const provider = new SarvReputationProvider({ endpoint: 'https://reputation.sarv.test', getToken: async () => 'tok', fetch });
+      const stage = new ReputationStage(provider, memoryCache());
 
-    expect((await stage.assess({ ip: SENDER_IP }))?.reasons[0]).toMatchObject({ id: 'reputation-ip-listed', points: 5 });
-    await stage.assess({ ip: SENDER_IP });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(stage.providerName).toBe('sarv');
+      expect((await stage.assess({ ip: SENDER_IP }))?.reasons[0]).toMatchObject({ id: 'reputation-ip-listed', points: 5 });
+      await stage.assess({ ip: SENDER_IP });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(stage.providerName).toBe('sarv');
+    } finally {
+      setSarvBaseUrl({ reputationBase: '' });
+    }
   });
 });
 

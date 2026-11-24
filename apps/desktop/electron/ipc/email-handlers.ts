@@ -6,7 +6,7 @@
 
 import path from 'path';
 
-import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, isStarredFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
+import { createDeferredFetchError, errorDiagnostic, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, isStarredFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
 import { app, ipcMain, dialog, shell, type IpcMainInvokeEvent } from 'electron';
 import ICAL from 'ical.js';
 
@@ -1210,7 +1210,10 @@ export function registerEmailHandlers(): void {
 
       return { success: true, data: emails };
     } catch (error) {
-      logger.error('Search emails error:', error);
+      // A search error is described by its class and code, never its text,
+      // which can name the query's words (the renderer retries this same query
+      // here right after a failed AI search).
+      logger.error('Search emails error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -1763,7 +1766,7 @@ export function registerEmailHandlers(): void {
         const filePath = await (automatic ? automaticDownloads : downloads).download(emailId, targetAccountId, filename, requestId, () => { notScanned = true; });
         return filePath ? { success: true, filePath, ...await savedFiles.remember(filePath, filename), ...(notScanned ? { notScanned: true } : {}) } : { success: false, error: 'Save cancelled' };
       } catch (error) {
-        logger.error('[Main] Download attachment error:', error);
+        logger.error('[Main] Download attachment error:', errorDiagnostic(error));
         return { success: false, error: attachmentErrorMessage(error) };
       }
     };
@@ -1807,7 +1810,7 @@ export function registerEmailHandlers(): void {
           buffer.fill(0);
         }
       } catch (error) {
-        logger.error('Get attachment base64 error:', error);
+        logger.error('Get attachment base64 error:', errorDiagnostic(error));
         return { success: false, error: attachmentErrorMessage(error) };
       }
     },
@@ -1935,7 +1938,10 @@ export function registerEmailHandlers(): void {
         return { success: true, ...(operation.notScanned ? { notScanned: true } : {}) };
       }, undefined, 'Calendar import blocked: save or open the calendar attachment after scanning it.', 'calendar');
     } catch (error) {
-      logger.error('[Main] openCalendarInvite error:', error);
+      // Never the error itself: the private-copy sweep's fs.rm (EBUSY/EPERM on
+      // Windows while an app holds a copy) quotes a path ending in an
+      // attachment's own name.
+      logger.error('[Main] openCalendarInvite error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -2424,7 +2430,7 @@ export function registerEmailHandlers(): void {
       const url = await previews.preparePreview(emailId, requireTargetAccountId(accountId), filename, requestId, () => { notScanned = true; });
       return { success: true, url, ...(notScanned ? { notScanned: true } : {}) };
     } catch (error) {
-      logger.error('[Main] Prepare attachment preview error:', error);
+      logger.error('[Main] Prepare attachment preview error:', errorDiagnostic(error));
       return { success: false, error: attachmentErrorMessage(error) };
     }
   });
@@ -2445,7 +2451,7 @@ export function registerEmailHandlers(): void {
       await previews.openPreview(emailId, requireTargetAccountId(accountId), filename, requestId, () => { notScanned = true; });
       return { success: true, ...(notScanned ? { notScanned: true } : {}) };
     } catch (error) {
-      logger.error('[Main] Preview attachment error:', error);
+      logger.error('[Main] Preview attachment error:', errorDiagnostic(error));
       return { success: false, error: attachmentErrorMessage(error) };
     }
   });

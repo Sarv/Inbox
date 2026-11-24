@@ -5,6 +5,7 @@
  */
 
 import {
+  allowedSarvReputationOrigin,
   getOAuthProvider,
   isOAuthProviderConfigured,
   listOAuthProviders,
@@ -34,6 +35,11 @@ export function registerOAuthHandlers(): void {
         llmBaseUrl: p.llmBaseUrl ?? null,
         apiBaseUrl: p.apiBaseUrl ?? null,
         edgeBaseUrl: p.edgeBaseUrl ?? null,
+        // Where Sarv's reputation service answers, or null when this build has
+        // none (no build does until the service runs). Only main's registry
+        // carries a dev build's override, so the Blocklists tab asks here
+        // rather than reading its own copy.
+        reputationOrigin: p.id === 'sarv' ? allowedSarvReputationOrigin() : null,
       }));
       return { success: true, data: providers };
     } catch (error) {

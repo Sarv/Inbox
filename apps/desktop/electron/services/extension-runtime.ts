@@ -44,9 +44,9 @@ import { join } from 'path';
 import {
   createLogBudget,
   createLogger,
-  MAX_EXTENSION_LOG_LINE,
   refusalInConsoleLine,
   withTimeout,
+  writeExtensionLog,
   type ExtensionChannel,
   type SandboxCloseDetails,
   type SandboxTarget,
@@ -568,15 +568,12 @@ export async function createSandboxChannel(target: SandboxTarget): Promise<Exten
       refusalsReported.add(refusal);
       deliver({ type: 'unsupported-api', extensionId, api: refusal });
     }
-    const verdict = logBudget.take();
-    if (verdict.dropped > 0) {
-      logger.warn(`[Extension:${extensionId}] ${verdict.dropped} console lines dropped: too many`);
-    }
-    if (!verdict.allowed) return;
-    const line = `[Extension:${extensionId}] ${event.message.slice(0, MAX_EXTENSION_LOG_LINE)}`;
-    if (event.level === 'error') logger.error(line);
-    else if (event.level === 'warning') logger.warn(line);
-    else logger.info(line);
+    // Budgeted and capped like `ctx.log`. Its console.log / console.info (and
+    // console.debug) lines stay out of a release log unless SARV_DEBUG_EXTENSIONS=1:
+    // an extension is handed mail, and a summariser that logs its input would
+    // write the thread there. Warnings and errors keep their level.
+    const level = event.level === 'error' ? 'error' : event.level === 'warning' ? 'warn' : 'info';
+    writeExtensionLog(logger, logBudget, { extensionId, level, message: event.message, source: 'console' });
   });
 
   /** Hand a message to whoever is listening, or hold it until someone is. */

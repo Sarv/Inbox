@@ -159,15 +159,34 @@ export function headerValue(headers: IncomingHttpHeaders, name: string): string 
   return Array.isArray(value) ? value.join(', ') : value;
 }
 
-function logRefusal(url: string, reason: SenderIdentityRefusal): void {
+/**
+ * Where the refused non-public address came from: written into the URL as an
+ * IP literal, or the answer the URL's name resolved to.
+ */
+type RefusedAt = 'url' | 'lookup';
+
+const PRIVATE_ADDRESS_REFUSED: Record<RefusedAt, string> = {
+  url: '[SenderIdentity] refused a fetch: the URL names an IP address that is not public',
+  lookup: '[SenderIdentity] refused a fetch: its name resolved to an address that is not public',
+};
+
+function logRefusal(url: string, reason: SenderIdentityRefusal, at: RefusedAt): void {
+  // Never the host in the warning (a release line): it comes from a sender's
+  // BIMI record or homepage, so it names one of the user's correspondents. Only
+  // where the address came from, which tells a hostile URL from a network that
+  // rewrites every answer (a captive portal).
+  if (reason === 'private-address') {
+    logger.warn(PRIVATE_ADDRESS_REFUSED[at]);
+    return;
+  }
+  if (!DEBUG_SENDER_IDENTITY) return;
   let host = url;
   try { host = new URL(url).host; } catch { /* not a URL: say what it was */ }
-  if (reason === 'private-address') logger.warn(`[SenderIdentity] refused a fetch to ${host}: it is not a public address`);
-  else if (DEBUG_SENDER_IDENTITY) logger.debug(`[SenderIdentity] refused a fetch to ${host}: ${reason}`);
+  logger.debug(`[SenderIdentity] refused a fetch to ${host}: ${reason}`);
 }
 
 function refused(url: string, reason: SenderIdentityRefusal): FetchResponse {
-  logRefusal(url, reason);
+  logRefusal(url, reason, 'url');
   return { ok: false, status: 0, url, headers: { get: () => null }, arrayBuffer: async () => new ArrayBuffer(0) };
 }
 
@@ -247,7 +266,7 @@ export function senderIdentityFetch(options: SenderIdentityFetchOptions): FetchL
       } catch (e) {
         req.destroy();
         // A private DNS answer is not refused for good: see the header.
-        if (e instanceof RefusedDestinationError) logRefusal(current, e.reason);
+        if (e instanceof RefusedDestinationError) logRefusal(current, e.reason, 'lookup');
         throw e;
       }
 

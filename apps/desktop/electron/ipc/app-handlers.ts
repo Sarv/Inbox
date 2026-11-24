@@ -7,7 +7,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-import { createLogger } from '@sarvinbox/core';
+import { createLogger, urlSchemeForLog } from '@sarvinbox/core';
 import { ipcMain, shell } from 'electron';
 
 import { crashReportChoice, setCrashReportsEnabled } from '../sentry';
@@ -68,7 +68,8 @@ export function registerAppHandlers(): void {
    */
   ipcMain.handle('app:openExternal', async (_event, url: string) => {
     if (typeof url !== 'string' || !isSafeExternalUrl(url)) {
-      logger.warn('[App] Blocked openExternal for unsafe URL scheme:', url);
+      // The scheme only: the URL is typically a link clicked in a message.
+      logger.warn('[App] Blocked openExternal for unsafe URL scheme:', urlSchemeForLog(url));
       return { success: false, error: 'Unsupported URL scheme' };
     }
     try {

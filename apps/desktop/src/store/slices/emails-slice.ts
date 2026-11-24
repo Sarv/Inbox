@@ -543,8 +543,12 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     const currentId = get().selectedEmailId;
     const { selectedFolderId, selectedVirtualFolder, viewingSnoozed, viewingAICategory, searchQuery, folders } = get();
     const folderName = selectedFolderId ? folders.find(f => f.id === selectedFolderId)?.path : null;
-    const view = viewingAICategory ? `AI:${viewingAICategory}` : selectedVirtualFolder || (viewingSnoozed ? 'snoozed' : folderName || 'unknown');
-    console.log(`[View] selectEmail id=${emailId ? emailId.substring(0, 12) + '...' : 'null'}, view=${view}${searchQuery ? `, search="${searchQuery}"` : ''}, pool=${get().emails.length} emails`);
+    // `AI:category`, never the slug: a custom category's slug is made from the
+    // name the user typed. Built-in views (virtual folders, snoozed) are ours.
+    const view = viewingAICategory ? 'AI:category' : selectedVirtualFolder || (viewingSnoozed ? 'snoozed' : folderName || 'unknown');
+    // `search=set`, never the query: it is what the user typed, and this line
+    // repeats on every email opened while a search is active.
+    log.info(`[View] selectEmail id=${emailId ? emailId.substring(0, 12) + '...' : 'null'}, view=${view}${searchQuery ? ', search=set' : ''}, pool=${get().emails.length} emails`);
     const email = get().emails.find((e) => e.id === emailId)
       || get().searchResults.find((e) => e.id === emailId);
     // Stale-thread flash fix: threadEmails still holds the PREVIOUS

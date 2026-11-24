@@ -19,7 +19,10 @@ const h = vi.hoisted(() => ({
   views: [] as FakeView[],
   sessions: new Map<string, FakeSession>(),
   ports: [] as FakePort[],
+  /** Every line the runtime logged, at any level. */
   logs: [] as string[],
+  /** The same lines with the level each was written at. */
+  records: [] as Array<{ level: 'debug' | 'info' | 'warn' | 'error'; line: string }>,
   noSandbox: false,
   sandboxed: true as boolean | undefined,
   persistent: false,
@@ -166,12 +169,13 @@ vi.mock('electron', () => ({
 
 vi.mock('@sarvinbox/core', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  createLogger: () => ({
-    info: (...args: unknown[]) => h.logs.push(args.join(' ')),
-    warn: (...args: unknown[]) => h.logs.push(args.join(' ')),
-    error: (...args: unknown[]) => h.logs.push(args.join(' ')),
-    debug: () => {},
-  }),
+  createLogger: () => {
+    const write = (level: 'debug' | 'info' | 'warn' | 'error') => (...args: unknown[]) => {
+      h.logs.push(args.join(' '));
+      h.records.push({ level, line: args.join(' ') });
+    };
+    return { info: write('info'), warn: write('warn'), error: write('error'), debug: write('debug') };
+  },
 }));
 
 // The Worker's script comes from the build, which a unit test does not have.
@@ -228,6 +232,7 @@ beforeEach(() => {
   h.sessions.clear();
   h.ports.length = 0;
   h.logs.length = 0;
+  h.records.length = 0;
   h.noSandbox = false;
   h.sandboxed = true;
   h.persistent = false;
@@ -885,6 +890,38 @@ describe('a flooding extension', () => {
     contents.emit('console-message', { level: 'error', message: 'refused by CSP' });
     expect(h.logs.join('\n')).toContain('careful');
     expect(h.logs.join('\n')).toContain('refused by CSP');
+  });
+
+  // Breaks: an extension's console.log(input) writes the mail it was handed (a
+  // thread to summarise) into a release app.log, which runs at 'info' and so
+  // drops debug lines; or warnings and errors are hidden along with it.
+  it('writes console.log, console.info and console.debug lines at debug, warnings and errors at their own level', async () => {
+    // The default, whatever the shell running the suite exports (an extension
+    // author with SARV_DEBUG_EXTENSIONS=1 set would otherwise see this fail).
+    vi.stubEnv('SARV_DEBUG_EXTENSIONS', '');
+    const SENTINEL = 'SENTINEL-thread-about-Jane-payslip';
+    const { contents } = await startChannel();
+    for (const level of ['info', 'debug', 'verbose']) contents.emit('console-message', { level, message: `${level} ${SENTINEL}` });
+    contents.emit('console-message', { level: 'warning', message: 'careful' });
+    contents.emit('console-message', { level: 'error', message: 'refused by CSP' });
+
+    expect(h.records.filter((record) => record.line.startsWith('[Extension:demo]'))).toEqual([
+      { level: 'debug', line: `[Extension:demo] info ${SENTINEL}` },
+      { level: 'debug', line: `[Extension:demo] debug ${SENTINEL}` },
+      { level: 'debug', line: `[Extension:demo] verbose ${SENTINEL}` },
+      { level: 'warn', line: '[Extension:demo] careful' },
+      { level: 'error', line: '[Extension:demo] refused by CSP' },
+    ]);
+  });
+
+  // Breaks: SARV_DEBUG_EXTENSIONS=1 no longer shows an extension author their
+  // own console lines in the log.
+  it('writes console lines at info when SARV_DEBUG_EXTENSIONS=1', async () => {
+    vi.stubEnv('SARV_DEBUG_EXTENSIONS', '1');
+    const { contents } = await startChannel();
+    contents.emit('console-message', { level: 'info', message: 'hello from the author' });
+
+    expect(h.records).toContainEqual({ level: 'info', line: '[Extension:demo] hello from the author' });
   });
 
   // Each request runs a handler in this process. Once its own files are loaded an extension

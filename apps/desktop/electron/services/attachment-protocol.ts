@@ -3,6 +3,7 @@ import {
   ATTACHMENT_SCHEME,
   attachmentContentType,
   createLogger,
+  errorDiagnostic,
   isInlineRenderableAttachment,
   parseAttachmentUrl,
 } from '@sarvinbox/core';
@@ -228,7 +229,9 @@ export async function handleAttachmentRequest(request: Request): Promise<Respons
     if (error instanceof AttachmentError) {
       return errorResponse(request, error.status, error.message);
     }
-    logger.error('[attachment-protocol] request failed:', error);
+    // Class and code only: a fetch failure can quote the attachment's name
+    // ('Attachment "<name>" not found' from the whole-message fallback).
+    logger.error('[attachment-protocol] request failed:', errorDiagnostic(error));
     return errorResponse(request, 500, 'Attachment could not be read');
   }
   const content = verified ?? cached!;
@@ -266,8 +269,10 @@ export async function handleAttachmentRequest(request: Request): Promise<Respons
     return new Response(null, { status: range ? 206 : 200, headers });
   }
 
+  // No file name: it comes from the mail and can name the letter, the person
+  // or the company it is about. The type says what kind of file was served.
   logger.info(
-    `[attachment-protocol] served ${ref.filename} ${start}-${end}/${size} ` +
+    `[attachment-protocol] served ${start}-${end}/${size} ` +
       `type=${headers.get('Content-Type')} origin=${request.headers.get('Origin') ?? 'none'}`
   );
   // Copy before yielding: closing a viewer or revoking scanner consent erases

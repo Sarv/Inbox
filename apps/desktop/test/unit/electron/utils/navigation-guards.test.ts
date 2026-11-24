@@ -36,7 +36,9 @@ describe('installNavigationGuards', () => {
     const event = fire(name, 'file:///Users/me/Downloads/invoice.html', name === 'will-navigate' ? undefined : false);
     expect(event.preventDefault).toHaveBeenCalledOnce();
     expect(deps.openExternal).not.toHaveBeenCalled();
-    expect(deps.warn).toHaveBeenCalledWith(expect.stringContaining('Blocked'), 'file:///Users/me/Downloads/invoice.html');
+    // Changed deliberately: the warn line used to carry the whole URL (the
+    // user's file path, or a link from the mail). It carries the scheme only.
+    expect(deps.warn).toHaveBeenCalledWith(expect.stringContaining('Blocked'), 'file:');
   });
 
   it('lets the app reload itself', () => {
@@ -86,7 +88,8 @@ describe('installNavigationGuards', () => {
       const { fire, deps } = harness();
       const event = fire('will-frame-navigate', OTHER, false, { frame: { url: PANEL }, initiator: { url: PANEL } });
       expect(event.preventDefault).toHaveBeenCalledOnce();
-      expect(deps.warn).toHaveBeenCalledWith(expect.stringContaining('Blocked frame-level'), OTHER);
+      // Changed deliberately: the scheme only, not the panel URL (see below).
+      expect(deps.warn).toHaveBeenCalledWith(expect.stringContaining('Blocked frame-level'), 'sarv-extension:');
     });
 
     // Breaks: a panel replaces the window. The main frame gets the top-level
@@ -112,6 +115,30 @@ describe('installNavigationGuards', () => {
       const next = panelAssetUrl('clamav-scan', 'panel/details.html');
       expect(fire('will-frame-navigate', next, false, { frame: { url: PANEL }, initiator: disposed }).preventDefault).not.toHaveBeenCalled();
     });
+  });
+
+  // A frame navigation starts inside an email body, so its URL is the mail's:
+  // the host, path and query name the people, services and documents in it.
+  // The warn line (main writes it at warn, kept in a release app.log) says the
+  // scheme only. Breaks: a blocked link's address reaches app.log.
+  it('logs a blocked navigation by its scheme only, on either event', () => {
+    const { fire, deps } = harness();
+    fire('will-frame-navigate', 'file:///Users/SENTINEL-user/Payslip-SENTINEL.html?id=SENTINEL', false);
+    fire('will-navigate', 'smb://SENTINEL-host/share/SENTINEL.docx');
+    fire('will-frame-navigate', 'SENTINEL not a url', false);
+
+    expect(deps.warn.mock.calls).toEqual([
+      ['[Main] Blocked frame-level navigation:', 'file:'],
+      ['[Main] Blocked top-level navigation:', 'smb:'],
+      ['[Main] Blocked frame-level navigation:', 'unparseable'],
+    ]);
+  });
+
+  // Breaks: a missing url (see below) is logged as whatever the event held.
+  it('logs a navigation with no url by kind', () => {
+    const { fire, deps } = harness();
+    fire('will-navigate', undefined);
+    expect(deps.warn).toHaveBeenCalledWith('[Main] Blocked top-level navigation:', 'not-a-string:undefined');
   });
 
   // The URL is read from the event object. Breaks: if Electron stops sending

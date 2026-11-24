@@ -5,6 +5,7 @@ import { getEventBus } from '../../../src/pipeline/event-bus';
 import type { Unsubscribe } from '../../../src/pipeline/types';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
+import { captureLogs, type CapturedLogs } from '../../../src/test-support/log-capture';
 import type { FilterRule } from '../../../src/types/filters';
 import type { IMAPMessage } from '../../../src/types/imap';
 import {
@@ -13,6 +14,7 @@ import {
   generateContentHash,
   noBodyContentHash,
 } from '../../../src/utils/id';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 
 // Ingest tests for MessageProcessor.processBatch / convertMessage — the one path
@@ -1622,5 +1624,127 @@ describe('provider spam and independent Gmail importance', () => {
     expect(row.tags).toContain('|spam|');
     expect(row.tags).toContain('|read|');
     expect(row.folderId).toBe(db.folder(path).id);
+  });
+});
+
+// What breaks if this block fails: a correspondent's address reaches app.log
+// from ingest. The spam lookups, the spam re-file, the filter rules and the
+// trust check each wrote the sender's From address (once per message, so a
+// first sync could write thousands), and the release log's address redaction
+// misses a non-ASCII or dotless address. They now write counts, the row id or
+// the IMAP uid, and the error's class — and each line is still written.
+describe('processBatch — sender addresses stay out of the log', () => {
+  const SENTINEL = 'sentinel-sender';
+  const ASCII = `${SENTINEL}@example.org`;
+  const UNICODE = `${SENTINEL}-jos\u00e9@b\u00fccher.example`;
+  const DOTLESS = `${SENTINEL}@localhost`;
+  const spamHeaders = 'X-Spam-Flag: YES\r\n';
+  const from = (address: string) => ({ from: [{ address, name: `${SENTINEL} Display Name` }] }) as never;
+  let logs: CapturedLogs;
+
+  beforeEach(() => { logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }); });
+  afterEach(() => {
+    logs.stop();
+    vi.restoreAllMocks();
+  });
+
+  // Breaks: "[AutoSpam] Check failed for <sender>" / "Trust check failed for
+  // <sender>" — one line per message, each with the address and the store's
+  // error (whose text here quotes it too).
+  it('reports failing spammer and trust lookups once per batch, without the senders', async () => {
+    const { db, mp } = setup();
+    vi.spyOn(db, 'isSpammer').mockRejectedValue(Object.assign(new Error(`database is locked near ${ASCII}`), { code: 'SQLITE_BUSY' }));
+    vi.spyOn(db, 'isTrustedSender').mockRejectedValue(new Error(`no such row ${UNICODE}`));
+
+    const res = await mp.processBatch(
+      [msg({ uid: 1, envelope: from(ASCII) }), msg({ uid: 2, envelope: from(UNICODE) }), msg({ uid: 3, envelope: from(DOTLESS) })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    expect(res.inserted).toBe(3);
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    const summary = logs.containing('[AutoSpam] Sender lookups failed (spammer list: 3, trusted senders: 3)');
+    expect(summary).toHaveLength(1);
+    expect(summary[0]).toContain("code: 'SQLITE_BUSY'");
+  });
+
+  // Breaks: a trusted-senders store that fails while the spammer list answers
+  // judges the batch's mail as untrusted with no line in app.log at all (the
+  // summary only fired on spammer-list failures).
+  it('reports a failing trust lookup on its own, with its error kind and without the senders', async () => {
+    const { db, mp } = setup();
+    vi.spyOn(db, 'isTrustedSender').mockRejectedValue(Object.assign(new Error(`no such row ${UNICODE}`), { code: 'SQLITE_ERROR' }));
+
+    const res = await mp.processBatch(
+      [msg({ uid: 1, envelope: from(ASCII) }), msg({ uid: 2, envelope: from(DOTLESS) })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    expect(res.inserted).toBe(2);
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    const summary = logs.containing('[AutoSpam] Sender lookups failed (spammer list: 0, trusted senders: 2)');
+    expect(summary).toHaveLength(1);
+    expect(summary[0]).toContain("code: 'SQLITE_ERROR'");
+  });
+
+  // Breaks: a batch whose lookups all answered writes a failure line anyway.
+  it('writes no lookup line when every lookup answered', async () => {
+    const { db, mp } = setup();
+    await mp.processBatch([msg({ uid: 1, envelope: from(ASCII) })], db.folder(INBOX), db.asStorage());
+    expect(logs.containing('Sender lookups failed')).toEqual([]);
+  });
+
+  // Breaks: "[AutoSpam] Re-file failed for <sender>" with the whole error.
+  it('names the row, not the sender, when the spam re-file fails', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    vi.spyOn(db, 'updateEmail').mockRejectedValue(new Error(`constraint failed: ${ASCII}`));
+
+    const res = await mp.processBatch(
+      [msg({ uid: 1, envelope: from(ASCII), rawHeaders: spamHeaders })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    expect(res.errors).toBe(0);
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    expect(logs.containing(`[AutoSpam] Re-file failed for ${db.allRows()[0].id}:`)).toHaveLength(1);
+  });
+
+  // Breaks: "[Filters] Applied N action(s) to email from <sender>", once per
+  // matched message.
+  it('summarises the filter rules once per batch, without the senders', async () => {
+    const { db, mp } = setup();
+    db.setFilterRules([{
+      id: 'r1', name: 'Sentinel', enabled: true, priority: 1, matchType: 'all',
+      conditions: [{ field: 'from', operator: 'contains', value: SENTINEL }],
+      actions: [{ type: 'markRead' }, { type: 'star' }],
+      stopProcessing: false, createdAt: 0, updatedAt: 0,
+    }]);
+
+    await mp.processBatch(
+      [msg({ uid: 1, envelope: from(ASCII) }), msg({ uid: 2, envelope: from(DOTLESS) }), msg({ uid: 3 })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    expect(db.allRows().filter((row) => db.tagsOf(row.id).includes('read'))).toHaveLength(2);
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    expect(logs.containing('[Filters] Applied 4 action(s) to 2 message(s)')).toHaveLength(1);
+  });
+
+  // Breaks: "[AutoSpam] Trust set aside for <trusted address>" — the address
+  // the user trusts, copied by a forger.
+  it('names the uid, not the trusted address, when a forgery of it fails authentication', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    db.markTrusted(ASCII);
+
+    await mp.processBatch(
+      [msg({ uid: 7, envelope: from(ASCII), rawHeaders: spamHeaders, authHeaders: 'Authentication-Results: mx.test.local; spf=fail; dkim=fail; dmarc=fail' })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    expect(db.allRows()[0].folderId).toBe(db.folderId('Spam'));
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    expect(logs.containing("[AutoSpam] Trust set aside for uid 7: a trusted sender's message failed authentication")).toHaveLength(1);
   });
 });

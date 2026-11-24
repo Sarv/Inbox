@@ -13,6 +13,7 @@
 // for mail hosts and no regex — so a lookalike ('imap.gmail.com.evil.test',
 // 'evil.test/imap.gmail.com') can never pass.
 
+import { bareHttpOrigin } from '../utils/bare-origin';
 import { oauthImapPreset } from '../utils/oauth-imap-presets';
 
 import { getOAuthProvider } from './providers';
@@ -119,4 +120,68 @@ export function isSarvAIEndpointAllowed(url: string | undefined | null): boolean
   const label = host.slice(0, -SARV_DOMAIN_SUFFIX.length);
   if (label.includes('.') || !label.endsWith(SARV_EDGE_LABEL_SUFFIX)) return false;
   return label.length > SARV_EDGE_LABEL_SUFFIX.length;
+}
+
+/**
+ * The origin of Sarv's sender-reputation service as configured, or null when
+ * there is none (no build has one until the service runs; a dev build can set
+ * one) or the configured value is not a bare origin. Null allows nothing.
+ */
+export function allowedSarvReputationOrigin(): string | null {
+  return bareHttpOrigin(getOAuthProvider('sarv').reputationBaseUrl)?.origin ?? null;
+}
+
+/**
+ * Where a Sarv bearer may be sent for sender reputation (blocklist lookups and
+ * Report spam), given the address the settings name: the canonical origin to
+ * send to, or null when the address is refused.
+ *
+ * The address is a renderer-written setting, and the bearer is also the Sarv
+ * mailbox's XOAUTH2 credential (email:read, send, delete), so it goes to ONE
+ * origin — Sarv's reputation service — and nowhere near it:
+ *  - credentials in the URL, any path, query or fragment: refused (the client
+ *    appends `/v1/reputation/*` itself);
+ *  - the scheme and port must be the allowed origin's, and the host must equal
+ *    its host exactly after lower-casing and dropping one trailing root dot. No
+ *    suffix match: there is one service, so a subdomain, a lookalike
+ *    ('<origin host>.evil.example', an IDN homograph) or another Sarv
+ *    host (ai., oauth., an AI edge) is refused like any stranger.
+ *
+ * The answer is the ALLOWED origin, not the typed spelling, so what is fetched
+ * is exactly what was checked (with 'https://rep.example' configured,
+ * 'https://REP.example.:443/' sends to 'https://rep.example').
+ */
+export function sarvReputationOrigin(url: unknown): string | null {
+  return matchReputationOrigin(url, getOAuthProvider('sarv').reputationBaseUrl);
+}
+
+/**
+ * The rule `sarvReputationOrigin` applies, against an allowed origin the caller
+ * names: `allowed`'s canonical origin when `url` is that origin, else null
+ * (also when either is missing or not a bare origin). The renderer uses it
+ * with the origin main reports, because only main's registry carries a dev
+ * build's override. Main itself always goes through `sarvReputationOrigin`.
+ */
+export function matchReputationOrigin(url: unknown, allowed: unknown): string | null {
+  if (typeof url !== 'string' || typeof allowed !== 'string') return null;
+  const parsed = bareHttpOrigin(url);
+  const allowedOrigin = bareHttpOrigin(allowed);
+  if (!parsed || !allowedOrigin) return null;
+  if (parsed.protocol !== allowedOrigin.protocol || parsed.port !== allowedOrigin.port) return null;
+  if (normalizeHost(parsed.hostname) !== normalizeHost(allowedOrigin.hostname)) return null;
+  return allowedOrigin.origin;
+}
+
+/**
+ * A URL's origin and nothing else — never its credentials, path or query — for
+ * a log line about a destination that was refused. `(none)` for a missing
+ * value, `(not a URL)` for one that does not parse.
+ */
+export function describeEndpointOrigin(url: unknown): string {
+  if (typeof url !== 'string' || url.trim() === '') return '(none)';
+  try {
+    return new URL(url.trim()).origin;
+  } catch {
+    return '(not a URL)';
+  }
 }

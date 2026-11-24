@@ -12,7 +12,9 @@
 
 import type { EmailRecord } from '../types/models';
 import { parseAddressList, parseAddresses } from '../utils/email-address';
+import { errorDiagnostic } from '../utils/error-diagnostic';
 import { stringifyBounded } from '../utils/json-size';
+import { valueShapeForLog } from '../utils/log-text';
 import { logger } from '../utils/logger';
 
 import { cleanLLMJsonResponse, tryParseLLMJson } from './llm-response-utils';
@@ -189,7 +191,9 @@ export class AgentReplyDrafter {
           searchResults.push(`Email search "${query}":\n${formatted}`);
         }
       } catch (err) {
-        logger.error(`[ReplyDrafter] Email search failed: ${query}`, err);
+        // The query is the model's, written from the email being answered:
+        // its length and the error's class, never its words.
+        logger.error(`[ReplyDrafter] Email search failed (query: ${valueShapeForLog(query)})`, errorDiagnostic(err));
       }
     }
 
@@ -211,7 +215,7 @@ export class AgentReplyDrafter {
             searchResults.push(`Web search "${query}":\n${formatted}`);
           }
         } catch (err) {
-          logger.error(`[ReplyDrafter] Web search failed: ${query}`, err);
+          logger.error(`[ReplyDrafter] Web search failed (query: ${valueShapeForLog(query)})`, errorDiagnostic(err));
         }
       }
     }

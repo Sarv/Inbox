@@ -106,6 +106,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goes to the agent like any other request, which finds the emails it means
   and prepares a card.
 
+## [1.4.12] - 2026-11-24
+
+### Fixed
+- **A refreshed Inbox Agent review replaces the expired one.** A review of
+  unread mail can change mail for a limited time, so that nothing is marked as
+  read on the strength of an old review. When that time ran out, **Refresh
+  review** added a new review further down the conversation, but the expired
+  card kept its disabled buttons and its own **Refresh review**, so it looked
+  as if refreshing had done nothing. An expired review that has been refreshed
+  now says a newer review is below and takes you to it with **Go to newer
+  review**.
+- **Inbox Agent reviews stay usable for an hour.** A review could change mail
+  for 15 minutes, counted from the moment it started being prepared. A large
+  review takes a few minutes to prepare, so it could reach you with as little
+  as 11 minutes left, and its buttons could switch off while you were still
+  reading it. A review can now be used for 60 minutes, counted from when
+  it is ready. Before anything is changed, each conversation is still checked
+  again and left alone if it has changed since the review.
+
+### Security
+- **Your Sarv sign-in is no longer sent to the address in Blocklists.** If you
+  chose the Sarv reputation service in **Security → Blocklists**, the app sent
+  your Sarv sign-in, which also opens your Sarv mailbox, to whatever https
+  address was saved there, together with the senders of arriving mail. Sarv's
+  reputation service is not running yet, so the app no longer offers it and
+  sends your sign-in and your senders to no reputation address at all. If you
+  had chosen it, blocklist lookups stay off rather than switching to this
+  computer's DNS, and the Blocklists tab says so until you choose
+  **This computer's DNS** or turn the switch off.
+- **The app no longer writes your mail to its log file.** Signature
+  detection, Polish, AI search and thread summaries wrote what the AI answered
+  (signature HTML copied from your mail, your rewritten draft, your search
+  words, summary text) into app.log, and some failures quoted the mail they
+  were working on. Draft subjects, attachment names, links from mail that the
+  app blocked, recipients' names, the domains and organisation names of
+  verified senders, the AI's reasoning when it skipped an auto-send,
+  spam-report senders, blocklist lookups, the addresses of senders that the
+  spam filter, your filters, Autocrypt, automatic replies and **Load images**
+  acted on, and the mail server's reply when a send failed (which can name
+  the recipients) were written there too. These lines now record only what
+  happened (counts, sizes, yes/no, the kind of failure), never the text.
+  Extensions' own informational lines are no longer recorded either
+  (developers can turn them back on with
+  `SARV_DEBUG_EXTENSIONS=1`); their warnings and errors still are. The app
+  never uploads the log file, but you may attach it to a bug report, and if
+  you turned on crash reports the most recent lines go with each report, so it
+  should hold no mail.
+
 ## [1.4.11] - 2026-11-18
 
 ### Added
@@ -1541,7 +1589,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.11...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.12...HEAD
+[1.4.12]: https://github.com/Sarv/Inbox/releases/tag/v1.4.12
 [1.4.11]: https://github.com/Sarv/Inbox/releases/tag/v1.4.11
 [1.4.10]: https://github.com/Sarv/Inbox/releases/tag/v1.4.10
 [1.4.9]: https://github.com/Sarv/Inbox/releases/tag/v1.4.9

@@ -28,6 +28,7 @@
  */
 import type { ChatMessage } from '@sarv-in/email-chat-view';
 import type { EmailRecord } from '@sarvinbox/core';
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
 import {
   firstMemberKeyOf,
   isUsableSplit,
@@ -311,7 +312,9 @@ export function runFirstSplit(
       return await run(ref, options, deps);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      log.warn(`split acct=${ref.accountId} thread=${ref.threadId} threw: ${message}`);
+      // By class, code and status: the message of a split that threw can quote
+      // the email it was splitting, or a provider's response body.
+      log.warn(`split acct=${ref.accountId} thread=${ref.threadId} threw`, errorDiagnostic(error));
       return { state: 'error', error: message };
     }
   });

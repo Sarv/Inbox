@@ -27,6 +27,7 @@
 import {
   createLoopYielder,
   createLogger,
+  extensionDebugEnabled,
   getEventBus,
   planWorkflowEffects,
   type ExtensionPermission,
@@ -43,8 +44,8 @@ import { pushFlagToServer } from './flag-push';
 
 const logger = createLogger('extension-workflow-runner');
 
-/** Per-message tracing. Off by default: this is a hot path on a first sync. */
-const DEBUG_RUNNER = process.env.SARV_DEBUG_EXTENSIONS === '1';
+/** Per-message tracing (SARV_DEBUG_EXTENSIONS=1). Off by default: this is a hot path on a first sync. */
+const DEBUG_RUNNER = extensionDebugEnabled();
 
 /**
  * How many messages may wait for extension processing at once.

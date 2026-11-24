@@ -81,6 +81,29 @@ describe('loadEmailAttachments', () => {
     expect(files.map((file) => file.filename)).toEqual(['ok.txt']);
   });
 
+  // Breaks: a file that fails to load writes its NAME (the sender's or the
+  // user's words) and the error's message to app.log; the line keeps the email
+  // id and what the failure was.
+  it('logs a failed file by email id and error class, never its name', async () => {
+    const SENTINEL = 'SENTINEL-FILE-91c2';
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    stubFetch(() => { throw new Error(`ENOENT: ${SENTINEL}.pdf`); });
+    expect(await loadEmailAttachments({ id: 'e7', attachmentNames: `["${SENTINEL}.pdf"]` })).toEqual([]);
+    const lines = error.mock.calls.map((args) => args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' '));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain(SENTINEL);
+    expect(lines[0]).toContain('failed to load an attachment of email e7 {"name":"Error"}');
+  });
+
+  // Breaks: a forward (requireAll) swallows a failed file instead of failing,
+  // and goes out without it.
+  it('throws instead of logging when every file is required', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    stubFetch(() => { throw new Error('Not connected to IMAP'); });
+    await expect(loadEmailAttachments({ id: 'e1', attachmentNames: '["a.txt"]' }, { requireAll: true })).rejects.toThrow('Not connected');
+    expect(error).not.toHaveBeenCalled();
+  });
+
   // Breaks: a mail without attachments makes a pointless round-trip per open.
   it('fetches nothing when the mail declares no files', async () => {
     const fetch = stubFetch(() => ({ success: true, base64: '' }));

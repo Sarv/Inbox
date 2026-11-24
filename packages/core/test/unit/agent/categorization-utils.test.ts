@@ -21,8 +21,10 @@ import {
   type EnrichedEmail,
 } from '../../../src/agent/categorization-utils';
 import { formatSenderBehaviorFacts, SENDER_BEHAVIOR_GUIDANCE, SENDER_BEHAVIOR_UNAVAILABLE, type SenderBehaviorSignals } from '../../../src/agent/sender-behavior-context';
+import { captureLogs, type CapturedLogs } from '../../../src/test-support/log-capture';
 import { AI_REQUEST_TIMEOUT_CODE, classifyAIError } from '../../../src/utils/ai-error';
 import { MAX_MESSAGE_BYTES } from '../../../src/utils/json-size';
+import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
 
 // This module is the whole contract with the LLM: what we SEND (prompt +
 // per-email facts) and what we accept BACK. The response side is the fragile
@@ -552,6 +554,65 @@ describe('validateCategorizationResponse — malformed LLM output must never thr
 
   it('handles an empty array', () => {
     expect(validateCategorizationResponse('[]', SLUGS)).toEqual([]);
+  });
+});
+
+describe('validateCategorizationResponse — nothing the model wrote reaches the log', () => {
+  // The model's answer is its reading of the user's mail (names, amounts,
+  // subjects in its reasoning). A release app.log keeps warn and error lines,
+  // so each parse-path line may carry counts only.
+  const SENTINEL = 'SENTINEL-acme-payslip-4471';
+  let logs: CapturedLogs;
+  beforeEach(() => { logs = captureLogs({ setLogSink, setLogLevel, getLogLevel }); });
+  afterEach(() => { logs.stop(); });
+
+  // Breaks: the "No usable JSON" error line quotes the first 200 characters of
+  // the answer (got="…"), which is the model's account of the email.
+  it('logs an unusable answer as the salvage counts, never its text', () => {
+    expect(validateCategorizationResponse(`I read the mail about ${SENTINEL}; I cannot classify it.`, SLUGS)).toEqual([]);
+
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    const [line] = logs.containing('No usable JSON');
+    expect(line).toMatch(/^\[ERROR\] .*\[inputLen=\d+ attempted=0 closed=0 parsed=0 truncated=false reachedEnd=false\]$/);
+  });
+
+  // Breaks: a salvaged batch logs the broken object (or the answer) instead of
+  // how many objects were recovered; the result itself must keep the reasoning.
+  it('logs a salvaged batch as counts while the results keep their reasoning', () => {
+    const results = validateCategorizationResponse(
+      `[{"emailId":"e1","categories":["invoice"],"reasoning":"${SENTINEL}"},{"emailId":"e2","reasoning":"${SENTINEL} cut`,
+      SLUGS,
+    );
+
+    expect(results.map(r => r.reasoning)).toEqual([SENTINEL]);
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    expect(logs.containing('salvaged 1 object(s) [inputLen=')).toHaveLength(1);
+  });
+
+  // Breaks: an unmappable category token (free text from the model, usually a
+  // slug but sometimes a phrase from the email) is quoted in the warn line, or
+  // so is the item's emailId, which the model wrote too (an injected email can
+  // steer it to any text).
+  it('logs an unmappable category token by its length and the item position', () => {
+    const results = validateCategorizationResponse(JSON.stringify([
+      { emailId: 'e1', categories: ['invoice'] },
+      { emailId: `${SENTINEL}-as-id`, categories: ['invoice', SENTINEL] },
+    ]), SLUGS, CATEGORIES);
+
+    expect(results.map(r => [r.emailId, r.categories])).toEqual([['e1', ['invoice']], [`${SENTINEL}-as-id`, ['invoice']]]);
+    expect(logs.containing(SENTINEL)).toEqual([]);
+    expect(logs.containing(`token (${SENTINEL.length} chars) in answer item 1`)).toHaveLength(1);
+  });
+
+  // Breaks: a second batch with the same bad answer starts quoting it (one
+  // line per batch, each with counts only — nothing accumulates or leaks later).
+  it('logs the same counts-only line again on a re-run of the same answer', () => {
+    const answer = `prose about ${SENTINEL} and no array`;
+    validateCategorizationResponse(answer, SLUGS);
+    validateCategorizationResponse(answer, SLUGS);
+
+    expect(logs.containing('No usable JSON')).toHaveLength(2);
+    expect(logs.containing(SENTINEL)).toEqual([]);
   });
 });
 

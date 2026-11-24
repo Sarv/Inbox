@@ -1,4 +1,4 @@
-import { OutgoingMimeError, type OutgoingMimeContext } from '@sarvinbox/core';
+import { OutgoingMimeError, getLogLevel, setLogLevel, setLogSink, type OutgoingMimeContext } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ safeStorage: {} }));
@@ -9,6 +9,7 @@ vi.mock('../../../../electron/services/core-db', () => ({
   readAppSetting: () => null,
 }));
 
+import { captureLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import type { PgpKeyring } from '../../../../electron/services/pgp-keyring';
 import {
   attachAutocrypt,
@@ -100,6 +101,30 @@ describe('autocryptSink', () => {
     expect(() => autocryptSink(() => ({ recordAutocrypt: rejected }))(sighting)).not.toThrow();
     await Promise.resolve();
     expect(rejected).toHaveBeenCalled();
+  });
+
+  // Breaks: "Autocrypt from <sender> not recorded: <error>" — the sender's
+  // address, once per synced message while the keyring cannot open, plus an
+  // error text that can quote the header. The line stays, with the kind of
+  // failure only.
+  it('logs a failed sighting without the sender or the error text', async () => {
+    const SENTINEL = 'sentinel-autocrypt@example.org';
+    const sentinelSighting = { ...sighting, fromAddress: SENTINEL, header: `addr=${SENTINEL}; keydata=AA` };
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      autocryptSink(() => {
+        throw Object.assign(new Error(`core DB not open for ${SENTINEL}`), { code: 'SQLITE_CANTOPEN' });
+      })(sentinelSighting);
+      const rejected = vi.fn().mockRejectedValue(new TypeError(`bad key for ${SENTINEL}`));
+      autocryptSink(() => ({ recordAutocrypt: rejected }))(sentinelSighting);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(logs.containing(SENTINEL)).toEqual([]);
+      expect(logs.containing('Autocrypt header not recorded: SQLITE_CANTOPEN')).toHaveLength(1);
+      expect(logs.containing('Autocrypt header not recorded: TypeError')).toHaveLength(1);
+    } finally {
+      logs.stop();
+    }
   });
 
   // Breaks: engines were never wired, so no key was ever learned from mail.

@@ -6,6 +6,7 @@ import MailComposer from 'nodemailer/lib/mail-composer';
 
 import type { OutgoingMimeTransform, SMTPConfig, SendEmailOptions, SendResult } from '../types/smtp';
 import { resolveConnectionSecurity, starttlsUnavailableMessage } from '../utils/connection-security';
+import { failureCause } from '../utils/error-diagnostic';
 import { createLogger } from '../utils/logger';
 import { resolveTlsOptions } from '../utils/tls';
 import { isValidEmail, extractEmailAddress } from '../utils/validators';
@@ -194,6 +195,7 @@ export class SMTPClient {
         success: false,
         error: 'Not connected to SMTP server',
         transient: true,
+        failure: 'not-connected',
       };
     }
 
@@ -206,7 +208,7 @@ export class SMTPClient {
       ...(options.bcc ?? []),
     ];
     if (allRecipients.length === 0) {
-      return { success: false, error: 'No recipients specified', transient: false };
+      return { success: false, error: 'No recipients specified', transient: false, failure: 'no-recipients' };
     }
     // Validate the ADDRESS part — recipients legitimately carry a display name
     // ("Accounts Sarv <accounts@sarv.com>"), which nodemailer sends fine but the
@@ -217,11 +219,14 @@ export class SMTPClient {
         success: false,
         error: `Invalid recipient address(es): ${invalid.join(', ')}`,
         transient: false,
+        failure: 'invalid-recipient',
       };
     }
 
     try {
-      logger.info('[SMTPClient] Sending email to:', options.to.join(', '));
+      // Counts only: a recipient's display name survives the release log's
+      // address redaction, and names the people the user writes to.
+      logger.info(`[SMTPClient] Sending email: to=${options.to.length} cc=${options.cc?.length ?? 0} bcc=${options.bcc?.length ?? 0} recipient(s)`);
 
       // Header From: a chosen identity/alias (options.from) wins, else the
       // account default. The SMTP envelope sender stays the AUTHENTICATED account
@@ -296,7 +301,15 @@ export class SMTPClient {
         rawMessage: rawMessage.toString('utf-8'),
       };
     } catch (error) {
-      logger.error('[SMTPClient] Failed to send email:', error);
+      const transient = isTransientSendError(error);
+      const failure = failureCause(error);
+      // The kind of failure and the server's reply CODE, never the error: its
+      // message (and nodemailer's `response`) quotes the server's reply, which
+      // names the rejected recipient, and our own PGP refusal lists the
+      // recipients that have no key.
+      const responseCode = (error as { responseCode?: unknown } | null)?.responseCode;
+      const reply = typeof responseCode === 'number' && Number.isInteger(responseCode) ? responseCode : 'none';
+      logger.error(`[SMTPClient] Failed to send email (${failure}, reply code ${reply}, transient=${transient})`);
       return {
         success: false,
         // nodemailer opens a fresh session per send, so a STARTTLS refusal can
@@ -305,7 +318,8 @@ export class SMTPClient {
         error: isStarttlsRefusedError(error) && this.config
           ? starttlsRefusalText(error, this.config.host)
           : (error as Error).message,
-        transient: isTransientSendError(error),
+        transient,
+        failure,
       };
     }
   }

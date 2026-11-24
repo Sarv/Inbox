@@ -1504,18 +1504,25 @@ export function setupAICategorizationListeners(useEmailStore: { setState: (state
     s.loadFolders?.();
   });
 
-  // Mirror main-process categorization logs into the renderer console.
-  // The categorization service runs in main, so its console.log doesn't
-  // surface in devtools — without this, the user sees an empty console
-  // and can't tell if AI calls are succeeding, failing, or returning
-  // unparseable JSON. Each line is prefixed [main:cat] so they're
-  // easy to spot among the renderer-side logs.
-  window.electronAPI.aiCategorization.onLog?.(({ level, message }) => {
-    const prefix = '[main:cat]';
-    if (level === 'error') console.error(prefix, message);
-    else if (level === 'warn') console.warn(prefix, message);
-    else console.log(prefix, message);
-  });
+  // Mirror main-process categorization logs into the renderer console, in a
+  // DEV build only. The categorization service runs in main, so its lines
+  // don't surface in devtools — without this, a developer sees an empty
+  // console and can't tell if AI calls are succeeding, failing, or returning
+  // unparseable JSON. Each line is prefixed [main:cat] so they're easy to spot.
+  //
+  // Never in a release: main has already written every one of these lines to
+  // app.log, and the renderer forwards console.log/warn/error there too, so the
+  // relay wrote each line a SECOND time — model output quoted in a failure
+  // line included. `import.meta.env.DEV` is a build-time constant, so a
+  // release bundle does not even subscribe.
+  if (import.meta.env.DEV) {
+    window.electronAPI.aiCategorization.onLog?.(({ level, message }) => {
+      const prefix = '[main:cat]';
+      if (level === 'error') console.error(prefix, message);
+      else if (level === 'warn') console.warn(prefix, message);
+      else console.log(prefix, message);
+    });
+  }
 }
 
 // ── Page-window merge ──────────────────────────────────────────────────────

@@ -1,3 +1,7 @@
+import { errorDiagnostic } from '@sarvinbox/core/error-diagnostic';
+import { setFieldNamesForLog } from '@sarvinbox/core/log-text';
+import { createLogger } from '@sarvinbox/core/logger';
+
 import { shouldAutoEscalateToServer, describeServerSearchResult, hasServerSearchableParsedQuery, needsFullQuerySearch } from '../../components/server-search';
 import { INBOX_QUICK_FILTERS } from '../../config/search-suggestions';
 import { isAIAssistEnabled } from '../../services/agent-settings';
@@ -6,6 +10,11 @@ import { threadRowCount } from '../../utils/thread-utils';
 import { categoryViewQuery, countCategoryView, pageCategoryView } from '../category-view-query';
 import { getMaxAIProcessingEmails, getEmailsPerPage, getPageSizeForView, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal } from '../helpers';
 import type { EmailStore, SearchAISlice, SliceCreator } from '../types';
+
+// What the user searches for and what the AI made of it are their own words:
+// these lines say which fields a search used and whether one is on, never the
+// text (the renderer forwards info/warn/error to app.log, release included).
+const log = createLogger('SearchStore');
 
 // The parsed query + context of the ACTIVE search, kept so goToSearchPage can
 // re-fetch any page without re-parsing (and without threading them through the
@@ -113,10 +122,19 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
 
     try {
       const useAISearch = !context?.skipAI && isAISearchEnabled() && getDefaultProvider();
-      console.log(`[Store] ${useAISearch ? 'AI-powered' : 'fast'} search with context:`, context);
+      // Whether a folder and a category narrow it, never which: a custom
+      // category's slug is made from the name the user gave it.
+      log.info(
+        `${useAISearch ? 'AI-powered' : 'fast'} search folder=${context?.folderId ? 'set' : 'all'}`
+        + ` aiCategory=${context?.aiCategory ? 'set' : 'none'} skipAI=${!!context?.skipAI}`,
+      );
 
       const aiResult = await parseSearchQuery(query);
-      console.log('[Store] parsed query:', aiResult);
+      // Field NAMES and the confidence only: the values (and the interpretation
+      // sentence) restate what the user typed, and a model may put text where
+      // the confidence number belongs.
+      const confidence = typeof aiResult.confidence === 'number' ? aiResult.confidence : 'other';
+      log.info(`parsed query fields=${setFieldNamesForLog(aiResult.query)} confidence=${confidence}`);
       if (isStale()) return;
 
       // Stash the parsed query + context so goToSearchPage can re-fetch any page
@@ -152,7 +170,8 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
         await get()._runServerSearch(query, false);
       }
     } catch (error) {
-      console.error('Failed to search:', error);
+      // A search failure can quote the query (an FTS syntax error names its terms).
+      log.error('search failed, falling back to a plain text search', errorDiagnostic(error));
       try {
         const result = await window.electronAPI.emails.search(query);
         if (result.success && result.data && !isStale()) {
@@ -357,7 +376,12 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
 
   loadAICategoryEmails: async (category) => {
     const { selectedFolderId, searchQuery, viewingAICategory: currentCategory, selectedVirtualFolder, activeInboxFilter, activeAccountId } = get();
-    console.log(`[View] Selected: AI Category "${category}" (folderId=${selectedFolderId || 'all'}, searchQuery=${searchQuery || 'none'})`);
+    // The category's slug is not log material: a custom one is made from the
+    // name the user typed for it.
+    log.info(
+      `[View] selected an AI category (aiCategory=${category ? 'set' : 'none'}, folder=${selectedFolderId ? 'set' : 'all'}`
+      + `, search=${searchQuery ? 'set' : 'none'})`,
+    );
 
     // If search is active, re-run search with updated AI category context
     if (searchQuery) {
@@ -458,11 +482,13 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
           emailsTotal: total,
         });
       } else {
-        console.error('[Store] Failed to load AI category emails:', result.error);
+        // Main's error text can name the category (a custom slug is the
+        // user's words): whether it gave one, not what it says.
+        log.error(`main could not load AI category emails (error=${result.error ? 'set' : 'none'})`);
         set({ loadingEmails: false });
       }
     } catch (error) {
-      console.error('[Store] Error loading AI category emails:', error);
+      log.error('failed to load AI category emails', errorDiagnostic(error));
       if (!isStale()) set({ loadingEmails: false });
     }
   },
@@ -484,7 +510,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   stopAIProcessing: () => {
     window.electronAPI.aiCategorization.stop();
     set({ aiProcessing: false, aiProcessingProgress: null });
-    console.log('[Store] AI processing stopped by user');
+    log.info('AI processing stopped by the user');
   },
 
   processRecentEmailsForSignatures: async () => {
@@ -493,17 +519,16 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     }
 
     try {
-      console.log('[Store] Processing recent emails for signature detection...');
+      log.info('processing recent emails for signature detection');
 
       const result = await window.electronAPI.emails.getRecent({ minutes: 10, limit: 20 });
 
       if (!result.success || !result.data || result.data.length === 0) {
-        console.log('[Store] No recent emails to process for signatures');
+        log.info('no recent emails to process for signatures');
         return;
       }
 
-      console.log(`[Store] Found ${result.data.length} recent emails for signature detection`);
-
+      let detected = 0;
       for (const email of result.data) {
         const body = email.rawBody || email.cleanBody;
         if (!body || !email.fromAddress) {
@@ -513,23 +538,23 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
         try {
           const signatureResult = await detectSignature(body, email.fromAddress, email.id);
 
-          if (signatureResult.hasSignature) {
-            console.log(`[Store] Signature detected for ${email.fromAddress}:`, signatureResult.htmlSelector);
-          }
+          if (signatureResult.hasSignature) detected += 1;
         } catch (error) {
-          console.error(`[Store] Failed to detect signature for email ${email.id}:`, error);
+          log.error(`failed to detect a signature for email ${email.id}`, errorDiagnostic(error));
         }
       }
 
-      console.log('[Store] Signature detection processing complete');
+      // One line for the batch: the sender and the selector (taken from the
+      // sender's own HTML) are not log material.
+      log.info(`signature detection processing complete (emails=${result.data.length}, detected=${detected})`);
     } catch (error) {
-      console.error('[Store] Failed to process recent emails for signatures:', error);
+      log.error('failed to process recent emails for signatures', errorDiagnostic(error));
     }
   },
 
   processEmailsForAICategorization: async () => {
     if (get().aiProcessing) {
-      console.log('[Store] AI categorization already in progress');
+      log.info('AI categorization already in progress');
       return;
     }
 
@@ -537,13 +562,13 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     // sorting — this manual run included, as its description promises ("when
     // off, no LLM calls are made").
     if (!isAIAssistEnabled()) {
-      console.log('[Store] AI Assist is off — not sending mail for categorization');
+      log.info('AI Assist is off, not sending mail for categorization');
       return;
     }
 
     const provider = getDefaultProvider();
     if (!provider) {
-      console.log('[Store] No AI provider configured, skipping categorization');
+      log.info('no AI provider configured, skipping categorization');
       return;
     }
 
@@ -567,7 +592,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
 
     set({ aiProcessing: true });
 
-    console.log('[Store] Starting AI categorization via main process');
+    log.info('starting AI categorization in the main process');
     await window.electronAPI.aiCategorization.start(
       {
         type: provider.type,

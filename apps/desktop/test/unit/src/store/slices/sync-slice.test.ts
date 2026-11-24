@@ -1,5 +1,7 @@
+import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core/logger';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { captureLogs } from '../../../../../../../packages/core/src/test-support/log-capture';
 import { SYNC_PROGRESS_REFRESH_MS } from '../../../../../src/store/helpers';
 
 // CategoryBadges owns a renderer-only cache the slice clears; stub it so the
@@ -1058,5 +1060,46 @@ describe('flushRealtimeBatch — people you emailed', () => {
     h.slice.handleRealtimeEvent({ type: 'new', accountId: 'E', emailId: 'e1', folderPath: 'Presentations' });
     await runFlush();
     expect(vi.mocked(refreshEmailedAddresses).mock.calls).toEqual([['B'], ['D']]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// refreshVisibleViewForFolder — what its AI-category line says.
+describe('refreshVisibleViewForFolder — the AI category view in the log', () => {
+  const loadRefresh = async () => {
+    vi.resetModules();
+    (globalThis as any).window = { electronAPI: {} };
+    return (await import('../../../../../src/store/slices/sync-slice')).refreshVisibleViewForFolder;
+  };
+
+  // Breaks: '[Store] refreshView: re-fetching AI category (<slug>)' writes a
+  // custom category's slug (made from the name the user typed: "Project
+  // Falcon" -> project_falcon) to app.log after every sync of the open folder,
+  // or the AI view stops being re-fetched when new mail lands.
+  it('logs the category as set, never its slug, and still re-fetches it', async () => {
+    const refresh = await loadRefresh();
+    const slug = 'sentinel_project_falcon';
+    const loadAICategoryEmails = vi.fn(async () => {});
+    const state = {
+      viewingAICategory: slug, folders: [{ id: 'f1', path: 'INBOX' }], selectedFolderId: 'f1',
+      selectedVirtualFolder: null, loadAICategoryEmails,
+    };
+    // Every level and the raw console, not console.log alone (the renderer
+    // logger's INFO method): a slug written at WARN/ERROR/DEBUG counts too.
+    // The module was re-imported, so its logger is another instance than
+    // these controls'; the capture records its console writes all the same.
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      await refresh(() => state, 'INBOX');
+    } finally {
+      logs.stop();
+    }
+    const { lines } = logs;
+
+    expect(loadAICategoryEmails).toHaveBeenCalledWith(slug);
+    expect(lines.filter((line) => line.includes('re-fetching AI category'))).toEqual([
+      expect.stringMatching(/\[INFO\] \[SyncSlice\] \[Store\] refreshView: re-fetching AI category \(aiCategory=set\) after INBOX sync$/),
+    ]);
+    for (const line of lines) expect(line.toLowerCase()).not.toContain('sentinel');
   });
 });

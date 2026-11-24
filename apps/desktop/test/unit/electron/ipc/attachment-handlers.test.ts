@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import { tmpdir } from 'os';
 import { basename, dirname, join, relative, sep } from 'path';
 
+import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -48,8 +49,23 @@ const h = vi.hoisted(() => ({
   openScannerSetup: vi.fn(),
   scanAssertCurrent: vi.fn(),
   scanDispose: vi.fn(),
+  /** Makes a removal through node:fs/promises fail (the preview store's), or null to pass through. */
+  rmFails: null as null | ((target: string) => Error | null),
 }));
 h.webContents.mainFrame = h.frame;
+
+// The real filesystem, with a seam to make a removal by the preview store
+// (which imports node:fs/promises) fail as Windows does while an app holds a file.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rm: (target: Parameters<typeof actual.rm>[0], options?: Parameters<typeof actual.rm>[1]) => {
+      const failure = h.rmFails?.(String(target));
+      return failure ? Promise.reject(failure) : actual.rm(target, options);
+    },
+  };
+});
 
 vi.mock('electron', () => ({
   ipcMain: { handle: (name: string, fn: (...a: any[]) => any) => h.handlers.set(name, fn) },
@@ -92,6 +108,7 @@ vi.mock('../../../../electron/services/attachment-unscanned-warning', () => ({
 }));
 vi.mock('../../../../electron/ipc/agent-handlers', () => ({ logUserAction: vi.fn() }));
 
+import { captureLogs } from '../../../../../../packages/core/src/test-support/log-capture';
 import { registerEmailHandlers } from '../../../../electron/ipc/email-handlers';
 import {
   accountAttachmentDir,
@@ -199,6 +216,7 @@ beforeEach(() => {
   resetAttachmentStoreKeys();
   h.handlers.clear();
   h.manager = null;
+  h.rmFails = null;
   h.webContents.send.mockClear();
   h.scannerSetup.mockReset().mockResolvedValue({ configured: true, allowedAccountIds: ['acct-1', 'acct-2'] });
   h.missingSetupAssert.mockReset().mockResolvedValue(undefined);
@@ -806,6 +824,41 @@ describe('protected calendar import', () => {
     h.storage.getEmail.mockResolvedValue({ id: EMAIL_ID, calendarIcs: CALENDAR_ICS }); h.openPath.mockResolvedValue('No calendar app');
     expect(await calendar()(downloadEvent(), EMAIL_ID)).toEqual({ success: false, error: 'No calendar app', noHandler: true });
   });
+
+  // Breaks: '[Main] openCalendarInvite error:' logs the error whole. The first
+  // private copy of a session sweeps preview-* folders left by an interrupted
+  // run, and that fs.rm fails with EBUSY/EPERM (Windows, while Word or Acrobat
+  // still holds a copy) quoting a path that ends in an attachment's own name,
+  // so the name reached a release app.log. The log keeps the class and code.
+  it('logs a failed private-copy sweep by class and code, never the path it quotes', async () => {
+    const SENTINEL_FILE = 'SENTINEL-Payslip-Jane-Doe.pdf';
+    const leftover = join(previewRoot(), 'preview-left-by-a-crash');
+    mkdirSync(leftover, { recursive: true });
+    writeFileSync(join(leftover, SENTINEL_FILE), 'held open by another app');
+    const busy = Object.assign(
+      new Error(`EBUSY: resource busy or locked, unlink '${join(leftover, SENTINEL_FILE)}'`),
+      { code: 'EBUSY', errno: -16, syscall: 'unlink', path: join(leftover, SENTINEL_FILE) },
+    );
+    const swept: string[] = [];
+    h.rmFails = (target) => (target === leftover ? (swept.push(target), busy) : null);
+    h.storage.getEmail.mockResolvedValue({ id: EMAIL_ID, calendarIcs: CALENDAR_ICS });
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    let result: { success?: boolean } | undefined;
+    try {
+      result = await calendar()(downloadEvent(), EMAIL_ID) as { success?: boolean };
+    } finally {
+      logs.stop();
+      h.rmFails = null;
+    }
+
+    expect(swept).toEqual([leftover]); // the sweep really ran, and failed
+    expect(result?.success).toBe(false);
+    expect(h.openPath).not.toHaveBeenCalled();
+    expect(logs.containing('SENTINEL')).toEqual([]);
+    expect(logs.containing('openCalendarInvite error:')).toEqual([
+      "[ERROR] [email-handlers] [Main] openCalendarInvite error: { name: 'Error', code: 'EBUSY' }",
+    ]);
+  });
 });
 
 // Breaks: optional setup is mistaken for an offline/threat bypass, or explicit bypass is presented as a clean scan.
@@ -1161,6 +1214,96 @@ describe('attachmentErrorMessage', () => {
     expect(attachmentErrorMessage(new Error('disk on fire'))).toBe('disk on fire');
     expect(attachmentErrorMessage(undefined)).toBe('Attachment could not be read');
   });
+
+  const SENTINEL_NAME = 'SENTINEL-Payslip-Jane-Doe.pdf';
+  const withAttachmentNamed = (name: string) => h.storage.getEmail.mockResolvedValue({
+    id: EMAIL_ID, folderId: 'f1', uid: 42, attachmentNames: JSON.stringify([name]),
+  });
+
+  // Breaks: '[attachment-cache] unexpected failure:' logs the error whole (at
+  // error level, kept in a release app.log), and an unexpected failure can
+  // quote the attachment's name or other mail text. The message handed back to
+  // the renderer stays as it was.
+  it('logs an unexpected failure by class and code only, and still returns its message', () => {
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    let message: string;
+    try {
+      message = attachmentErrorMessage(Object.assign(new Error(`Attachment "${SENTINEL_NAME}" not found`), { code: 'EPARSE' }));
+    } finally {
+      logs.stop();
+    }
+
+    expect(message).toBe(`Attachment "${SENTINEL_NAME}" not found`);
+    expect(logs.containing('SENTINEL')).toEqual([]);
+    expect(logs.lines).toEqual(["[ERROR] [attachment-cache] [attachment-cache] unexpected failure: { name: 'Error', code: 'EPARSE' }"]);
+  });
+
+  // Breaks (the whole-message fallback, which most opens during a sync take):
+  // the part fetch bows out, the whole-message parse cannot find the part, and
+  // the failure reaches app.log through the IPC handler with the file's name.
+  it('keeps the attachment name out of the log when the whole-message fallback fails', async () => {
+    withAttachmentNamed(SENTINEL_NAME);
+    h.syncEngine.fetchAttachmentPart.mockResolvedValue(null);
+    // What SyncEngine.fetchAttachment throws when mailparser finds no such part.
+    h.syncEngine.fetchAttachment.mockRejectedValue(new Error('Attachment not found in message'));
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    let result: unknown;
+    try {
+      result = await base64()({}, EMAIL_ID, SENTINEL_NAME);
+    } finally {
+      logs.stop();
+    }
+
+    expect(h.syncEngine.fetchAttachment).toHaveBeenCalledWith(EMAIL_ID, 'INBOX', 42, SENTINEL_NAME);
+    expect(result).toEqual({ success: false, error: 'Attachment not found in message' });
+    expect(logs.containing('SENTINEL')).toEqual([]);
+    expect(logs.containing("[attachment-cache] unexpected failure: { name: 'Error' }")).toHaveLength(1);
+  });
+
+  // Breaks: a failure whose message quotes mail text (a storage or IMAP error
+  // naming the attachment, a subject in a SEARCH command) reaches a release
+  // app.log through the save, open, preview-preparation or OS-preview handler,
+  // each of which used to log the error object whole. The renderer still gets
+  // a result it can show, and the log keeps the failure's class and code.
+  it.each([
+    ['emails:downloadAttachment', () => download()(downloadEvent(), EMAIL_ID, SENTINEL_NAME)],
+    ['emails:getAttachmentBase64', () => base64()({}, EMAIL_ID, SENTINEL_NAME)],
+    ['emails:prepareAttachmentPreview', () => h.handlers.get('emails:prepareAttachmentPreview')!(downloadEvent(), EMAIL_ID, SENTINEL_NAME)],
+    ['emails:previewAttachment', () => preview()(downloadEvent(), EMAIL_ID, SENTINEL_NAME)],
+  ])('%s logs a failure quoting mail text by class and code only', async (_channel, call) => {
+    h.saveDialog = { canceled: false, filePath: join(TMP, 'never-written.pdf') };
+    h.storage.getEmail.mockRejectedValue(Object.assign(new Error(`lookup of "${SENTINEL_NAME}" failed`), { code: 'SQLITE_BUSY' }));
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    let result: { success?: boolean } | undefined;
+    try {
+      result = await call() as { success?: boolean };
+    } finally {
+      logs.stop();
+    }
+
+    expect(result?.success).toBe(false);
+    expect(logs.containing('SENTINEL')).toEqual([]);
+    expect(logs.containing('SQLITE_BUSY').length).toBeGreaterThan(0);
+  });
+
+  // Breaks: the over-the-limit refusal names the file again; the IPC handlers
+  // log that AttachmentError whole, so the name reaches a release app.log.
+  it('refuses an oversized attachment without naming it, through the IPC handler', async () => {
+    withAttachmentNamed(SENTINEL_NAME);
+    h.syncEngine.fetchAttachmentPart.mockResolvedValue({ content: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1) });
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    let result: unknown;
+    try {
+      result = await base64()({}, EMAIL_ID, SENTINEL_NAME);
+    } finally {
+      logs.stop();
+    }
+
+    expect(result).toEqual({ success: false, error: 'This attachment is 50 MB, over the 50 MB limit' });
+    expect(cachedFiles()).toEqual([]);
+    expect(logs.containing('SENTINEL')).toEqual([]);
+    expect(logs.containing("Get attachment base64 error: { name: 'AttachmentError', status: 413 }")).toHaveLength(1);
+  });
 });
 
 /**
@@ -1383,6 +1526,26 @@ describe('stored attachment size reconciliation', () => {
     await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
 
     expect(h.storage.updateEmail).not.toHaveBeenCalled();
+  });
+
+  // Breaks: '[attachment-cache] corrected stored size for "<file name>"' writes
+  // the attachment's name (it comes from the mail and can name a person or a
+  // document) to app.log at info. The line names its position and the email.
+  it('logs a corrected size by attachment position and email, never the file name', async () => {
+    const name = 'SENTINEL-Payslip-Jane.pdf';
+    withSizes([4096, 7], ['first.pdf', name]);
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      await resolveAttachmentFile({ emailId: EMAIL_ID, filename: name });
+    } finally {
+      logs.stop();
+    }
+
+    expect(h.storage.updateEmail).toHaveBeenCalledWith(EMAIL_ID, {
+      attachmentSizes: JSON.stringify([4096, BYTES.length]),
+    });
+    expect(logs.containing('SENTINEL')).toEqual([]);
+    expect(logs.containing(`corrected stored size of attachment 1 on email ${EMAIL_ID}: 7 -> ${BYTES.length} bytes`)).toHaveLength(1);
   });
 
   // Breaks: the non-active account's row is read but the ACTIVE account's row is
