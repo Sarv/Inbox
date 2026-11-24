@@ -406,6 +406,11 @@ Established shared helpers (extend this list as you add more):
   `InboxAssistantServiceDeps` when a test asks the agent a question. The
   evaluation in `apps/desktop/test/eval/assistant/` is built on it; see
   [docs/TESTING.md](docs/TESTING.md), "Inbox Agent evaluation".
+- `appJsFlags(extra?)` / `V8_MAX_OLD_SPACE_MB` — `apps/desktop/electron/v8-flags.ts`.
+  The app's V8 flags. Chromium passes `--js-flags` to every renderer, the extension
+  sandboxes included, so this 2 GB heap cap is also how much an extension can
+  take. Use it wherever Electron is launched with `js-flags`, the sandbox-escape
+  harness included, so a test runs under the cap that ships.
 
 ## Prefer a mature library over hand-rolled / regex logic
 

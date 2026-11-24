@@ -31,6 +31,13 @@ upgrade Electron, and add to `fixtures/probe` when a new way out turns up. Never
 start it beside your own dev app without `SANDBOX_ESCAPE_ELECTRON`: see the note in
 `run.mjs`.
 
+It runs extension code under the app's own V8 flags (`electron/v8-flags.ts`), so its
+out-of-memory probe stops at the 2 GB heap cap that ships. Without them the probe
+filled about 3.7 GB. On a 7 GB macOS CI runner that left the machine swapping, and
+the next sandbox start overran its 15 s load timeout about one run in six. After
+that crash the harness waits for the app's own restart, retries included, rather
+than racing a reload against it.
+
 ### The one gotcha: better-sqlite3's ABI
 
 `better-sqlite3` is a compiled addon, valid for exactly **one** ABI at a time,
