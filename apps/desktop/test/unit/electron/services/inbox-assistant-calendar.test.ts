@@ -34,12 +34,15 @@ function setup(question = 'What quote did I send to TCS?') {
   const callAI = vi.fn(async (prompt: string) => JSON.stringify({ to: ['buyer@tcs.example'], cc: [], subject: 'Quotation follow-up', body: prompt.includes('VERIFIED_LOCAL_AVAILABILITY_JSON') ? 'Hello,\n\nThank you for considering our quotation.\n\n[MEETING_AVAILABILITY]\n\nRegards' : 'Hello,\n\nFollowing up on our quotation.\n\nRegards' }));
   const preferences = vi.fn(() => calendar.getPreferences());
   const availability = vi.fn((input: Parameters<LocalCalendarService['availability']>[0]) => calendar.availability(input));
-  const service = new InboxAssistantService({ accounts: () => [account], history, callAI, openMailbox: vi.fn(), readAttachment: vi.fn(), calendar: { preferences, availability } });
+  // Drafting never runs the agent loop: its provider call must stay unused.
+  const callAIChat = vi.fn(async () => { throw new Error('Drafting must not call the agent loop.'); });
+  const service = new InboxAssistantService({ accounts: () => [account], history, callAI, callAIChat, openMailbox: vi.fn(), readAttachment: vi.fn(), calendar: { preferences, availability } });
   const event = (start: string, end: string, changes: Partial<LocalCalendarEventInput> = {}) => calendar.saveEvent({ calendarId: local.id, title: 'PRIVATE EVENT TITLE', description: 'PRIVATE HEALTH DETAILS', location: 'PRIVATE LOCATION', startMs: wallClockToInstant(start, ZONE), endMs: wallClockToInstant(end, ZONE), timeZone: ZONE, allDay: false, busy: true, status: 'confirmed', reminderMinutes: null, ...changes });
-  return { service, calendar, history, chat, local, event, callAI, preferences, availability, request: { requestId: 'draft-request', chatId: chat.id, accountId: account.id } };
+  return { service, calendar, history, chat, local, event, callAI, callAIChat, preferences, availability, request: { requestId: 'draft-request', chatId: chat.id, accountId: account.id } };
 }
 
 describe('local calendar evidence in Inbox Agent meeting drafts', () => {
+  // Breaks: a meeting draft offers a time the user is busy, leaks private event details to the provider, or loses the proposal on reload.
   it('checks actual busy events, inserts verified times, and persists the proposal with the saved draft', async () => {
     const f = setup();
     const busy = f.event('2026-10-22T09:00', '2026-10-22T10:00');
@@ -56,8 +59,10 @@ describe('local calendar evidence in Inbox Agent meeting drafts', () => {
     expect(progress).toContain('Rechecking the proposed meeting times');
     expect(f.history.load(f.chat.id).runs?.at(-1)?.draft?.calendarAvailability).toEqual(draft.calendarAvailability);
     expect(f.history.load(f.chat.id).runs?.at(-1)?.status).toBe('completed');
+    expect(f.callAIChat).not.toHaveBeenCalled();
   });
 
+  // Breaks: every draft reads the private calendar, even when no meeting is involved.
   it('does not read calendar preferences or availability for an ordinary quotation draft', async () => {
     const f = setup();
     const draft = await f.service.draftEmail({ ...f.request, instructions: 'Summarize the quotation and ask for feedback.' });
@@ -66,6 +71,7 @@ describe('local calendar evidence in Inbox Agent meeting drafts', () => {
     expect(draft.calendarAvailability).toBeUndefined();
   });
 
+  // Breaks: "draft a reply" after "meet Tuesday 3pm for 60 minutes" proposes other times or durations.
   it('inherits precise meeting constraints from the latest question when draft instructions are generic', async () => {
     const f = setup('Arrange a meeting next Tuesday at 3pm for 60 minutes.');
     const draft = await f.service.draftEmail({ ...f.request, instructions: 'Draft a polite reply.' });
@@ -73,6 +79,7 @@ describe('local calendar evidence in Inbox Agent meeting drafts', () => {
     expect(draft.calendarAvailability?.slots).toEqual([expect.objectContaining({ startMs: wallClockToInstant('2026-10-27T15:00', ZONE), endMs: wallClockToInstant('2026-10-27T16:00', ZONE) })]);
   });
 
+  // Breaks: the AI's subject line confirms a meeting time the calendar never verified.
   it('cannot commit to an unverified meeting time in the generated subject', async () => {
     const f = setup();
     f.callAI.mockImplementation(async () => JSON.stringify({ to: ['buyer@tcs.example'], cc: [], subject: 'Confirmed meeting tomorrow at 3pm', body: 'Hello,\n\n[MEETING_AVAILABILITY]\n\nRegards' }));
@@ -81,6 +88,7 @@ describe('local calendar evidence in Inbox Agent meeting drafts', () => {
     expect(draft.body).toContain(draft.calendarAvailability!.slots[0]!.label);
   });
 
+  // Breaks: a time that became busy while the AI was drafting is still offered.
   it('refuses a stale proposal if a busy event is added while AI is drafting', async () => {
     const f = setup();
     f.callAI.mockImplementation(async prompt => {
@@ -96,6 +104,7 @@ describe('local calendar evidence in Inbox Agent meeting drafts', () => {
     expect(run?.draft).toBeUndefined();
   });
 
+  // Breaks: an unreadable calendar or one excluded from availability is read as "free all day".
   it('never treats an unavailable calendar or an unselected busy calendar as free', async () => {
     const f = setup();
     f.calendar.saveCalendar({ id: f.local.id, name: f.local.name, color: f.local.color, visible: true, blocksAvailability: false, isDefault: true });
@@ -106,6 +115,7 @@ describe('local calendar evidence in Inbox Agent meeting drafts', () => {
     expect(f.callAI).not.toHaveBeenCalled();
   });
 
+  // Breaks: the user's chosen meeting window is overridden by dates guessed from the chat or the mail.
   it('uses an explicit user date range instead of inferred dates in chat or source content', async () => {
     const f = setup('Arrange a meeting tomorrow.');
     const startMs = wallClockToInstant('2026-10-23T14:00', ZONE);
@@ -115,6 +125,7 @@ describe('local calendar evidence in Inbox Agent meeting drafts', () => {
     expect(draft.calendarAvailability?.slots.every(slot => slot.startMs >= startMs && slot.endMs <= endMs)).toBe(true);
   });
 
+  // Breaks: text inside a cited email makes the drafter read the calendar.
   it('cannot turn source email instructions into a calendar tool request', async () => {
     const f = setup();
     const stored = f.history.load(f.chat.id);

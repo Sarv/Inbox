@@ -6,6 +6,9 @@ import type { InboxAssistantActionMode, InboxAssistantChat, InboxAssistantChatSu
 import { act, cleanup, fire, render, settle, toggle, typeInto } from '../../../../helpers/render';
 
 const ok = <T,>(data: T): InboxAssistantResult<T> => ({ success: true, data });
+// Turning Approve for me on confirms first; with no dialog mounted the global confirm would never answer.
+const confirm = vi.hoisted(() => vi.fn(async () => true));
+vi.mock('../../../../../src/store/confirm-service', () => ({ requestConfirm: confirm }));
 const accounts = [{ id: 'work', email: 'owner@example.test', name: 'Work' }, { id: 'personal', email: 'personal@example.test', name: 'Personal' }];
 function chat(id = 'chat-1'): InboxAssistantChat {
   return { id, title: id === 'chat-1' ? 'Supplier quotations' : 'New conversation', createdAt: 1_720_000_000_000, updatedAt: 1_720_000_000_000, exchangeCount: 0, exchanges: [] };
@@ -24,7 +27,7 @@ const api = {
     id: 'answer-1', chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: Date.now(),
     answer: { text: 'The matching conversation is available.', sources: [], coverage: [], warnings: [] },
   })),
-  applyReview: vi.fn(),
+  changeSet: vi.fn(),
   cancel: vi.fn(async (requestId: string) => ok({ requestId, cancelled: true })),
   onActivity: vi.fn(() => () => {}),
 };
@@ -89,6 +92,7 @@ describe('compact Inbox Agent controls', () => {
     expect(view.byLabel('Show conversations')?.getAttribute('aria-expanded')).toBe('false');
   });
 
+  // Breaks: the compact layout loses a mode, skips the confirmation, or changes mail when the mode changes.
   it('retains the two approval modes without applying mail when the mode changes', async () => {
     const view = await mount();
     const mode = view.byLabel('Action mode') as HTMLSelectElement;
@@ -96,10 +100,11 @@ describe('compact Inbox Agent controls', () => {
     expect([...mode.options].map(option => option.text)).toEqual(['Ask for approval', 'Approve for me']);
     act(() => { mode.value = 'approve_for_me'; mode.dispatchEvent(new Event('change', { bubbles: true })); });
     await settle();
+    expect(confirm).toHaveBeenCalledOnce();
     expect(api.updateChat).toHaveBeenCalledExactlyOnceWith({ chatId: 'chat-1', actionMode: 'approve_for_me' });
     expect(mode.value).toBe('approve_for_me');
     expect(api.ask).not.toHaveBeenCalled();
-    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.changeSet).not.toHaveBeenCalled();
   });
 
   it('retains the question draft and account selection when moving between compact and full layouts', async () => {

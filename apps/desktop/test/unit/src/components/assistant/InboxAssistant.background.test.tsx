@@ -10,6 +10,9 @@ const accounts = [{ id: 'account-a', email: 'owner@example.test' }];
 const listeners = new Set<(activity: InboxAssistantActivity) => void>();
 const stored = new Map<string, InboxAssistantChat>();
 const ok = <T,>(data: T): InboxAssistantResult<T> => ({ success: true, data });
+// Turning Approve for me on confirms first; with no dialog mounted the global confirm would never answer.
+const confirm = vi.hoisted(() => vi.fn(async () => true));
+vi.mock('../../../../../src/store/confirm-service', () => ({ requestConfirm: confirm }));
 function chat(id: string): InboxAssistantChat {
   return { id, title: id === 'chat-a' ? 'First conversation' : 'Second conversation', createdAt: NOW, updatedAt: NOW, exchangeCount: 0, exchanges: [] };
 }
@@ -110,7 +113,10 @@ describe('Inbox Agent independent chat runs', () => {
     const message = 'The provider is unavailable. Please try again.';
     stored.set(request.chatId, { ...chat(request.chatId), exchanges: [{ ...answer(request, ''), status: 'failed', error: message }], exchangeCount: 1 });
     await act(async () => pending.resolve({ success: false, error: message })); await settle();
-    expect(api.chat).toHaveBeenCalledTimes(1);
+    // Changed (2026-11-22): a failed question's saved exchange is read once more
+    // (the second call), to refresh the mail list if the run had changed mail;
+    // the conversation now open is not reloaded.
+    expect(api.chat.mock.calls.map(([id]) => id)).toEqual([request.chatId, request.chatId]);
     expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Keep this other draft.');
     fire(view.byLabel('Open conversation: First conversation'), 'click'); await settle();
     expect(view.all('.assistant-user-message')).toHaveLength(1);
@@ -147,6 +153,7 @@ describe('Inbox Agent independent chat runs', () => {
     expect(view.find('[role="alert"]')?.textContent?.trim()).not.toBe('');
   });
 
+  // Breaks: a mode-save error after a failed question is hidden behind the saved-question banner.
   it('keeps a later action error visible after suppressing the failed question banner', async () => {
     const message = 'Inbox Agent could not complete the request.';
     api.ask.mockImplementationOnce(async request => {
@@ -160,6 +167,7 @@ describe('Inbox Agent independent chat runs', () => {
     const mode = view.byLabel('Action mode') as HTMLSelectElement;
     act(() => { mode.value = 'approve_for_me'; mode.dispatchEvent(new Event('change', { bubbles: true })); });
     await settle();
+    expect(confirm).toHaveBeenCalledOnce();
     expect(view.all('[role="alert"]')).toHaveLength(2);
     expect(view.all('[role="alert"]').map(alert => alert.textContent)).toEqual([
       'Request failed. Your question and activity have been saved.', message,
@@ -442,6 +450,7 @@ describe('Inbox Agent composer keeps the keyboard', () => {
     const mode = view.byLabel('Action mode') as HTMLSelectElement;
     mode.value = 'approve_for_me';
     fire(mode, 'change'); await settle();
+    expect(confirm).toHaveBeenCalledOnce();
     expect(composer.readOnly).toBe(true);
     fire(composer, 'keydown', { key: 'Enter' }); await settle();
     expect(api.ask).not.toHaveBeenCalled();

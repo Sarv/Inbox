@@ -1,14 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { inboxAssistantRunSummary } from '../../../../electron/services/inbox-assistant-diagnostics';
-import { createAssistantHarness, NO_FACTS, promptEvidence, type AssistantHarness } from '../../../helpers/assistant-harness';
+import { createAssistantHarness, NO_FACTS, type AssistantHarness } from '../../../helpers/assistant-harness';
 
 // How the agent decides that an email is about what the question names. These
 // run the real agent on real account databases (see assistant-harness.ts), so
-// the search index matches words the way it does in the app.
+// the search index matches words the way it does in the app. The scripted model
+// asks deep_search the question as the user typed it, then answers with no
+// facts: what is asserted is what the search let through to the model.
 
 let harness: AssistantHarness;
-beforeEach(async () => { harness = await createAssistantHarness(); });
+/** The question the scripted model passes to deep_search. */
+let question = '';
+beforeEach(async () => {
+  harness = await createAssistantHarness({
+    agent: turn => turn.messages.some(message => message.role === 'tool')
+      ? { tools: [{ name: 'answer', arguments: { facts: [] } }] }
+      : { tools: [{ name: 'deep_search', arguments: { question } }] },
+  });
+});
 afterEach(async () => { await harness.close(); });
 
 /** The planner's reply. Undefined: the planner is refused and keyword rules plan the search. */
@@ -17,20 +27,24 @@ function planWith(plan?: Record<string, unknown>): void {
     : plan ? JSON.stringify({ queries: ['email'], entityTerms: [], intent: 'all', quoteIntent: false, filters: {}, ...plan }) : { status: 400 };
 }
 
-/** The subjects of the emails the answer prompt carried, in the order the model saw them. */
+/** The subjects of the excerpts deep_search showed the model, in the order it saw them. */
 function subjectsSent(): string[] {
-  const prompt = [...harness.calls].reverse().find(call => call.purpose === 'answer')?.prompt;
-  return prompt ? promptEvidence(prompt).map(source => /Subject: ([^\n]*)/.exec(source.evidence)?.[1] ?? '?') : [];
+  const shown = harness.agentTurns.at(-1)?.messages.find(message => message.role === 'tool' && (message.content ?? '').startsWith('Result T1 (deep_search)'))?.content ?? '';
+  return shown.split('\n\n---\n\n').slice(1).map(block => /^Subject: ([^\n]*)/m.exec(block)?.[1] ?? '?');
 }
 
 async function mail(accountId: string, id: string, subject: string, body: string, extra: Record<string, unknown> = {}): Promise<void> {
   await harness.mail(accountId, `t-${id}`, { id, subject, cleanBody: body, rawBody: `<p>${body}</p>`, ...extra });
 }
 
-async function ask(question: string): Promise<{ broadened?: string[]; warnings: string[] }> {
+async function ask(text: string): Promise<{ broadened?: string[]; warnings: string[] }> {
   harness.newChat();
   harness.calls.length = 0;
-  const exchange = await harness.ask(question);
+  harness.agentTurns.length = 0;
+  question = text;
+  const exchange = await harness.ask(text);
+  // Every case goes through the tuned search, exactly once.
+  expect(exchange.diagnostics?.agent?.toolCalls).toEqual({ deep_search: 1 });
   return { broadened: exchange.diagnostics?.searchBroadened, warnings: exchange.answer.warnings };
 }
 
@@ -106,7 +120,8 @@ describe('when no email names everything the question does', () => {
     const once = searches.mock.calls.length;
     expect(once).toBeGreaterThan(0);
     expect(result.broadened).toBeUndefined();
-    expect(harness.chat().exchanges.at(-1)!.diagnostics).toMatchObject({ outcome: 'no_evidence', answer: { skipped: 'no_evidence' } });
+    expect(subjectsSent()).toEqual([]);
+    expect(harness.chat().exchanges.at(-1)!.diagnostics).toMatchObject({ route: 'agent', outcome: 'no_evidence' });
     // Asking again does exactly the same work.
     await ask('How much did we quote BHEL for the SCADA upgrade?');
     expect(searches.mock.calls.length).toBe(once * 2);

@@ -182,3 +182,61 @@ describe('a search plan the model got wrong', () => {
     expect(JSON.parse(report).plan).not.toHaveProperty('failedField');
   });
 });
+
+describe('a run of the agent loop', () => {
+  const agentRun: InboxAssistantRunDiagnostics = {
+    version: 1, route: 'agent', outcome: 'answered', durationMs: 900,
+    agent: { mode: 'json', fallback: 'tools_refused', steps: 4, toolCalls: { search_mail: 2, classify_messages: 1, [`${SECRET} tool`]: 1 },
+      toolErrors: { 'search_mail:invalid_call': 1, unknown_tool: 1 }, nudges: 1, stop: 'step_limit' },
+    answer: { first: { format: 'valid', factsReturned: 1, factsVerified: 1, rejected: {} }, factsFinal: 1 },
+  };
+
+  // Breaks: a wrong agent answer cannot be explained from the report (which tools ran,
+  // which protocol, why it stopped), or a tool name the model invented is copied out.
+  it('carries the protocol, steps and tool tallies, by fixed name only', () => {
+    const report = JSON.parse(inboxAssistantDiagnosticsReport({ ...exchange, diagnostics: agentRun }));
+    expect(report.route).toBe('agent');
+    expect(report.agent).toEqual({ mode: 'json', fallback: 'tools_refused', steps: 4, toolCalls: { search_mail: 2, classify_messages: 1 },
+      toolErrors: { 'search_mail:invalid_call': 1, unknown_tool: 1 }, nudges: 1, stop: 'step_limit' });
+    expect(JSON.stringify(report.agent)).not.toContain(SECRET);
+  });
+
+  // Breaks: the activity panel says nothing about how the agent worked or why it stopped.
+  it('says in plain words what the agent did', () => {
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: agentRun })).toEqual([
+      'The AI worked in 4 steps and searched mail, sorted emails.',
+      'This AI model does not accept tools, so a simpler way of calling them was used.',
+      '2 tool calls were refused or failed.',
+      'It ran out of steps before it finished.',
+      'The AI gave 1 statement; 1 verified.',
+    ]);
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: { version: 1, route: 'agent', agent: { mode: 'native', steps: 1, toolCalls: {}, toolErrors: { budget: 1 } },
+      failure: { stage: 'agent', error: { name: 'Error' } } } })).toEqual([
+      'The AI worked in 1 step.', '1 tool call was refused or failed.', 'The run stopped with an error while working on the request.',
+    ]);
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: { version: 1, route: 'agent', agent: { mode: 'native', reasoning: 'off', steps: 2, toolCalls: { count_mail: 1 }, toolErrors: {} } } })).toEqual([
+      'The AI worked in 2 steps and counted mail.', 'The AI model\'s reasoning was turned off, because it accepts tools only that way.',
+    ]);
+    expect(JSON.parse(inboxAssistantDiagnosticsReport({ ...exchange, diagnostics: { version: 1, route: 'agent', agent: { mode: 'native', reasoning: 'off', steps: 2, toolCalls: {}, toolErrors: {} } } })).agent.reasoning).toBe('off');
+  });
+
+  // Breaks: the activity panel says the agent undid a change when it only put
+  // the change's Undo on a card for the user (undo_change follows the approval rules).
+  it('says undo_change undid or asked to undo a change', () => {
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: { version: 1, route: 'agent', agent: { mode: 'native', steps: 2, toolCalls: { undo_change: 1 }, toolErrors: {} } } })[0])
+      .toBe('The AI worked in 2 steps and undid or asked to undo a change.');
+  });
+
+  // Breaks: a report or the activity panel hides that the agent changed mail.
+  it('reports the changes the agent prepared and applied, as counts only', () => {
+    const changed: InboxAssistantRunDiagnostics = { version: 1, route: 'agent',
+      agent: { mode: 'native', steps: 3, toolCalls: { search_mail: 1, change_mail: 1 }, toolErrors: {}, changes: { sets: 1, messages: 35, autoApplied: 33 } } };
+    expect(JSON.parse(inboxAssistantDiagnosticsReport({ ...exchange, diagnostics: changed })).agent.changes).toEqual({ sets: 1, messages: 35, autoApplied: 33 });
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: changed })).toEqual([
+      'The AI worked in 3 steps and searched mail, prepared mail changes.',
+      'It prepared 1 change to 35 emails, and applied 33 of those emails for you.',
+    ]);
+    expect(inboxAssistantDiagnosticsSummary({ diagnostics: { ...changed, agent: { ...changed.agent!, changes: { sets: 2, messages: 4, autoApplied: 0 } } } })[1])
+      .toBe('It prepared 2 changes to 4 emails.');
+  });
+});

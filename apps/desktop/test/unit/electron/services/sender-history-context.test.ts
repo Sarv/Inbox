@@ -1,9 +1,9 @@
+import type { SenderBehaviorSignals } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { UnreadReviewBehaviorSignals } from '../../../../electron/services/inbox-assistant-review-behavior';
 import { readCategorizationSenderHistory } from '../../../../electron/services/sender-history-context';
 
-const facts: UnreadReviewBehaviorSignals = { received90d: 20, opened90d: 0, markedRead90d: 8, deleted90d: 19,
+const facts: SenderBehaviorSignals = { received90d: 20, opened90d: 0, markedRead90d: 8, deleted90d: 19,
   archived90d: 0, replied90d: 0, keptUnread90d: 0, starred90d: 0, important90d: 0, sentLifetime: 0,
   lastSentAt: null, isVip: false, isBlocked: false, readThenDeleted90d: 8, readThenDeletedFast90d: 7,
   readAndKept90d: 0, deletedWithoutRead90d: 11, recentDeleted30d: 12, recentReceived30d: 12 };

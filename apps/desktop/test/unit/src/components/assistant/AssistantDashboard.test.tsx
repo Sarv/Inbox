@@ -36,7 +36,7 @@ function snapshot(changes: Partial<InboxAssistantDashboard> = {}): InboxAssistan
 
 const dashboard = vi.fn<(request: { accountIds: string[] }) => Promise<DashboardResult>>();
 const ask = vi.fn();
-const applyReview = vi.fn();
+const changeSet = vi.fn();
 const chat = vi.fn();
 const createChat = vi.fn();
 const resolveSource = vi.fn();
@@ -62,7 +62,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   dashboard.mockReset();
   dashboard.mockResolvedValue({ success: true, data: snapshot() });
-  Object.assign(window, { electronAPI: { inboxAssistant: { dashboard, ask, applyReview, chat, createChat, source: resolveSource } } });
+  Object.assign(window, { electronAPI: { inboxAssistant: { dashboard, ask, changeSet, chat, createChat, source: resolveSource } } });
 });
 afterEach(cleanup);
 
@@ -73,7 +73,7 @@ describe('read-only assistant dashboard', () => {
     expect(dashboard).toHaveBeenCalledExactlyOnceWith({ accountIds: ['primary', 'secondary'] });
     expect(view.container.textContent).toContain('Today in your inbox');
     expect(ask).not.toHaveBeenCalled();
-    expect(applyReview).not.toHaveBeenCalled();
+    expect(changeSet).not.toHaveBeenCalled();
     view.rerender(<AssistantDashboard {...props({ accountIds: ['secondary', 'primary', 'secondary'] })} />);
     await settle();
     expect(dashboard).toHaveBeenCalledOnce();
@@ -132,7 +132,7 @@ describe('read-only assistant dashboard', () => {
     expect(dashboard).toHaveBeenCalledTimes(2);
     expect(view.byLabel('Unread conversations: 8')).not.toBeNull();
     expect(ask).not.toHaveBeenCalled();
-    expect(applyReview).not.toHaveBeenCalled();
+    expect(changeSet).not.toHaveBeenCalled();
   });
 
   it('handles an IPC rejection as a readable overview error', async () => {
@@ -185,7 +185,7 @@ describe('read-only assistant dashboard', () => {
     expect(onNavigateToSource).toHaveBeenCalledExactlyOnceWith(source);
     expect(resolveSource).not.toHaveBeenCalled();
     expect(ask).not.toHaveBeenCalled();
-    expect(applyReview).not.toHaveBeenCalled();
+    expect(changeSet).not.toHaveBeenCalled();
   });
 
   it('defaults reply rows to Reply all while keeping Open email a separate reading action', async () => {
@@ -207,7 +207,7 @@ describe('read-only assistant dashboard', () => {
     expect(onNavigateToSource).toHaveBeenCalledExactlyOnceWith(source);
     expect(onReplyToSource).toHaveBeenCalledOnce();
     expect(ask).not.toHaveBeenCalled();
-    expect(applyReview).not.toHaveBeenCalled();
+    expect(changeSet).not.toHaveBeenCalled();
     expect(resolveSource).not.toHaveBeenCalled();
   });
 
@@ -274,7 +274,7 @@ describe('read-only assistant dashboard', () => {
     fire(button(view, 'New conversation'), 'click');
     expect(onNewConversation).toHaveBeenCalledOnce();
     expect(ask).not.toHaveBeenCalled();
-    expect(applyReview).not.toHaveBeenCalled();
+    expect(changeSet).not.toHaveBeenCalled();
     expect(createChat).not.toHaveBeenCalled();
   });
 

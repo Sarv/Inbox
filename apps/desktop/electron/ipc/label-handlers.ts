@@ -10,6 +10,7 @@ import { createLogger, type LabelInput } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { ensureAccountRuntime } from '../services/accounts-runtime';
+import { setEmailLabel } from '../services/email-labels';
 import { requireStorage, getCurrentAccountId, getSyncEngine } from '../shared';
 
 const logger = createLogger('label-handlers');
@@ -105,22 +106,8 @@ export function registerLabelHandlers(): void {
       const storage = accountId && accountId !== getCurrentAccountId()
         ? ((await ensureAccountRuntime(accountId))?.storage ?? requireStorage())
         : requireStorage();
-      const email = await storage.getEmail(emailId);
-      if (!email) return { success: false, error: 'Email not found' };
-
-      const name = (label || '').trim();
-      if (!name) return { success: false, error: 'Label is required' };
-
-      const tags = email.tags || '||';
-      const has = tags.includes('|' + name + '|');
-      if (on && !has) {
-        const tagList = tags.split('|').filter((t: string) => t.length > 0);
-        tagList.push(name);
-        await storage.updateEmail(emailId, { tags: '|' + tagList.join('|') + '|' });
-      } else if (!on && has) {
-        const tagList = tags.split('|').filter((t: string) => t.length > 0 && t !== name);
-        await storage.updateEmail(emailId, { tags: tagList.length > 0 ? '|' + tagList.join('|') + '|' : '||' });
-      }
+      if (!(label || '').trim()) return { success: false, error: 'Label is required' };
+      if (await setEmailLabel(storage, emailId, label, on) === 'missing') return { success: false, error: 'Email not found' };
       return { success: true };
     } catch (error) {
       return { success: false, error: (error as Error).message };

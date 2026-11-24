@@ -1092,6 +1092,9 @@ export async function polishText(
 const LLM_REQUEST_TIMEOUT_MS = 60000;
 
 // Call OpenAI-compatible API (OpenAI, Sarv) with retry for rate limits
+/** The most an empty reply at the token limit grows the budget to on its one retry. */
+const MAX_GROWN_BUDGET = 32_000;
+
 async function callOpenAICompatibleAPI(
   provider: AIProvider,
   systemPrompt: string,
@@ -1100,6 +1103,8 @@ async function callOpenAICompatibleAPI(
   maxTokens?: number,
   responseFormat?: 'json_object',
   onStatus?: (s: string) => void,
+  /** This call already doubled the budget after an empty reply at the limit. */
+  budgetGrown = false,
 ): Promise<string> {
   // 1 retry only (2 attempts total) — when the gateway is timing
   // out, the previous 3-retry cap meant each of N emails in a thread
@@ -1161,7 +1166,7 @@ async function callOpenAICompatibleAPI(
     if (retryCount < MAX_RETRIES) {
       llmLog.info(`request timed out after ${LLM_REQUEST_TIMEOUT_MS}ms, retry ${retryCount + 1}/${MAX_RETRIES}`);
       onStatus?.('Retrying after error…');
-      return callOpenAICompatibleAPI(provider, systemPrompt, userMessage, retryCount + 1, maxTokens, responseFormat, onStatus);
+      return callOpenAICompatibleAPI(provider, systemPrompt, userMessage, retryCount + 1, maxTokens, responseFormat, onStatus, budgetGrown);
     }
     reportAIUnhealthy(aiFailureReason(504), 504);
     throw new SarvLLMError(
@@ -1201,7 +1206,7 @@ async function callOpenAICompatibleAPI(
         : 'Retrying after error…',
     );
     await new Promise(resolve => setTimeout(resolve, waitTime));
-    return callOpenAICompatibleAPI(provider, systemPrompt, userMessage, retryCount + 1, maxTokens, responseFormat, onStatus);
+    return callOpenAICompatibleAPI(provider, systemPrompt, userMessage, retryCount + 1, maxTokens, responseFormat, onStatus, budgetGrown);
   }
 
   if (!response.ok) {
@@ -1215,13 +1220,17 @@ async function callOpenAICompatibleAPI(
   // prior "AI inactive" banner (self-correcting after a transient blip).
   reportAIHealthy();
   const content = data.choices[0]?.message?.content?.trim() || '';
-  // Log when the backend returned 200 but produced no text. This is
-  // common-but-mysterious in practice: the model hit max_tokens with
-  // only thinking content, the backend stripped it, content filter
-  // fired silently, etc. Without this log every silent-empty case
-  // looks identical at the call site.
   if (!content) {
     const choice = data.choices?.[0] || {};
+    // A reasoning model can spend the whole budget thinking and return no text
+    // (finish_reason "length"). One retry with twice the budget, as the agent's
+    // own transport does (packages/core/src/agent/ai-chat.ts); the caller's
+    // retries for errors are not used up by it.
+    const budget = maxTokens || 16000;
+    if (choice.finish_reason === 'length' && !budgetGrown && budget < MAX_GROWN_BUDGET) {
+      llmLog.warn(`Empty reply at the token limit (${budget}); retrying once with ${Math.min(budget * 2, MAX_GROWN_BUDGET)}.`);
+      return callOpenAICompatibleAPI(provider, systemPrompt, userMessage, retryCount, Math.min(budget * 2, MAX_GROWN_BUDGET), responseFormat, onStatus, true);
+    }
     // JSON.stringify so the record appears inline in copy-pasted console
     // output instead of as a collapsed `{…}`. The message's fields are named
     // with their sizes only: reasoning_content and a refusal restate the
