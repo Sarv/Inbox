@@ -201,6 +201,26 @@ describe('"Approve for me"', () => {
     expect(await tags('primary', 'b')).toContain('|INBOX|');
   });
 
+  // Breaks: in "Approve for me" the agent marks read a conversation the user
+  // replied to this week, which the retired unread review always kept unread.
+  it('leaves a conversation the user recently replied in for them to decide', async () => {
+    await harness.mail('primary', 't-deal', { id: 'reply', uid: ++uid, date: T0 - 60, subject: 'Re: the deal', cleanBody: 'Sounds good', rawBody: '<p>Sounds good</p>' });
+    await harness.mail('primary', 't-deal', { id: 'mine', uid: ++uid, date: T0 - 3600, subject: 'Re: the deal', sent: true });
+    await mail('primary', 'promo', 2, { subject: 'Weekend sale' });
+    await approveForMe();
+    script(
+      call('search_mail', { unread: true }),
+      turn => call('change_mail', { action: 'mark_read', ids: ids(turn) }),
+      answer('Marked what was routine as read.'),
+    );
+    harness.deps.now = () => T0 * 1000;
+    const exchange = await ask('Mark my unread mail read');
+    const items = exchange.changeSets![0]!.items;
+    expect(items.find(item => item.emailId === 'reply')).toMatchObject({ status: 'pending', protectedReason: 'A conversation you are part of' });
+    expect(items.find(item => item.emailId === 'promo')!.status).toBe('applied');
+    expect(await tags('primary', 'reply')).not.toContain('|read|');
+  });
+
   // Breaks: an injected "mark everything" applies to hundreds of emails with no card.
   it(`asks again past ${INBOX_AGENT_CHANGE_LIMITS.autoApplyPerRun} emails in one request`, async () => {
     for (let index = 0; index < 210; index++) await mail('primary', `m${index}`, index);
@@ -293,6 +313,20 @@ describe('the card', () => {
     expect((await decide(exchange, 'cancel')).changeSets![0]!.status).toBe('cancelled');
     await expect(decide(exchange, 'approve')).rejects.toThrow('cancelled');
     expect(harness.engine.ops).toEqual([]);
+  });
+
+  // Breaks: the service, built when its IPC module loads, opens the core
+  // database before main.ts names the app, which fixes the data folder and
+  // keychain item to the RELEASE app's: a dev run then reads and writes the
+  // installed app's data (seen 2026-11-19).
+  it('reads the change journal on first use, never while being constructed', async () => {
+    const exchange = await staged();
+    const read = vi.spyOn(harness.journal, 'read');
+    const restarted = new InboxAssistantService(harness.deps);
+    expect(read).not.toHaveBeenCalled();
+    expect(restarted.chat(harness.chatId).exchanges.at(-1)!.changeSets![0]).toMatchObject({ id: exchange.changeSets![0]!.id, status: 'pending' });
+    restarted.chat(harness.chatId);
+    expect(read).toHaveBeenCalledOnce();
   });
 
   // Breaks: a restart takes away a card's Approve and Undo while their windows last (the change journal).

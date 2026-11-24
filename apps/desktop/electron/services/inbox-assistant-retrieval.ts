@@ -6,7 +6,6 @@ import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssista
 
 import type { AssistantAttachmentResult } from './assistant-attachment-types';
 import type { InboxAssistantSearchPlan } from './inbox-assistant-answer';
-import type { UnreadReviewBehaviorContext } from './inbox-assistant-review-behavior';
 import { inboxAssistantTermWords, matchesInboxAssistantTerm, meaningfulInboxAssistantTerms } from './inbox-assistant-search-scope';
 
 export type AssistantResearchStorage = Pick<SQLiteStorage,
@@ -18,8 +17,6 @@ export interface AssistantResearchMailbox {
   storage: AssistantResearchStorage;
   aliases: string[];
   fetchBody?: (email: EmailRecord, folder: FolderRecord, options?: { signal?: AbortSignal }) => Promise<EmailRecord | null>;
-  /** Supporting evidence from this mailbox's user actions; never permission to change mail. */
-  getUnreadReviewBehaviorContext?: (senders: string[]) => Promise<UnreadReviewBehaviorContext>;
 }
 
 export interface AssistantResearchDeps {

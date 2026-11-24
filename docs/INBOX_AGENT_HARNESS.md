@@ -1,6 +1,6 @@
 # Inbox Agent as a harness
 
-Status: accepted 2026-11-18; Phase 1 built behind a switch (see "Phase 1 as built"). Replaces the fixed pipeline described in
+Status: accepted 2026-11-18; Phases 1 to 3b built, and since 3b the agent is the only path (see "Phase 3b as built"). Replaces the fixed pipeline described in
 [SUPERHUMAN_COMPARISON_AND_AGENT_PLAN.md](SUPERHUMAN_COMPARISON_AND_AGENT_PLAN.md)
 ("Shared tool architecture"), which planned this but was never built.
 
@@ -289,8 +289,8 @@ removing the regex router).
 - **Switch**: the "Tools · Preview" switch in the Inbox Agent header (one
   managed app setting, `sarvinbox-inbox-agent`, mirrored to the core database
   and read by main on every request; `inbox-agent-switch.ts`).
-  `SARVINBOX_AGENT_HARNESS=1` still forces it on. An unreadable setting means
-  the earlier paths. Inbox Agent stays out of the AI settings tabs.
+  `SARVINBOX_AGENT_HARNESS=1` still forced it on. Removed in 3b, when the agent
+  became the only path.
 - **More `change_mail` actions**: `add_label` / `remove_label` (`label_name`;
   a label the account lacks is created when the set is applied, and deleted
   again by Undo if nothing else uses it), `snooze` (`until`, local wall time in
@@ -335,3 +335,42 @@ removing the regex router).
   review paths removed (Phase 3b); drafts (`create_draft` and friends) move to
   Phase 4 with sending; the reasoning-off protocol is still learned once per
   launch.
+
+## Phase 3b as built
+
+The gate: the evaluation, ported to the agent, passes everything the fixed
+paths passed, and "Approve for me" with the worst model protects at least
+what the unread review protected. Measured 2026-11-19 on the seeded mailbox:
+mail questions identical to the one-shot search (41/51 at the floor; the same
+10 known gaps, all retrieval or follow-up; the 3 follow-ups pass once the model
+spells out what "it" means), every routing request the old router refused or
+misrouted done by tools (review in Hinglish, archive, star, count, starred,
+categorize), and the same 4 `keep` mails leaked as by the review, no more.
+
+- **One path.** Every typed question goes to the agent loop. Removed: the
+  regex router, the capability replies, the unread review and its automatic
+  batches, the mark-read/unread command, the one-shot answer prompt (the
+  planner and retrieval stay, as `deep_search`), the review card and its IPC
+  (`inboxAssistant:applyReview`), and the "Tools · Preview" switch with its
+  setting and environment variable. Old saved reviews still show their text,
+  with a note that their buttons are gone.
+- **Protections carried over** from the review, for every action that hides
+  mail (mark read, archive, Trash, move, spam): the provider's Important flag,
+  a calendar invitation, encrypted mail, a non-soft category the user chose
+  (`changeProtection`), and, looked up per sender and conversation, a
+  favourite (VIP) sender and a conversation the user is in: a reply of theirs
+  in the last 30 days or a colleague at their own company domain
+  (`createConversationGuard`). A lookup that fails protects.
+- **Diagnostics**: a run records its latest `deep_search` plan and per-account
+  coverage, as the one-shot search did.
+- **Evaluation** (`apps/desktop/test/eval/assistant/`, docs/TESTING.md): the
+  questions are scored through `deep_search` at floor and ceiling and must end
+  in a verified answer citing the right email; the other requests are tasks
+  (`agent-tasks.ts`) checked on the mailbox and the cards; the live-provider run
+  records a real model's agent turns, replayed in CI.
+- **Scale**: one request does what fits in 14 turns and 40 tool calls (pages of
+  50, classification in 200s, at most 200 messages applied without a card),
+  where the automatic review ran up to 10 batches unattended. A larger cleanup
+  is several requests; a saved playbook is Phase 5.
+- **Not yet**: drafts and sending (Phase 4).
+

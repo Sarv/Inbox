@@ -40,7 +40,7 @@ const api = {
   createChat: vi.fn(async () => ok(chat('chat-new'))),
   dashboard: vi.fn(async (_request: { accountIds: string[] }) => ok(dashboard())),
   ask: vi.fn(async (_request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>> => ok({ ...exchange(), chatId: 'chat-new' })),
-  applyReview: vi.fn(),
+  changeSet: vi.fn(),
   updateChat: vi.fn(),
   cancel: vi.fn(async (requestId: string) => ok({ requestId, cancelled: true })),
   onActivity: vi.fn(() => () => {}),
@@ -74,7 +74,7 @@ describe('Inbox Agent overview integration', () => {
     expect(view.find('#inbox-assistant-question')).toBeNull();
     expect(view.byLabel('Saved needs-reply conversations: 1')).not.toBeNull();
     expect(api.ask).not.toHaveBeenCalled();
-    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.changeSet).not.toHaveBeenCalled();
     expect(api.updateChat).not.toHaveBeenCalled();
   });
 
@@ -89,7 +89,7 @@ describe('Inbox Agent overview integration', () => {
     expect(input.value).toBe('Review my unread emails and mark low-value conversations as read.');
     expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('review');
     expect(api.ask).not.toHaveBeenCalled();
-    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.changeSet).not.toHaveBeenCalled();
     expect(api.updateChat).not.toHaveBeenCalled();
     const preparedQuestion = input.value;
     fire(view.byLabel('Ask Inbox Agent'), 'click'); await settle();
@@ -120,7 +120,7 @@ describe('Inbox Agent overview integration', () => {
     expect(view.byLabel('Assistant email source')?.textContent).toContain('Existing email reader');
     fire(view.byLabel('Open calendar event: Customer meeting'), 'click');
     expect(onOpenCalendarEvent).toHaveBeenCalledExactlyOnceWith({ eventId: 'meeting-1', startMs: createdAt + 3_600_000, occurrenceId: 'meeting-occurrence' });
-    expect(api.ask).not.toHaveBeenCalled(); expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.ask).not.toHaveBeenCalled(); expect(api.changeSet).not.toHaveBeenCalled();
   });
 
   it('uses Reply all as the default needs-reply action and keeps Open email separate', async () => {
@@ -132,7 +132,7 @@ describe('Inbox Agent overview integration', () => {
     fire(view.byLabel('Open email: Customer question (other@example.test)'), 'click');
     expect(onNavigateToSource).toHaveBeenCalledExactlyOnceWith(source);
     expect(api.ask).not.toHaveBeenCalled();
-    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.changeSet).not.toHaveBeenCalled();
   });
 
   it('keeps a request running in Overview and offers cancellation through activity when the composer is hidden', async () => {
@@ -158,7 +158,7 @@ describe('Inbox Agent overview integration', () => {
     expect(api.cancel).toHaveBeenCalledExactlyOnceWith(requestId);
     await act(async () => finish(ok(exchange()))); await settle();
     expect(view.find('h1')?.textContent).toBe('Inbox overview');
-    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.changeSet).not.toHaveBeenCalled();
   });
 
   it('defaults compact layouts to the overview and preserves an explicit conversation entry', async () => {
@@ -194,6 +194,6 @@ describe('Inbox Agent overview integration', () => {
     expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Keep my unsent request.');
     expect(api.chat).toHaveBeenCalledOnce();
     expect(api.ask).not.toHaveBeenCalled();
-    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.changeSet).not.toHaveBeenCalled();
   });
 });

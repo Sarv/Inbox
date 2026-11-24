@@ -353,6 +353,12 @@ Established shared helpers (extend this list as you add more):
 - `revertUserSpamVerdict(deps, row)` — `apps/desktop/electron/services/spam-verdict-actions.ts`.
   Undo of Report spam / Not spam: tag, folder, stored verdict and the sender's
   lists back as they were; refuses while the moved message has no server UID.
+- `changeProtection(action, email, body)` / `createConversationGuard({ storage, ownAddresses, nowMs })` —
+  `apps/desktop/electron/services/inbox-assistant-change-sets.ts`. Why mail must not be
+  hidden (marked read, archived, trashed, moved, reported) without the user ticking it:
+  the email's own flags and content, then its sender (VIP) and conversation (the user's
+  recent reply, a colleague). A failed lookup protects. Use both for any new path that
+  changes mail on the agent's behalf.
 - `isAllowedArchiveEntry(path, entry)` —
   `apps/desktop/electron/services/extension-archive-rules.mjs`. What may come out of
   an extension archive (allowlisted paths, plain files and the expected folders,

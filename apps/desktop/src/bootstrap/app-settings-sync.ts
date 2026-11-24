@@ -41,7 +41,6 @@ const MANAGED_KEYS = [
   'sarvinbox-agent-config-version',
   'sarvinbox-ai-settings',           // AI provider settings (API keys stripped → vault)
   'sarvinbox-ai-features',           // AI feature toggles
-  'sarvinbox-inbox-agent',           // Inbox Agent preferences (read by main per request)
   'sarvinbox-categorization-prompts',// user's custom AI categorization prompts
   'sarvinbox-keyboard-shortcuts',    // custom keyboard shortcut overrides
   'sarvinbox-collapsed-sections',

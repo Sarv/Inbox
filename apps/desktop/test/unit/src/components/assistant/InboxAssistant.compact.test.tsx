@@ -24,7 +24,7 @@ const api = {
     id: 'answer-1', chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: Date.now(),
     answer: { text: 'The matching conversation is available.', sources: [], coverage: [], warnings: [] },
   })),
-  applyReview: vi.fn(),
+  changeSet: vi.fn(),
   cancel: vi.fn(async (requestId: string) => ok({ requestId, cancelled: true })),
   onActivity: vi.fn(() => () => {}),
 };
@@ -99,7 +99,7 @@ describe('compact Inbox Agent controls', () => {
     expect(api.updateChat).toHaveBeenCalledExactlyOnceWith({ chatId: 'chat-1', actionMode: 'approve_for_me' });
     expect(mode.value).toBe('approve_for_me');
     expect(api.ask).not.toHaveBeenCalled();
-    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.changeSet).not.toHaveBeenCalled();
   });
 
   it('retains the question draft and account selection when moving between compact and full layouts', async () => {

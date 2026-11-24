@@ -64,6 +64,9 @@ export type AgentReply =
 
 export type ScriptedAgent = (turn: AgentTurn) => AgentReply | Promise<AgentReply>;
 
+/** A real provider for the harness, and what to do with each request and response (never the key: headers are not passed). */
+export interface HarnessProvider { config: AIProviderConfig; onExchange?(exchange: { request: string; status: number; response: string }): void }
+
 /** The latest tool or JSON-protocol result the agent model was shown, as text. */
 export function lastToolResult(turn: AgentTurn): string {
   for (let index = turn.messages.length - 1; index >= 0; index--) {
@@ -103,14 +106,12 @@ export interface AssistantHarness {
   ai: ScriptedAI;
   /** Every model call made so far, in order. */
   calls: Array<{ purpose: InboxAssistantAIPurpose; prompt: string }>;
-  /** Replace the scripted agent model at any time. Unset: typed questions take the fixed paths. */
+  /** The scripted agent model; replace it at any time. A question asked with none set fails. */
   agent?: ScriptedAgent;
   /** Every agent-loop turn sent so far, in order. */
   agentTurns: AgentTurn[];
   /** Every line written through the logger or `console.*` since the harness was created. */
   logs: string[];
-  /** Every read or unread change the agent made to mail, in order. Nothing is written to the mailbox. */
-  readChanges: Array<{ accountId: string; emailIds: string[]; read: boolean; source?: string }>;
   /** The queue behind `mailActions: true`. */
   engine: HarnessEngine;
   /**
@@ -164,13 +165,19 @@ export const NO_FACTS = '{"facts":[]}';
 export async function createAssistantHarness(options: {
   accounts?: InboxAssistantAccount[];
   ai?: ScriptedAI;
-  /** Turn the agent loop on, with this scripted model. */
+  /** The scripted agent model every question goes to. */
   agent?: ScriptedAgent;
   readAttachment?: InboxAssistantServiceDeps['readAttachment'];
   now?: () => number;
   timeZone?: string;
   /** Give the agent its write tools, over the real account databases and a recording queue. */
   mailActions?: boolean;
+  /**
+   * A REAL provider instead of the scripted endpoint (the opt-in evaluation in
+   * test/eval/assistant/live-provider.ts). Every request and response is
+   * passed to `onExchange` (never the key: headers are not passed).
+   */
+  provider?: HarnessProvider;
 } = {}): Promise<AssistantHarness> {
   // The history store imports the Electron-bound core DB module for its default
   // database. Tests supply their own, so the import must never reach Electron.
@@ -201,7 +208,6 @@ export async function createAssistantHarness(options: {
     vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { logs.push(args.map(render).join(' ')); }));
 
   const calls: AssistantHarness['calls'] = [];
-  const readChanges: AssistantHarness['readChanges'] = [];
   let requests = 0;
   const agentTurns: AgentTurn[] = [];
   const engine: HarnessEngine = { ops: [], answer: () => 'success', reports: [] };
@@ -211,14 +217,22 @@ export async function createAssistantHarness(options: {
     read() { if (this.unreadable) throw new Error('locked'); return this.text; }, write(value: string) { this.text = value; } };
 
   const harness = {
-    accounts, history, chatId, calls, logs, readChanges, agentTurns, agent: options.agent, engine, journal,
+    accounts, history, chatId, calls, logs, agentTurns, agent: options.agent, engine, journal,
     // By default the planner is refused (a 400 is permanent, so nothing retries)
     // and the answer is empty: the host's own routing and retrieval, unaided.
     ai: options.ai ?? (prompt => scriptedPurpose(prompt) === 'plan' ? { status: 400 } : NO_FACTS),
   } as AssistantHarness;
 
   // A provider that is only a fetch: the production call path does the rest.
-  const config: AIProviderConfig = {
+  const provider = options.provider;
+  const config: AIProviderConfig = provider ? {
+    ...provider.config,
+    fetchImpl: async (input: string, init?: RequestInit) => {
+      const response = await (provider.config.fetchImpl ?? fetch)(input, init);
+      provider.onExchange?.({ request: String(init?.body ?? ''), status: response.status, response: await response.clone().text() });
+      return response;
+    },
+  } : {
     type: 'openai', apiKey: 'harness-key', model: 'harness-model', baseUrl: 'https://ai.invalid/v1',
     fetchImpl: (async (_input: unknown, init?: { body?: unknown }) => {
       const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }>; tools?: Array<{ function: { name: string } }>; reasoning_effort?: string };
@@ -338,12 +352,7 @@ export async function createAssistantHarness(options: {
       callOptions?.maxOutputTokens === undefined ? config : { ...config, maxOutputTokens: callOptions.maxOutputTokens },
       INBOX_ASSISTANT_SYSTEM_PROMPT, prompt, signal, onUsage),
     callAIChat: (request, signal, onUsage) => callInboxAssistantChat(config, request, signal, onUsage),
-    agentHarness: () => harness.agent !== undefined,
     history,
-    setRead: async (accountId, emailIds, read, context) => {
-      readChanges.push({ accountId, emailIds: [...emailIds], read, ...(context ? { source: context.source } : {}) });
-      return { appliedIds: [...emailIds], queuedIds: [], failedIds: [] };
-    },
     ...(options.now ? { now: options.now } : {}),
     timeZone: () => options.timeZone ?? 'Asia/Kolkata',
     ...(options.mailActions ? { mailActions: harnessMailActions(), settingActions: harnessSettingActions(), changeJournal: createInboxAgentChangeJournal(journal) } : {}),

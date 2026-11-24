@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { classifyFolder, hasTag, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
+import { classifyFolder, existingCategoryClassification, hasTag, type ContactRecord, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
 
 import type {
   InboxAgentChangeAction, InboxAgentChangeItem, InboxAgentChangeItemStatus, InboxAgentChangeSet,
@@ -124,18 +124,84 @@ export function changeSummary(action: InboxAgentChangeAction, count: number, tar
   return [verb, noun, tail].filter(Boolean).join(' ');
 }
 
+/** Categories a user may file mail into without it meaning "keep this in sight". */
+const SOFT_CATEGORIES = new Set(['promotions', 'social', 'updates', 'forums']);
+
 /**
  * Why a message should not be changed this way without the user ticking it,
- * or undefined. Starred and important mail, and the unread review's content
- * gates (security codes, bank and card records, invoices, contracts, business
- * reports, meeting invitations), checked on whatever body is stored.
+ * or undefined. Starred and important mail (the user's flag or the
+ * provider's), a calendar invitation, encrypted mail nobody could read, a
+ * category the user chose that is not a soft one, and the unread review's
+ * content gates (security codes, bank and card records, invoices, contracts,
+ * business reports), checked on whatever body is stored.
  */
-export function changeProtection(action: InboxAgentChangeAction, email: Pick<EmailRecord, 'tags' | 'subject' | 'fromAddress'>, body: string): string | undefined {
+export function changeProtection(action: InboxAgentChangeAction, email: Pick<EmailRecord, 'tags' | 'subject' | 'fromAddress'> & Partial<EmailRecord>, body: string): string | undefined {
   if (!GUARDED.has(action)) return undefined;
   const tags = email.tags || '||';
   if (hasTag(tags, 'starred')) return 'Starred';
-  if (hasTag(tags, 'important')) return 'Marked important';
+  if (hasTag(tags, 'important') || email.gmailImportant === true || email.manualImportant === true) return 'Marked important';
+  if (email.calendarIcs) return 'A calendar invitation';
+  if (email.pgpStatus === 'encrypted') return 'Encrypted: its content was not checked';
+  const classification = existingCategoryClassification(email as EmailRecord);
+  if (classification?.source === 'user' && classification.categories.some(category => !SOFT_CATEGORIES.has(category))) return 'In a category you chose';
   return unreadReviewContentProtections(email, body)[0];
+}
+
+/** How recent a reply of the user's makes a conversation "ongoing". */
+const ONGOING_SECONDS = 30 * 86_400;
+/** Mail providers whose domain says nothing about a team. */
+const PUBLIC_DOMAINS = new Set(['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'yahoo.com', 'icloud.com', 'me.com', 'proton.me', 'protonmail.com', 'aol.com']);
+
+export interface ConversationGuardStorage {
+  getContacts(options: { search: string; limit: number; offset: number }): Promise<Array<Pick<ContactRecord, 'email' | 'isFavorite'>>>;
+  getEmailsByThread?(threadId: string): Promise<EmailRecord[]>;
+}
+
+/**
+ * The protections that need more than the email itself, as the unread review
+ * had them: a favourite (VIP) sender, and a conversation the user is in (a
+ * reply of theirs in the last 30 days, or mail from a colleague at their own
+ * company's domain). Lookups are cached per sender and conversation; one that
+ * fails protects, never the other way round.
+ */
+export function createConversationGuard(input: { storage: ConversationGuardStorage; ownAddresses: string[]; nowMs: number }): (action: InboxAgentChangeAction, email: Pick<EmailRecord, 'fromAddress' | 'threadId' | 'id'>) => Promise<string | undefined> {
+  const own = new Set(input.ownAddresses.map(value => value.trim().toLowerCase()).filter(Boolean));
+  const domains = new Set([...own].map(value => value.split('@')[1] ?? '').filter(domain => domain && !PUBLIC_DOMAINS.has(domain)));
+  const isOwn = (address: string | null | undefined) => own.has((address ?? '').trim().toLowerCase());
+  const colleague = (address: string | null | undefined) => {
+    const value = (address ?? '').trim().toLowerCase();
+    return !own.has(value) && domains.has(value.split('@')[1] ?? '');
+  };
+  const senders = new Map<string, Promise<string | undefined>>();
+  const threads = new Map<string, Promise<string | undefined>>();
+  const since = Math.floor(input.nowMs / 1000) - ONGOING_SECONDS;
+  const sender = (address: string) => {
+    const key = address.trim().toLowerCase();
+    if (!senders.has(key)) {
+      senders.set(key, input.storage.getContacts({ search: key, limit: 20, offset: 0 })
+        .then(rows => rows.some(row => row.email.toLowerCase() === key && row.isFavorite) ? 'A favorite or VIP sender' : undefined)
+        .catch(() => 'The sender could not be checked'));
+    }
+    return senders.get(key)!;
+  };
+  const thread = (threadId: string) => {
+    if (!threads.has(threadId)) {
+      threads.set(threadId, (input.storage.getEmailsByThread ? input.storage.getEmailsByThread(threadId) : Promise.resolve([]))
+        .then(members => members.some(member => isOwn(member.fromAddress) && member.date >= since) || members.some(member => colleague(member.fromAddress))
+          ? 'A conversation you are part of' : undefined)
+        .catch(() => 'The conversation could not be checked'));
+    }
+    return threads.get(threadId)!;
+  };
+  return async (action, email) => {
+    if (!GUARDED.has(action)) return undefined;
+    if (colleague(email.fromAddress)) return 'A conversation you are part of';
+    if (email.fromAddress && !isOwn(email.fromAddress)) {
+      const reason = await sender(email.fromAddress);
+      if (reason) return reason;
+    }
+    return email.threadId ? thread(email.threadId) : undefined;
+  };
 }
 
 export interface StageTarget {

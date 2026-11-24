@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AssistantReadReceipt } from '../../../../electron/services/assistant-mail-actions';
 import {
-  applyChangeSet, cancelChangeSet, changeCounts, changeProtection, changeSummary, INBOX_AGENT_CHANGE_LIMITS, stageChangeSet,
+  applyChangeSet, cancelChangeSet, changeCounts, changeProtection, changeSummary, createConversationGuard, INBOX_AGENT_CHANGE_LIMITS, stageChangeSet,
   undoChangeSet, type HeldChangeSet, type InboxAgentMailActions,
 } from '../../../../electron/services/inbox-assistant-change-sets';
 import type { InboxAgentChangeAction } from '../../../../src/types/inbox-assistant-changes';
@@ -139,6 +139,72 @@ describe('staging a change set', () => {
     for (const action of ['star', 'unstar', 'mark_unread', 'restore', 'add_category'] as const) {
       expect(changeProtection(action, { ...plain, tags: '|INBOX|starred|' }, 'Your verification code is 482913')).toBeUndefined();
     }
+  });
+
+  // Breaks: the agent hides mail the retired unread review kept in sight: the
+  // provider's Important, an invitation, encrypted mail nobody read, or mail the
+  // user filed into a category of their own.
+  it('protects what the unread review protected on the email itself', () => {
+    const plain = { subject: 'Weekly deals', fromAddress: 'shop@example.test', tags: '|INBOX|' };
+    expect(changeProtection('mark_read', { ...plain, gmailImportant: true }, '')).toBe('Marked important');
+    expect(changeProtection('archive', { ...plain, manualImportant: true }, '')).toBe('Marked important');
+    expect(changeProtection('trash', { ...plain, calendarIcs: 'BEGIN:VCALENDAR' }, '')).toBe('A calendar invitation');
+    expect(changeProtection('mark_read', { ...plain, pgpStatus: 'encrypted' }, '')).toMatch(/Encrypted/);
+    expect(changeProtection('move', { ...plain, manualCategories: ['clients'] }, '')).toBe('In a category you chose');
+    // A soft category the user chose (promotions, social…) is no reason to keep mail in sight.
+    expect(changeProtection('mark_read', { ...plain, manualCategories: ['promotions'] }, '')).toBeUndefined();
+    expect(changeProtection('mark_read', { ...plain, gmailImportant: false, manualImportant: false }, '')).toBeUndefined();
+    // Filing or starring hides nothing.
+    expect(changeProtection('add_category', { ...plain, calendarIcs: 'BEGIN:VCALENDAR' }, '')).toBeUndefined();
+  });
+
+  describe('the conversation guard', () => {
+    const NOW = Date.UTC(2026, 10, 19);
+    const day = 86_400;
+    const member = (from: string, daysAgo: number) => ({ fromAddress: from, date: Math.floor(NOW / 1000) - daysAgo * day }) as EmailRecord;
+    function guardOver(over: { contacts?: Array<{ email: string; isFavorite: boolean }>; thread?: EmailRecord[]; failContacts?: boolean; failThread?: boolean } = {}) {
+      const storage = {
+        getContacts: vi.fn(async () => { if (over.failContacts) throw new Error('locked'); return over.contacts ?? []; }),
+        getEmailsByThread: vi.fn(async () => { if (over.failThread) throw new Error('locked'); return over.thread ?? []; }),
+      };
+      return { storage, guard: createConversationGuard({ storage, ownAddresses: ['me@acme.example', 'Me@Gmail.com'], nowMs: NOW }) };
+    }
+    const email = { id: 'e1', fromAddress: 'news@shop.example', threadId: 't1' };
+
+    // Breaks: mail from a VIP is marked read or archived without asking.
+    it('protects a favourite sender, matched by the exact address', async () => {
+      expect(await guardOver({ contacts: [{ email: 'News@Shop.example', isFavorite: true }] }).guard('mark_read', email)).toBe('A favorite or VIP sender');
+      expect(await guardOver({ contacts: [{ email: 'other-news@shop.example', isFavorite: true }] }).guard('mark_read', email)).toBeUndefined();
+    });
+
+    // Breaks: a thread the user replied to last week, or a colleague's mail, is hidden as "not needed".
+    it('protects a conversation the user is in: a recent reply, or a colleague at their own domain', async () => {
+      expect(await guardOver({ thread: [member('news@shop.example', 1), member('me@acme.example', 10)] }).guard('archive', email)).toBe('A conversation you are part of');
+      expect(await guardOver({ thread: [member('news@shop.example', 1), member('me@acme.example', 45)] }).guard('archive', email)).toBeUndefined();
+      expect(await guardOver({ thread: [member('ravi@acme.example', 200)] }).guard('archive', email)).toBe('A conversation you are part of');
+      expect(await guardOver().guard('trash', { ...email, fromAddress: 'ravi@acme.example' })).toBe('A conversation you are part of');
+      // A public mail provider is not a company: another gmail.com sender is no colleague.
+      expect(await guardOver({ thread: [member('friend@gmail.com', 1)] }).guard('archive', email)).toBeUndefined();
+    });
+
+    // Breaks: a lookup that failed reads as "nothing to protect", so the change goes ahead unchecked.
+    it('protects when a lookup fails, and looks each sender and conversation up once', async () => {
+      expect(await guardOver({ failContacts: true }).guard('mark_read', email)).toBe('The sender could not be checked');
+      expect(await guardOver({ failThread: true }).guard('mark_read', email)).toBe('The conversation could not be checked');
+      const { storage, guard } = guardOver();
+      await guard('mark_read', email);
+      await guard('mark_read', { ...email, id: 'e2' });
+      expect(storage.getContacts).toHaveBeenCalledOnce();
+      expect(storage.getEmailsByThread).toHaveBeenCalledOnce();
+    });
+
+    // Breaks: starring or labelling a VIP's mail is refused, or the user's own mail is looked up as a sender.
+    it('applies only to actions that hide mail, and skips the user\'s own messages and threadless mail', async () => {
+      const { storage, guard } = guardOver({ contacts: [{ email: 'news@shop.example', isFavorite: true }] });
+      expect(await guard('star', email)).toBeUndefined();
+      expect(await guard('mark_read', { id: 'e3', fromAddress: 'me@gmail.com', threadId: null as unknown as string })).toBeUndefined();
+      expect(storage.getContacts).not.toHaveBeenCalled();
+    });
   });
 
   // Breaks: Undo of a Gmail archive puts mail somewhere other than the Inbox it was in.

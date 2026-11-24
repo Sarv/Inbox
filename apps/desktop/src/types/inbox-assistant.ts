@@ -1,4 +1,4 @@
-import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from './inbox-assistant-actions';
+import type { InboxAssistantReview, InboxAssistantReviewApplyResult } from './inbox-assistant-actions';
 import type { InboxAgentChangeSet, InboxAgentChangeSetRequest, InboxAgentSettingChange } from './inbox-assistant-changes';
 import type { InboxAssistantDashboard, InboxAssistantDashboardRequest } from './inbox-assistant-dashboard';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest } from './local-calendar';
@@ -71,7 +71,6 @@ export interface InboxAssistantProgress {
   accountId?: string;
   emailId?: string;
   filename?: string;
-  reviewAutomation?: InboxAssistantReviewAutomation;
 }
 
 export interface InboxAssistantActivity extends InboxAssistantProgress {
@@ -241,7 +240,7 @@ export interface InboxAssistantAgentDiagnostics {
 
 export interface InboxAssistantRunDiagnostics {
   version: 1;
-  /** Which path handled the request. `refused`: the host declined it before doing any work. */
+  /** Which path handled the request: always `agent` now. The others are in runs saved before the fixed paths were retired. */
   route?: 'capability' | 'review' | 'mail_command' | 'search' | 'agent' | 'refused';
   reviewKind?: string;
   plan?: InboxAssistantPlanDiagnostics;
@@ -303,6 +302,7 @@ export interface InboxAssistantExchange {
   answer: InboxAssistantAnswer;
   createdAt: number; // Unix milliseconds for conversation ordering.
   activities?: InboxAssistantActivity[];
+  /** Saved by the retired unread review (before 3b): shown, never acted on. */
   review?: InboxAssistantReview;
   reviewResult?: InboxAssistantReviewApplyResult;
   /** Mail changes the agent staged or applied in this exchange, one card each. */
@@ -325,25 +325,6 @@ export interface InboxAssistantRequest {
   question: string;
   accountIds: string[];
   previousExchangeId?: string;
-  reviewKind?: InboxAssistantReviewKind;
-  continueReviewId?: string;
-  /** Prepare/refresh a review without applying saved delegated approval. */
-  reviewOnly?: boolean;
-}
-
-export interface InboxAssistantReviewActionRequest {
-  requestId: string;
-  chatId: string;
-  exchangeId: string;
-  reviewId: string;
-  itemIds: string[];
-  undo?: boolean;
-  /** Set only by a user's explicit selection, never by delegated approval. */
-  manualSelection?: boolean;
-  /** Manual mail actions never alter the review's automatic recommendation. */
-  action?: InboxAssistantReviewAction;
-  /** Explicit one-run consent: mark verified recommendations read, then continue. */
-  autoContinue?: boolean;
 }
 
 export interface InboxAssistantChatSummary {
@@ -419,7 +400,6 @@ export interface InboxAssistantAPI {
   draftEmail(request: InboxAssistantDraftRequest): Promise<InboxAssistantResult<InboxAssistantDraft>>;
   history(): Promise<InboxAssistantResult<InboxAssistantExchange[]>>;
   ask(request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
-  applyReview(request: InboxAssistantReviewActionRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
   /** Approve, cancel or undo one of the agent's change sets. */
   changeSet(request: InboxAgentChangeSetRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
   cancel(requestId: string): Promise<InboxAssistantResult<InboxAssistantCancellation>>;

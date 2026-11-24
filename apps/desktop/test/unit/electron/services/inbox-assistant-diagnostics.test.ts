@@ -3,24 +3,57 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { inboxAssistantDegradedStages, inboxAssistantRunSummary } from '../../../../electron/services/inbox-assistant-diagnostics';
 import type { InboxAssistantExchange, InboxAssistantRunDiagnostics, InboxAssistantUsage } from '../../../../src/types/inbox-assistant';
-import { createAssistantHarness, promptEvidence, scriptedPurpose, NO_FACTS, type AssistantHarness, type ScriptedAI } from '../../../helpers/assistant-harness';
+import { createAssistantHarness, lastToolResult, scriptedPurpose, NO_FACTS, type AgentReply, type AgentTurn, type AssistantHarness } from '../../../helpers/assistant-harness';
 
 // A run's diagnostics are the only way to explain a bad answer afterwards: the
 // user's machine cannot be reached and app.log must not hold mail. These tests
-// run the real agent (see assistant-harness.ts) and read what it saved.
+// run the real agent (see assistant-harness.ts) and read what it saved. A
+// question about mail goes through the agent's deep_search tool, which plans
+// (the 'plan' model call) and searches every selected account, and records both.
 
 const QUOTE = 'Acme quotation Q-7: total INR 4,50,000 excluding GST.';
 const PLAN = JSON.stringify({ queries: ['Acme', 'quotation'], entityTerms: ['Acme'], intent: 'all', quoteIntent: true, filters: {} });
-
-/** A model that plans, then quotes the seeded sentence back exactly. */
-const grounded: ScriptedAI = (prompt, purpose) => {
-  if (purpose === 'plan') return PLAN;
-  const source = promptEvidence(prompt).find(item => item.evidence.includes(QUOTE));
-  return source ? JSON.stringify({ facts: [{ text: QUOTE, sourceIds: [source.id], quotes: [{ sourceId: source.id, text: QUOTE }] }] }) : NO_FACTS;
-};
+const QUESTION = 'What did we quote Acme?';
 
 let harness: AssistantHarness;
-beforeEach(async () => { harness = await createAssistantHarness({ ai: grounded }); });
+
+type Step = AgentReply | ((turn: AgentTurn) => AgentReply);
+
+/** The scripted agent model for the next question: each turn's reply, in order. */
+function script(...steps: Step[]): void {
+  let index = 0;
+  harness.agent = turn => {
+    const step = steps[Math.min(index++, steps.length - 1)]!;
+    return typeof step === 'function' ? step(turn) : step;
+  };
+}
+
+const deepSearch = (question = QUESTION): AgentReply => ({ tools: [{ name: 'deep_search', arguments: { question } }] });
+const answerWith = (args: Record<string, unknown> | string): AgentReply => ({ tools: [{ name: 'answer', arguments: args }] });
+
+/** The excerpt id (S…) whose block in the last tool result shows `text`. */
+function excerptShowing(turn: AgentTurn, text: string): string | undefined {
+  for (const block of lastToolResult(turn).split('\n\n---\n\n')) {
+    if (block.includes(text)) return /^Source: (S\d+)$/m.exec(block)?.[1];
+  }
+  return undefined;
+}
+
+/** Quote QUOTE back exactly from the excerpt that shows it, or answer with no facts. */
+const quoteBack = (turn: AgentTurn): AgentReply => {
+  const id = excerptShowing(turn, QUOTE);
+  return answerWith({ facts: id ? [{ text: QUOTE, sourceIds: [id], quotes: [{ sourceId: id, text: QUOTE }] }] : [] });
+};
+
+/** A model that deep-searches the question, then quotes the seeded sentence back exactly. */
+function grounded(question = QUESTION): void {
+  script(deepSearch(question), quoteBack);
+}
+
+beforeEach(async () => {
+  harness = await createAssistantHarness({ ai: (_prompt, purpose) => purpose === 'plan' ? PLAN : NO_FACTS });
+  grounded();
+});
 afterEach(async () => { await harness.close(); });
 
 async function seedQuote(accountId = 'primary'): Promise<void> {
@@ -47,11 +80,12 @@ describe('what a run saves about itself', () => {
   // wrong answer from the same question cannot be compared with a good one.
   it('records the route, a model plan, the search and the verified answer, and survives a reload from the store', async () => {
     await seedQuote();
-    const exchange = await harness.ask('What did we quote Acme?');
+    const exchange = await harness.ask(QUESTION);
     const diagnostics = saved(exchange);
     expect(diagnostics).toMatchObject({
-      version: 1, route: 'search', outcome: 'verified',
+      version: 1, route: 'agent', outcome: 'verified',
       plan: { source: 'model', followUp: false, intent: 'all', quoteIntent: true, timeWindow: false, filters: [] },
+      agent: { mode: 'native', steps: 2, toolCalls: { deep_search: 1 }, toolErrors: {}, stop: 'answered' },
       answer: { first: { format: 'valid', factsReturned: 1, factsVerified: 1, rejected: {} }, factsFinal: 1 },
     });
     expect(diagnostics.plan).not.toHaveProperty('failure');
@@ -73,30 +107,44 @@ describe('what a run saves about itself', () => {
   });
 
   // Breaks: each call in "Answer usage" is an anonymous row, so nobody can tell
-  // whether the cost and the failure belonged to planning, answering or a repair.
+  // whether the cost and the failure belonged to planning or to the agent's turns.
   it('labels every model call with the step that made it', async () => {
     await seedQuote();
-    harness.ai = (prompt, purpose) => purpose === 'plan' ? PLAN
-      : purpose === 'answer' ? JSON.stringify({ facts: [{ text: 'Acme was quoted INR 9,99,999.', sourceIds: ['S1'], quotes: [{ sourceId: 'S1', text: QUOTE }] }] })
-        : grounded(prompt, purpose);
-    const exchange = await harness.ask('What did we quote Acme?');
-    expect(exchange.usage!.calls.map(call => call.purpose)).toEqual(['plan', 'answer', 'repair']);
-    expect(harness.calls.map(call => call.purpose)).toEqual(['plan', 'answer', 'repair']);
+    // The first answer misstates the number, so the agent gets a third turn to correct it.
+    script(deepSearch(), answerWith({ facts: [{ text: 'Acme was quoted INR 9,99,999.', sourceIds: ['S1'], quotes: [{ sourceId: 'S1', text: QUOTE }] }] }),
+      answerWith({ facts: [{ text: QUOTE, sourceIds: ['S1'], quotes: [{ sourceId: 'S1', text: QUOTE }] }] }));
+    const exchange = await harness.ask(QUESTION);
+    expect(exchange.usage!.calls.map(call => call.purpose)).toEqual(['agent', 'plan', 'agent', 'agent']);
+    expect(harness.calls.map(call => call.purpose)).toEqual(['plan']);
     expect(exchange.usage!.calls.every(call => call.status === 'completed' && call.errorKind === undefined)).toBe(true);
+    expect(saved(exchange).answer).toMatchObject({ repair: { reason: 'rejected_facts', factsRecovered: 1 }, factsFinal: 1 });
   });
 
   // Breaks: asking the same thing again appends the second run's accounts to the
   // first run's record, so every count in the saved diagnostics is wrong.
   it('keeps each run its own record when a question is asked again', async () => {
     await seedQuote();
-    const first = await harness.ask('What did we quote Acme?');
-    const second = await harness.ask('What did we quote Acme?');
+    const first = await harness.ask(QUESTION);
+    grounded();
+    const second = await harness.ask(QUESTION);
     const [a, b] = [saved(first), saved(second)];
     expect(a.accounts).toHaveLength(2);
     expect(b.accounts).toHaveLength(2);
     expect(b.accounts).not.toBe(a.accounts);
     expect(harness.chat().runs!.filter(run => run.diagnostics).map(run => run.diagnostics!.accounts!.length)).toEqual([2, 2]);
     expect(saved(first)).toEqual(a);
+  });
+
+  // Breaks: a deep search run twice in one question records the first search's
+  // accounts plus the second's, so the counts describe no search that happened.
+  it('keeps the latest deep search\'s accounts when the agent searches twice', async () => {
+    await seedQuote();
+    script(deepSearch('What did we quote Zebra Corp?'), deepSearch(), quoteBack);
+    const diagnostics = saved(await harness.ask(QUESTION));
+    expect(diagnostics.agent!.toolCalls).toEqual({ deep_search: 2 });
+    expect(diagnostics.accounts).toHaveLength(2);
+    expect(diagnostics.accounts![0]).toMatchObject({ accountId: 'primary', matchedMessages: 1, evidenceItems: 1 });
+    expect(diagnostics.outcome).toBe('verified');
   });
 });
 
@@ -106,7 +154,7 @@ describe('a planner that fails is recorded, not hidden', () => {
     const provider = harness.deps.callAI;
     harness.deps.callAI = (prompt, signal, onUsage, options) => scriptedPurpose(prompt) === 'plan'
       ? Promise.resolve().then(fail) : provider(prompt, signal, onUsage, options);
-    return saved(await harness.ask('What did we quote Acme?'));
+    return saved(await harness.ask(QUESTION));
   };
 
   // Breaks: a rate limit or a timeout (it will pass by itself) and a rejected
@@ -126,7 +174,7 @@ describe('a planner that fails is recorded, not hidden', () => {
     expect(diagnostics.plan).toMatchObject({ source: 'fallback', ...expected });
     if (!('httpStatus' in expected)) expect(diagnostics.plan).not.toHaveProperty('httpStatus');
     // The search still ran on the fallback and found the mail.
-    expect(diagnostics.route).toBe('search');
+    expect(diagnostics.route).toBe('agent');
     expect(diagnostics.accounts![0]!.matchedMessages).toBe(1);
     expect(inboxAssistantDegradedStages(diagnostics)).toContain(`plan_fallback:${expected.failure}${expected.failedField ? `/${expected.failedField}` : ''}`);
   });
@@ -135,12 +183,13 @@ describe('a planner that fails is recorded, not hidden', () => {
   // class, or the failed call is saved with no reason beside its "failed" status.
   it('saves the failure class on the failed call itself, through the real provider path', async () => {
     await seedQuote();
-    harness.ai = (prompt, purpose) => purpose === 'plan' ? { status: 401, body: JSON.stringify({ error: { message: 'Incorrect API key' } }) } : grounded(prompt, purpose);
-    const exchange = await harness.ask('What did we quote Acme?');
+    harness.ai = (_prompt, purpose) => purpose === 'plan' ? { status: 401, body: JSON.stringify({ error: { message: 'Incorrect API key' } }) } : NO_FACTS;
+    const exchange = await harness.ask(QUESTION);
     expect(saved(exchange).plan).toMatchObject({ source: 'fallback', failure: 'auth', httpStatus: 401 });
-    const [plan, answer] = exchange.usage!.calls;
+    const [search, plan, answer] = exchange.usage!.calls;
+    expect(search).toMatchObject({ purpose: 'agent', status: 'completed' });
     expect(plan).toMatchObject({ purpose: 'plan', status: 'failed', errorKind: 'auth', httpStatus: 401 });
-    expect(answer).toMatchObject({ purpose: 'answer', status: 'completed' });
+    expect(answer).toMatchObject({ purpose: 'agent', status: 'completed' });
     expect(answer).not.toHaveProperty('errorKind');
   });
 });
@@ -153,60 +202,63 @@ describe('what the verifier did is recorded by reason', () => {
   // that does not exist is lost, and those need different fixes.
   it('counts rejected facts by reason for the first reply and the repair separately', async () => {
     await seedQuote();
-    harness.ai = (_prompt, purpose) => purpose === 'plan' ? PLAN : purpose === 'answer'
-      ? JSON.stringify({ facts: [
+    script(deepSearch(),
+      answerWith({ facts: [
         fact(QUOTE),
         fact('Acme was quoted INR 9,99,999.'),
         fact('Acme accepted.', 'Acme accepted the quotation in full.'),
         fact('Acme asked for a discount.', QUOTE, 'S9'),
         { text: 'No sources.', sourceIds: [], quotes: [] },
-      ] })
-      : JSON.stringify({ facts: [fact('The quotation reference is Q-7.', 'Acme quotation Q-7'), fact('Acme was quoted INR 1.', QUOTE)] });
-    const diagnostics = saved(await harness.ask('What did we quote Acme?'));
+      ] }),
+      // The correction resends the whole answer: the fact that passed, one recovered, one still wrong.
+      answerWith({ facts: [fact(QUOTE), fact('The quotation reference is Q-7.', 'Acme quotation Q-7'), fact('Acme was quoted INR 1.', QUOTE)] }));
+    const diagnostics = saved(await harness.ask(QUESTION));
     expect(diagnostics.answer).toEqual({
       first: { format: 'valid', factsReturned: 5, factsVerified: 1,
         rejected: { unsupported_number_or_currency: 1, missing_exact_quote: 1, unknown_source: 1, invalid_fact_shape: 1 } },
-      repair: { reason: 'rejected_facts', sources: 1, factsRecovered: 1,
-        pass: { format: 'valid', factsReturned: 2, factsVerified: 1, rejected: { unsupported_number_or_currency: 1 } } },
+      repair: { reason: 'rejected_facts', sources: 0, factsRecovered: 1,
+        pass: { format: 'valid', factsReturned: 3, factsVerified: 2, rejected: { unsupported_number_or_currency: 1 } } },
       factsFinal: 2,
     });
     expect(diagnostics.outcome).toBe('verified');
     expect(inboxAssistantDegradedStages(diagnostics)).toContain('facts_rejected(invalid_fact_shape:1,missing_exact_quote:1,unknown_source:1,unsupported_number_or_currency:1)');
   });
 
-  // Breaks: a model that wraps its JSON in a sentence gets every fact thrown away
-  // and the run looks the same as one where the model found nothing to say.
+  // Breaks: a model that sends an answer that is not JSON gets every fact thrown
+  // away and the run looks the same as one where the model found nothing to say.
   it('tells a reply that broke the JSON contract from one that had no facts', async () => {
     await seedQuote();
-    harness.ai = (_prompt, purpose) => purpose === 'plan' ? PLAN : 'Here is what I found: the quote was INR 4,50,000.';
-    const malformed = saved(await harness.ask('What did we quote Acme?'));
+    script(deepSearch(), answerWith('Here is what I found: the quote was INR 4,50,000.'), answerWith('Still not JSON.'));
+    const malformed = saved(await harness.ask(QUESTION));
     expect(malformed.answer).toEqual({
       first: { format: 'malformed', factsReturned: 0, factsVerified: 0, rejected: {} },
-      repair: { reason: 'malformed', sources: 1, factsRecovered: 0, pass: { format: 'malformed', factsReturned: 0, factsVerified: 0, rejected: {} } },
+      repair: { reason: 'malformed', sources: 0, factsRecovered: 0, pass: { format: 'malformed', factsReturned: 0, factsVerified: 0, rejected: {} } },
       factsFinal: 0,
     });
     expect(malformed.outcome).toBe('related');
     expect(inboxAssistantDegradedStages(malformed)).toEqual(expect.arrayContaining(['answer_malformed', 'repair_malformed']));
 
-    harness.ai = (_prompt, purpose) => purpose === 'plan' ? PLAN : NO_FACTS;
-    const empty = saved(await harness.ask('What did we quote Acme?'));
-    expect(empty.answer).toEqual({
-      first: { format: 'valid', factsReturned: 0, factsVerified: 0, rejected: {} },
-      repair: { reason: 'no_facts', sources: 1, factsRecovered: 0, pass: { format: 'valid', factsReturned: 0, factsVerified: 0, rejected: {} } },
-      factsFinal: 0,
-    });
+    // An answer with no facts is a clean answer, not a correction.
+    script(deepSearch(), answerWith({ facts: [] }));
+    const empty = saved(await harness.ask(QUESTION));
+    expect(empty.answer).toEqual({ first: { format: 'valid', factsReturned: 0, factsVerified: 0, rejected: {} }, factsFinal: 0 });
     expect(inboxAssistantDegradedStages(empty)).toEqual([]);
   });
 
   // Breaks: "no answer" from a search that found nothing and "no answer" from a
-  // model that was never asked are indistinguishable, so retrieval misses get
-  // blamed on the model.
-  it('records that no model was asked when the search found nothing', async () => {
-    const exchange = await harness.ask('What did we quote Acme?');
+  // model that was shown mail and said nothing are indistinguishable, so
+  // retrieval misses get blamed on the model.
+  it('records a search that found nothing as a retrieval miss', async () => {
+    script(deepSearch(), turn => {
+      expect(lastToolResult(turn)).toContain('No matching mail or documents were found.');
+      return answerWith({ facts: [] });
+    });
+    const exchange = await harness.ask(QUESTION);
     const diagnostics = saved(exchange);
-    expect(diagnostics.answer).toEqual({ skipped: 'no_evidence', factsFinal: 0 });
     expect(diagnostics.outcome).toBe('no_evidence');
-    expect(exchange.usage!.calls.map(call => call.purpose)).toEqual(['plan']);
+    expect(diagnostics.accounts!.map(account => account.evidenceItems)).toEqual([0, 0]);
+    expect(diagnostics.accounts![0]!.searches).toBeGreaterThan(0);
+    expect(exchange.answer.sourceStatus).toBeUndefined();
   });
 });
 
@@ -219,7 +271,7 @@ describe('a run that is only partly successful', () => {
     await seedQuote('secondary');
     const storage = harness.mailbox('secondary').storage;
     storage.searchEmails = async () => { throw Object.assign(new Error('fts5: syntax error near "Acme"'), { name: 'SqliteError', code: 'SQLITE_ERROR' }); };
-    const exchange = await harness.ask('What did we quote Acme?');
+    const exchange = await harness.ask(QUESTION);
     const [primary, secondary] = saved(exchange).accounts!;
     expect(primary).toMatchObject({ accountId: 'primary', status: 'searched', matchedMessages: 1, evidenceItems: 1 });
     expect(primary).not.toHaveProperty('failure');
@@ -239,7 +291,7 @@ describe('a run that is only partly successful', () => {
       if (ref.filename === 'crash.xlsx') throw new TypeError('Cannot read properties of undefined (reading "getPage")');
       return { ref, status: ref.filename === 'locked.pdf' ? 'password_protected' : 'scanned', segments: [], truncated: false };
     };
-    const diagnostics = saved(await harness.ask('What did we quote Acme?'));
+    const diagnostics = saved(await harness.ask(QUESTION));
     expect(diagnostics.accounts![0]).toMatchObject({ attachmentsRead: 0, attachmentsSkipped: 3,
       attachmentFailures: { password_protected: 1, scanned: 1, 'threw:TypeError': 1 } });
     expect(inboxAssistantDegradedStages(diagnostics)).toContain('attachments_unread(password_protected:1,scanned:1,threw:TypeError:1)');
@@ -252,46 +304,37 @@ describe('a run that is only partly successful', () => {
       cleanBody: '', rawBody: '', hasBody: false });
     const open = harness.deps.openMailbox;
     harness.deps.openMailbox = async accountId => ({ ...await open(accountId), fetchBody: async () => { throw new Error('Connection closed'); } });
-    const diagnostics = saved(await harness.ask('What did we quote Acme?'));
+    const diagnostics = saved(await harness.ask(QUESTION));
     expect(diagnostics.accounts![0]).toMatchObject({ missingBodies: 1, bodyDownloadFailures: 1 });
     expect(inboxAssistantDegradedStages(diagnostics)).toContain('body_downloads_failed:1');
   });
 
-  // Breaks: when the answer call fails, the finished search is thrown away with
-  // it and the saved question shows nothing about how far the run got.
+  // Breaks: when the agent's answer call fails, the finished search is thrown
+  // away with it and the saved question shows nothing about how far the run got.
   it('keeps the plan and the search on a run whose answer call failed, with the failing stage', async () => {
     await seedQuote();
-    harness.ai = (_prompt, purpose) => purpose === 'plan' ? PLAN : { status: 403, body: JSON.stringify({ error: { message: 'forbidden' } }) };
-    const { diagnostics, exchange } = await failed('What did we quote Acme?');
+    script(deepSearch(), { status: 403, body: JSON.stringify({ error: { message: 'forbidden' } }) });
+    const { diagnostics, exchange } = await failed(QUESTION);
     expect(exchange.status).toBe('failed');
-    expect(diagnostics).toMatchObject({ route: 'search', outcome: 'failed', plan: { source: 'model' },
-      failure: { stage: 'answer', error: { name: 'AIProviderApiError', status: 403 } } });
+    expect(diagnostics).toMatchObject({ route: 'agent', outcome: 'failed', plan: { source: 'model' },
+      agent: { toolCalls: { deep_search: 1 } },
+      failure: { stage: 'agent', error: { name: 'AIProviderApiError', status: 403 } } });
     expect(diagnostics.accounts![0]).toMatchObject({ matchedMessages: 1, evidenceItems: 1 });
     expect(diagnostics).not.toHaveProperty('answer');
-    expect(exchange.usage!.calls.at(-1)).toMatchObject({ purpose: 'answer', status: 'failed', httpStatus: 403 });
+    expect(exchange.usage!.calls.at(-1)).toMatchObject({ purpose: 'agent', status: 'failed', httpStatus: 403 });
   });
 });
 
-describe('runs that are not a search', () => {
-  // Breaks: the eval set and the log cannot tell which path handled a request,
-  // so a question that was wrongly refused looks like a search that found nothing.
-  it('records a capability reply, a host refusal and a review as their own routes with no plan', async () => {
-    const capability = saved(await harness.ask('What can you do?'));
-    expect(capability).toMatchObject({ route: 'capability', outcome: 'capability' });
-    expect(capability).not.toHaveProperty('plan');
-
-    const refused = await failed('Mark them as read');
-    expect(refused.diagnostics).toMatchObject({ route: 'refused', outcome: 'refused' });
-    expect(refused.diagnostics).not.toHaveProperty('failure');
-    expect(refused.exchange.status).toBe('failed');
-
-    const review = saved(await harness.ask('Review my unread emails'));
-    expect(review).toMatchObject({ route: 'review', reviewKind: 'unread', outcome: 'review' });
-    expect(review).not.toHaveProperty('plan');
-
-    await harness.mail('primary', 'bbb', { id: 'bbb-1', fromAddress: 'noreply@bigbluebutton.example', subject: 'BigBlueButton session recording' });
-    const command = saved(await harness.ask('Mark all BigBlueButton emails as read', { reviewOnly: true }));
-    expect(command).toMatchObject({ route: 'mail_command', reviewKind: 'mark_read', outcome: 'review' });
+describe('runs that do not search', () => {
+  // Breaks: the eval set and the log cannot tell a run that never searched from
+  // one whose search found nothing, so a question the agent answered without
+  // looking reads as a retrieval miss.
+  it('records the agent route with no plan and no accounts when no search ran', async () => {
+    script(answerWith({ facts: [], message: 'I can search, count, read and sort your mail.' }));
+    const diagnostics = saved(await harness.ask('What can you do?'));
+    expect(diagnostics).toMatchObject({ route: 'agent', outcome: 'answered', agent: { toolCalls: {} } });
+    expect(diagnostics).not.toHaveProperty('plan');
+    expect(diagnostics).not.toHaveProperty('accounts');
     expect(harness.calls).toEqual([]);
   });
 
@@ -304,7 +347,7 @@ describe('runs that are not a search', () => {
     let started!: () => void;
     const reached = new Promise<void>(resolve => { started = resolve; });
     harness.ai = async (_prompt, purpose) => { if (purpose === 'plan') { started(); await planning; } return PLAN; };
-    const asking = harness.ask('What did we quote Acme?', { requestId: 'stop-me' }).catch((error: unknown) => error);
+    const asking = harness.ask(QUESTION, { requestId: 'stop-me' }).catch((error: unknown) => error);
     await reached;
     const cancelled = harness.service.cancel('stop-me');
     release();
@@ -312,7 +355,7 @@ describe('runs that are not a search', () => {
     expect(await asking).toBeInstanceOf(Error);
     const exchange = harness.chat().exchanges.at(-1)!;
     expect(exchange.status).toBe('stopped');
-    expect(exchange.diagnostics).toMatchObject({ route: 'search', outcome: 'stopped' });
+    expect(exchange.diagnostics).toMatchObject({ route: 'agent', outcome: 'stopped' });
     expect(exchange.diagnostics).not.toHaveProperty('failure');
     expect(exchange.diagnostics).not.toHaveProperty('plan');
     expect(exchange.usage?.calls.every(call => call.errorKind === undefined) ?? true).toBe(true);
@@ -328,20 +371,20 @@ describe('a run that hits the five-minute limit', () => {
   // provider that hangs cannot be told from any other failure in the record.
   it('is recorded as the agent\'s timeout, at the stage that was running', async () => {
     await seedQuote();
-    // A provider that never answers and never fails by itself.
+    // A planner that never answers and never fails by itself.
     harness.deps.callAI = () => new Promise<string>(() => {});
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const asking = harness.ask('What did we quote Acme?', { requestId: 'too-slow' }).catch((error: unknown) => error);
+    const asking = harness.ask(QUESTION, { requestId: 'too-slow' }).catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(300_000);
     const error = await asking;
     vi.useRealTimers();
     expect(error).toMatchObject({ message: expect.stringContaining('Search took too long') as unknown, code: 'ASSISTANT_TIMEOUT' });
     const exchange = harness.chat().exchanges.at(-1)!;
     expect(exchange.status).toBe('failed');
-    expect(exchange.diagnostics).toMatchObject({ route: 'search', outcome: 'failed', failure: { stage: 'plan', error: { name: 'Error', code: 'ASSISTANT_TIMEOUT' } } });
+    expect(exchange.diagnostics).toMatchObject({ route: 'agent', outcome: 'failed', failure: { stage: 'agent', error: { name: 'Error', code: 'ASSISTANT_TIMEOUT' } } });
     // The interrupted plan call is not also reported as a planner failure.
     expect(exchange.diagnostics).not.toHaveProperty('plan');
-    expect(harness.logs.some(line => line.includes('run=too-slow') && line.includes('failed_at=plan') && line.includes('error=Error/ASSISTANT_TIMEOUT'))).toBe(true);
+    expect(harness.logs.some(line => line.includes('run=too-slow') && line.includes('failed_at=agent') && line.includes('error=Error/ASSISTANT_TIMEOUT'))).toBe(true);
   });
 });
 
@@ -359,10 +402,12 @@ describe('nothing from the mail, the question or an error reaches app.log', () =
     await harness.mail('secondary', 'canary-2', { id: 'canary-2', subject: `${CANARY.question} follow up`, cleanBody: bodyText, rawBody: `<p>${bodyText}</p>` });
     harness.mailbox('secondary').storage.searchEmails = async () => { throw new Error(`fts5: syntax error near "${CANARY.fts}"`); };
     harness.deps.readAttachment = async () => { throw new Error(`ENOENT: no such file /Users/someone/${CANARY.attachment}.xlsx`); };
-    harness.ai = (_prompt, purpose) => purpose === 'plan' ? { status: 401, body: JSON.stringify({ error: { message: `Invalid key for ${CANARY.provider}` } }) }
-      : purpose === 'answer' ? `The answer is ${CANARY.model}` : JSON.stringify({ facts: [{ text: `${CANARY.model} was quoted INR 1.`, sourceIds: ['S1'], quotes: [{ sourceId: 'S1', text: `${CANARY.question} quotation total INR 4,50,000.` }] }] });
+    harness.ai = (_prompt, purpose) => purpose === 'plan' ? { status: 401, body: JSON.stringify({ error: { message: `Invalid key for ${CANARY.provider}` } }) } : NO_FACTS;
+    const question = `What did we quote ${CANARY.question}?`;
+    script(deepSearch(question), answerWith(`The answer is ${CANARY.model}`),
+      answerWith({ facts: [{ text: `${CANARY.model} was quoted INR 1.`, sourceIds: ['S1'], quotes: [{ sourceId: 'S1', text: `${CANARY.question} quotation total INR 4,50,000.` }] }] }));
 
-    const exchange = await harness.ask(`What did we quote ${CANARY.question}?`);
+    const exchange = await harness.ask(question);
     const diagnostics = saved(exchange);
 
     // The run really was degraded at every stage this test claims to cover.
@@ -371,7 +416,7 @@ describe('nothing from the mail, the question or an error reaches app.log', () =
     expect(diagnostics.accounts![1]).toMatchObject({ status: 'unavailable', failure: { name: 'Error' } });
     expect(diagnostics.answer!.first!.format).toBe('malformed');
     expect(diagnostics.answer!.repair!.pass!.rejected).toEqual({ unsupported_number_or_currency: 1 });
-    expect(harness.calls.some(call => call.prompt.includes(CANARY.body))).toBe(true);
+    expect(harness.agentTurns.some(turn => turn.messages.some(message => (message.content ?? '').includes(CANARY.body)))).toBe(true);
 
     const assistantLines = harness.logs.filter(line => line.includes('[InboxAssistant]'));
     expect(assistantLines.some(line => line.includes('[INFO]') && line.includes(`run=${exchange.requestId}`))).toBe(true);
@@ -394,12 +439,14 @@ describe('nothing from the mail, the question or an error reaches app.log', () =
   // own response body.
   it('logs a failed run by its error class and status, never its message', async () => {
     await harness.mail('primary', 'canary', { id: 'canary-1', sent: true, toAddress: 'buyer@zylophant.example', subject: `${CANARY.question} quotation`, cleanBody: `${CANARY.question} quotation ${CANARY.body}`, rawBody: `<p>${CANARY.question} quotation ${CANARY.body}</p>` });
-    harness.ai = (_prompt, purpose) => purpose === 'plan' ? { status: 400 } : { status: 402, body: JSON.stringify({ error: { message: `Wallet empty for ${CANARY.provider}` } }) };
-    const { error, exchange } = await failed(`What did we quote ${CANARY.question}?`);
+    harness.ai = (_prompt, purpose) => purpose === 'plan' ? { status: 400 } : NO_FACTS;
+    const question = `What did we quote ${CANARY.question}?`;
+    script(deepSearch(question), { status: 402, body: JSON.stringify({ error: { message: `Wallet empty for ${CANARY.provider}` } }) });
+    const { error, exchange } = await failed(question);
     expect(error.message.length).toBeGreaterThan(0);
     const line = harness.logs.find(item => item.includes('[InboxAssistant]') && item.includes(`run=${exchange.requestId}`))!;
     expect(line).toContain('status=failed');
-    expect(line).toContain('failed_at=answer');
+    expect(line).toContain('failed_at=agent');
     expect(line).toMatch(/error=AIProviderApiError(?:\/[a-z_]+)?\/402/);
     for (const canary of everyCanary) expect(harness.logs.filter(item => item.toLowerCase().includes(canary.toLowerCase()))).toEqual([]);
     expect(harness.logs.filter(item => item.includes(error.message))).toEqual([]);

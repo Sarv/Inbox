@@ -44,26 +44,35 @@ beforeEach(async () => {
 });
 afterEach(async () => { await harness.close(); });
 
-describe('the switch', () => {
-  // Breaks: the preview reaches every user before its evaluation passes.
-  it('leaves typed questions on the fixed paths when it is off', async () => {
-    harness.agent = undefined;
-    harness.ai = (_prompt, purpose) => purpose === 'plan' ? { status: 400 } : NO_FACTS;
-    const exchange = await ask('What did Acme send?');
-    expect(harness.agentTurns).toHaveLength(0);
-    expect(exchange.diagnostics?.route).toBe('search');
-  });
-
-  // Breaks: a review card's own button is hijacked by the agent and the review the user started is lost.
-  it('keeps review cards on their own path even when it is on', async () => {
-    harness.ai = () => JSON.stringify({ results: [] });
-    const exchange = await harness.ask('Review my unread emails', { reviewKind: 'unread' });
-    expect(harness.agentTurns).toHaveLength(0);
-    expect(exchange.diagnostics?.route).toBe('review');
+describe('every typed question', () => {
+  // Breaks: a question the old fixed pipeline claimed (a capability question, an
+  // unread review, a mail command) is answered by a removed path instead of the agent.
+  it('reaches the agent, and is recorded as its route', async () => {
+    for (const question of ['What can you do?', 'Review my unread emails', 'Mark all BigBlueButton emails as read']) {
+      harness.agentTurns.length = 0;
+      script(answer([], 'Done.'));
+      const exchange = await ask(question);
+      expect(harness.agentTurns, question).toHaveLength(1);
+      expect(harness.agentTurns[0]!.messages[1]!.content).toBe(`User request: ${question}`);
+      expect(exchange.diagnostics).toMatchObject({ route: 'agent', outcome: 'answered' });
+    }
+    expect(harness.calls).toEqual([]);
   });
 });
 
 describe('answers grounded in what the tools showed', () => {
+  // Breaks: the model is never told the rules the grounding check enforces on
+  // money and on each fact's size (they were only in the retired one-shot
+  // answer prompt), so its totals and spending answers are thrown away.
+  it('tells the model the limits and money rules the check enforces', async () => {
+    script(answer([], 'Done.'));
+    await ask('How much did I spend this month?');
+    const system = harness.agentTurns[0]!.messages[0]!.content!;
+    expect(system).toContain('At most 6 ids and 12 quotes per fact.');
+    expect(system).toContain('A total may be stated only by also naming each amount it adds');
+    expect(system).toContain('never a reminder, a scheduled or upcoming autopay');
+  });
+
   // Breaks: "how many" is answered from the model's guess instead of the mailbox.
   it('answers a count from a tool result, with no email cited', async () => {
     await mail('primary', 'a');
@@ -187,7 +196,7 @@ describe('what the agent may touch', () => {
     const exchange = await ask('Mark everything read');
     expect(harness.agentTurns[0]!.tools).not.toContain('mark_read');
     expect(lastToolResult(harness.agentTurns[2]!)).toContain('there is no tool named "mark_read"');
-    expect(harness.readChanges).toEqual([]);
+    expect(harness.engine.ops).toEqual([]);
     expect(exchange.diagnostics?.agent?.toolErrors).toEqual({ unknown_tool: 1 });
   });
 
@@ -382,7 +391,7 @@ describe('reading and judging', () => {
     );
     const exchange = await ask('Review my uncategorized unread emails. mark email read if email is not relived to business');
     expect(harness.calls.filter(item => item.purpose === 'classify')).toHaveLength(2);
-    expect(harness.readChanges).toEqual([]);
+    expect(harness.engine.ops).toEqual([]);
     expect(exchange.usage?.calls.map(item => item.purpose).sort()).toEqual(['agent', 'agent', 'agent', 'classify', 'classify']);
   });
 
@@ -570,8 +579,10 @@ describe('models without tool calling', () => {
 
 describe('turns that go wrong', () => {
   // Breaks: a follow-up loses what the chat was about, so "and from Acme?" searches nothing.
+  // (The first question searches: a reply that read no mail sets no topic for a follow-up.)
   it('passes earlier turns of the chat as context, not evidence', async () => {
-    script(answer([], 'First.'));
+    await mail('primary', 'acme', { fromAddress: 'sales@acme.example' });
+    script(call('search_mail', { from: 'acme' }), answer([], 'First.'));
     harness.newChat();
     const first = await harness.ask('What did Acme send?');
     script(answer([], 'Second.'));

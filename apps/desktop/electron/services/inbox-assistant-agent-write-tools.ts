@@ -1,14 +1,15 @@
 import { TZDate } from '@date-fns/tz';
 import { classifyFolder, FLAG_TAG_NAMES, hasTag, isInboxFolder, isTrashFolder, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
 
+import type { InboxAssistantAccount } from '../../src/types/inbox-assistant';
 import type { InboxAgentChangeAction } from '../../src/types/inbox-assistant-changes';
 
 import {
   accountOf, InboxAgentToolError, oneLine, openAccount, optionalBoolean, optionalText, readArgs, roleFolders,
   type InboxAgentTool, type InboxAgentToolContext,
 } from './inbox-assistant-agent-tools';
-import { changeCounts, changeProtection, INBOX_AGENT_CHANGE_LIMITS, stageChangeSet, type HeldChangeSet, type InboxAgentSpamRevert, type StageTarget } from './inbox-assistant-change-sets';
-import { fullBody } from './inbox-assistant-retrieval';
+import { changeCounts, changeProtection, createConversationGuard, INBOX_AGENT_CHANGE_LIMITS, stageChangeSet, type HeldChangeSet, type InboxAgentSpamRevert, type StageTarget } from './inbox-assistant-change-sets';
+import { fullBody, type AssistantResearchMailbox } from './inbox-assistant-retrieval';
 
 /**
  * The tools that change mail. They never change it themselves: they turn the
@@ -245,6 +246,15 @@ const changeMail: InboxAgentTool = {
     /** Each account's spelling of the label, or null where applying creates it. */
     const labelIn = new Map<string, string | null>();
     const senders = new Map<string, InboxAgentSpamRevert['sender']>();
+    // The review's sender and conversation protections, one guard per account (its own lookups cached).
+    const guards = new Map<string, ReturnType<typeof createConversationGuard>>();
+    const guardOf = (account: InboxAssistantAccount, opened: { mailbox: AssistantResearchMailbox }) => {
+      if (!guards.has(account.id)) {
+        guards.set(account.id, createConversationGuard({ storage: opened.mailbox.storage, nowMs: state.nowMs(),
+          ownAddresses: [...context.accounts.map(item => item.email), ...opened.mailbox.aliases] }));
+      }
+      return guards.get(account.id)!;
+    };
     for (const choice of picked) {
       context.signal.throwIfAborted();
       const account = accountOf(context, choice.accountId);
@@ -286,7 +296,7 @@ const changeMail: InboxAgentTool = {
         // The stored body only: protections never wait on a download.
         const email = member === named ? named : await opened.mailbox.storage.getEmail(member.id) ?? member;
         const body = fullBody(email);
-        const protectedReason = changeProtection(action, email, body);
+        const protectedReason = changeProtection(action, email, body) ?? await guardOf(account, opened)(action, email);
         const address = (action === 'spam' || action === 'not_spam') && email.fromAddress ? email.fromAddress.toLowerCase() : undefined;
         if (address && !senders.has(`${account.id}\0${address}`)) {
           try { senders.set(`${account.id}\0${address}`, await senderLists(opened.mailbox.storage, email.fromAddress)); }
