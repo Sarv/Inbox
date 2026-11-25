@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-11-24
+## [1.5.0] - 2026-11-25
 
 ### Added
 - **Inbox Agent works through a request step by step.** It now decides for
