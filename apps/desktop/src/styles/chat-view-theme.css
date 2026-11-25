@@ -151,6 +151,25 @@
   padding: 0;
 }
 
+/*
+ * While a transfer runs, its spinner is a stop button in front of the open
+ * button (a button cannot sit inside another). It takes the left half of the
+ * padding the open button would have had, so the pill keeps its size.
+ */
+.sarv-attachments .sarv-chip__stop {
+  padding: var(--sec-gap-sm) 0 var(--sec-gap-sm) var(--sec-gap);
+  cursor: pointer;
+}
+
+.sarv-attachments .sarv-chip__open--after-stop {
+  padding-inline-start: 0;
+}
+
+.sarv-chip__stop:focus-visible {
+  outline: 2px solid var(--sec-focus-ring);
+  outline-offset: 1px;
+}
+
 .sarv-attachments .sec-chip__btn {
   padding: var(--sec-gap-sm) var(--sec-gap) var(--sec-gap-sm) 0;
 }
