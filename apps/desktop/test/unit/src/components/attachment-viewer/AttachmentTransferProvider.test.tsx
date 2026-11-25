@@ -83,6 +83,30 @@ beforeEach(() => {
 
 afterEach(() => { cleanup(); document.body.innerHTML = ''; vi.restoreAllMocks(); });
 
+describe('attachment chips beside the Attachments panel', () => {
+  // Breaks: the chip repeats the panel's "Uploading for scan…" under itself,
+  // or its spinner cannot stop the transfer (2026-11-24 report).
+  it('shows progress once, in the panel, and stops from the spinner', async () => {
+    const pending = deferred<HostResult>();
+    downloadAttachmentToDownloads.mockReturnValueOnce(pending.promise);
+    const mounted = render(screen());
+    fire(mounted.byLabel('Save a copy of report.pdf'), 'click');
+    const requestId = downloadAttachmentToDownloads.mock.calls[0][3]!;
+    publish({ requestId, phase: 'uploading' });
+    const panel = mounted.byLabel('Attachment transfers')!;
+    expect(panel.textContent).toContain('Uploading for scan');
+    const mail = mounted.byLabel('account-1 email-1')!;
+    expect(mail.textContent).not.toContain('Uploading for scan');
+    expect(mounted.byLabel('Cancel download of report.pdf')).toBeNull();
+    fire(mounted.byLabel('Stop download of report.pdf'), 'click');
+    await settle();
+    expect(cancelAttachmentDownload).toHaveBeenCalledWith(requestId);
+    await resolve(pending, { success: false, error: 'Download cancelled.' });
+    expect(mounted.byLabel('Stop download of report.pdf')).toBeNull();
+    expect(mounted.byLabel('Open report.pdf')).not.toBeNull();
+  });
+});
+
 describe('App-owned nonblocking attachment preparation', () => {
   it('keeps mail interactive with no modal or preview bytes while downloading, uploading and scanning', async () => {
     const pending = deferred<HostResult>();

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Stop an attachment download from the attachment itself.** While an
+  attachment downloads or is scanned, its chip in the message shows a spinner
+  with a stop button in place of a progress line under it. The downloads panel
+  still shows the full progress.
+
 ## [1.5.0] - 2026-11-25
 
 ### Added

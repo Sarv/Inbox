@@ -3,7 +3,7 @@ import { useState } from 'react';
 
 import { Tooltip } from '../Tooltip';
 
-import { AttachmentDownloadStatus } from './AttachmentDownloadStatus';
+import { AttachmentDownloadStatus, AttachmentStopButton } from './AttachmentDownloadStatus';
 import { AttachmentViewer, formatSize, type ViewerAttachment } from './AttachmentViewer';
 import { useAttachmentActions } from './useAttachmentActions';
 
@@ -50,10 +50,16 @@ export function AttachmentPills({ emailId, accountId, attachments }: AttachmentP
           // A save in flight, not a load: opening is instant here because the
           // viewer draws its own progress.
           const busy = isBusy(emailId, attachment.name, accountId);
+          const status = getStatus(emailId, attachment.name, accountId);
+          const cancel = () => { void cancelDownload(emailId, attachment.name, accountId); };
+          // A cancellable transfer's spinner is its own stop button, which
+          // cannot sit inside the open button, so it goes in front of it.
+          const stoppable = busy && status?.canCancel === true;
           const size = formatSize(attachment.size);
           return (
             <div className="inline-flex min-w-0 max-w-full flex-col" key={`${attachment.name}:${index}`}>
               <span className="sec-chip">
+                {stoppable && <AttachmentStopButton status={status} filename={attachment.name} onCancel={cancel} className="sarv-chip__stop" />}
                 {/* The filename, not just "Open": the library ellipsises the
                     name at 22ch and the native `title` that used to reveal it in
                     full is gone, so this tooltip is now the only way to read a
@@ -61,14 +67,14 @@ export function AttachmentPills({ emailId, accountId, attachments }: AttachmentP
                 <Tooltip content={`Open ${attachment.name}`} delayMs={40}>
                   <button
                     type="button"
-                    className="sarv-chip__open"
+                    className={stoppable ? 'sarv-chip__open sarv-chip__open--after-stop' : 'sarv-chip__open'}
                     aria-label={`Open ${attachment.name}`}
                     onClick={() => {
                       if (actions.requestPreview) actions.requestPreview({ emailId, accountId, attachments, initialIndex: index });
                       else setViewerIndex(index);
                     }}
                   >
-                    {busy ? (
+                    {stoppable ? null : busy ? (
                       <Loader2 className="sec-chip__clip h-3.5 w-3.5 animate-spin" />
                     ) : (
                       <Paperclip className="sec-chip__clip h-3.5 w-3.5" />
@@ -89,7 +95,7 @@ export function AttachmentPills({ emailId, accountId, attachments }: AttachmentP
                   </button>
                 </Tooltip>
               </span>
-              <AttachmentDownloadStatus status={getStatus(emailId, attachment.name, accountId)} filename={attachment.name} onCancel={() => { void cancelDownload(emailId, attachment.name, accountId); }} />
+              <AttachmentDownloadStatus status={status} filename={attachment.name} onCancel={cancel} inlineProgress={false} />
             </div>
           );
         })}
