@@ -81,7 +81,9 @@ function launch(scenario, extraArgs) {
       },
     });
     mkdirSync(join(work, scenario), { recursive: true });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 240_000);
+    // A safety net for a hang, above the longest wait a scenario has: after the
+    // out-of-memory crash, escapes waits up to ~212 s for the app's restarts.
+    const timer = setTimeout(() => child.kill('SIGKILL'), 360_000);
     const onData = (chunk) => {
       output += chunk;
       const lines = (partial + chunk).split('\n');

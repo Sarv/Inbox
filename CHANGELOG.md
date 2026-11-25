@@ -122,6 +122,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the whole app for half a minute, and an Inbox Agent question that ran many
   searches could hang it for minutes. Search now picks the page of results
   first and reads only those emails.
+- **A crashed extension comes back even when the computer is slow to
+  recover.** When an extension crashes, for example by running out of memory,
+  the app starts it again, up to three times. If the first of those starts was
+  slow because the computer was still freeing the memory the crash had used,
+  that one slow start ended the recovery: the extension stayed off until the
+  app was restarted. A start that is too slow now counts as one attempt and
+  the next one follows. You are told only once every attempt has failed.
 
 ### Security
 - **The XML reader used for office attachments is updated to 5.12.** It fixes a

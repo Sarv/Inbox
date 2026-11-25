@@ -167,6 +167,7 @@ import { mainWindowWebPreferences } from './utils/main-window-preferences';
 import { installNavigationGuards } from './utils/navigation-guards';
 import { installPermissionPolicy } from './utils/permission-policy';
 import { restoreAndFocusWindow } from './utils/window-focus';
+import { appJsFlags } from './v8-flags';
 
 // App identity MUST be set before ANYTHING reads app.getPath('userData') —
 // initSentryMain(), the file logger, and the DB key store all derive their paths
@@ -423,7 +424,8 @@ if (process.platform === 'darwin') {
 // Disable security warnings in development
 process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
 
-// Increase Node.js memory limit to 2GB.
+// V8's heap limit, 2 GB, for main and (the switch propagates) every renderer,
+// the extension sandboxes included: see v8-flags.ts.
 // Opt-in diagnostic: set SARV_PROFILE=1 (dev only) to also turn on V8's tick
 // profiler (--prof). Use it to find a synchronous main-thread CPU hog (a
 // renderer freeze / beachball): the switch propagates to renderer processes
@@ -434,7 +436,7 @@ const V8_PROFILE =
   isDev && process.env['SARV_PROFILE']
     ? ` --prof --logfile=${join(app.getPath('userData'), 'v8prof-%p.log')}`
     : '';
-app.commandLine.appendSwitch('js-flags', `--max-old-space-size=2048${V8_PROFILE}`);
+app.commandLine.appendSwitch('js-flags', appJsFlags(V8_PROFILE));
 
 // Suppress EGL/GPU driver error messages
 app.commandLine.appendSwitch('disable-gpu-driver-bug-workarounds');
