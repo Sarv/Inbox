@@ -299,32 +299,35 @@ function updateEmailInSectionData(
   return changed ? updated : null;
 }
 
-/** Map a tag flip across ONE array in a single pass. Returns the SAME reference
- *  when nothing changed, so callers can skip the corresponding `set()` key. */
-function mapTagAcrossList(list: any[], idSet: Set<string>, apply: (t: string) => string): any[] {
+type SectionData = Record<string, { emails: any[]; threads: any[]; offset: number; hasMore: boolean; total: number; loading: boolean }>;
+
+/** `update` applied to the listed emails in ONE array, in a single pass. Returns
+ *  the SAME reference when nothing changed, so callers can skip that `set()` key. */
+function mapEmailsInList(list: any[], idSet: Set<string>, update: (e: any) => any): any[] {
   let changed = false;
   const out = list.map((e: any) => {
     if (!idSet.has(e.id)) return e;
-    const cur = e.tags || '||';
-    const nt = apply(cur);
-    if (nt === cur) return e;
-    changed = true;
-    return { ...e, tags: nt };
+    const next = update(e);
+    if (next !== e) changed = true;
+    return next;
   });
   return changed ? out : list;
 }
 
-/** Bulk tag flip across every sectionData section (one pass each), rebuilding
- *  that section's threads once. Returns null when nothing changed. */
-function bulkUpdateTagsInSectionData(
-  sectionData: Record<string, { emails: any[]; threads: any[]; offset: number; hasMore: boolean; total: number; loading: boolean }>,
-  idSet: Set<string>,
-  apply: (t: string) => string,
-): typeof sectionData | null {
+/** A tag flip as an email update: the same email object when the tags are unchanged. */
+const tagUpdate = (apply: (t: string) => string) => (e: any) => {
+  const cur = e.tags || '||';
+  const nt = apply(cur);
+  return nt === cur ? e : { ...e, tags: nt };
+};
+
+/** `update` across every sectionData section (one pass each), rebuilding a
+ *  changed section's threads once. Returns null when nothing changed. */
+function updateEmailsInSectionData(sectionData: SectionData, idSet: Set<string>, update: (e: any) => any): SectionData | null {
   let changed = false;
   const updated = { ...sectionData };
   for (const [sectionId, sd] of Object.entries(updated)) {
-    const mapped = mapTagAcrossList(sd.emails, idSet, apply);
+    const mapped = mapEmailsInList(sd.emails, idSet, update);
     if (mapped !== sd.emails) {
       updated[sectionId] = { ...sd, emails: mapped, threads: buildThreads(mapped) };
       changed = true;
@@ -343,6 +346,32 @@ function refreshMailCounts(get: any, opts: { unreadSummary?: boolean } = {}): vo
 }
 
 /**
+ * `update` applied to these emails across every state slice + sectionData in
+ * ONE `set()`. Returns whether anything changed. Tag flips (below) and the AI
+ * record (`applyAiActions`) both go through it.
+ */
+function applyEmailUpdateAcrossState(
+  get: any,
+  set: any,
+  idSet: Set<string>,
+  update: (e: any) => any,
+  extraUpdates: Record<string, unknown> = {},
+): boolean {
+  const { emails, threadEmails, searchResults, sectionData } = get();
+  const updates: any = {};
+  const ne = mapEmailsInList(emails, idSet, update); if (ne !== emails) updates.emails = ne;
+  const nte = mapEmailsInList(threadEmails, idSet, update); if (nte !== threadEmails) updates.threadEmails = nte;
+  const nse = mapEmailsInList(searchResults, idSet, update); if (nse !== searchResults) updates.searchResults = nse;
+  const nsd = updateEmailsInSectionData(sectionData, idSet, update); if (nsd) updates.sectionData = nsd;
+  // `extraUpdates` counts: marking an ALREADY-unread row unread changes no tag
+  // but must still record `manuallyMarkedUnreadId`, and the caller reads the
+  // return value as "there is something to persist".
+  if (Object.keys(updates).length === 0 && Object.keys(extraUpdates).length === 0) return false;
+  set({ ...updates, ...extraUpdates });
+  return true;
+}
+
+/**
  * THE shared optimistic "flip the read tag on a set of emails" primitive. It
  * applies the change across every state slice + sectionData in ONE `set()` and
  * returns whether anything actually changed. Single-email `markAsRead` and
@@ -358,18 +387,7 @@ function applyTagsAcrossState(
   apply: (t: string) => string,
   extraUpdates: Record<string, unknown> = {},
 ): boolean {
-  const { emails, threadEmails, searchResults, sectionData } = get();
-  const updates: any = {};
-  const ne = mapTagAcrossList(emails, idSet, apply); if (ne !== emails) updates.emails = ne;
-  const nte = mapTagAcrossList(threadEmails, idSet, apply); if (nte !== threadEmails) updates.threadEmails = nte;
-  const nse = mapTagAcrossList(searchResults, idSet, apply); if (nse !== searchResults) updates.searchResults = nse;
-  const nsd = bulkUpdateTagsInSectionData(sectionData, idSet, apply); if (nsd) updates.sectionData = nsd;
-  // `extraUpdates` counts: marking an ALREADY-unread row unread changes no tag
-  // but must still record `manuallyMarkedUnreadId`, and the caller reads the
-  // return value as "there is something to persist".
-  if (Object.keys(updates).length === 0 && Object.keys(extraUpdates).length === 0) return false;
-  set({ ...updates, ...extraUpdates });
-  return true;
+  return applyEmailUpdateAcrossState(get, set, idSet, tagUpdate(apply), extraUpdates);
 }
 
 function applyOptimisticRead(get: any, set: any, ids: string[], read: boolean): boolean {
@@ -721,6 +739,11 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     // reads, and refreshing them for a message no open list is showing is three
     // queries for nothing.
     if (changed) refreshMailCounts(get, { unreadSummary: true });
+  },
+
+  applyAiActions: (emailId, aiActions) => {
+    if (!emailId || !Array.isArray(aiActions)) return;
+    applyEmailUpdateAcrossState(get, set, new Set([emailId]), (e: any) => ({ ...e, aiActions }));
   },
 
   markAsRead: async (emailId, read) => {

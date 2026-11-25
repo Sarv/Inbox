@@ -1,4 +1,4 @@
-import type { EmailRecord, FolderRecord, Label, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, ViewFilter } from '@sarvinbox/core';
+import type { AiAction, EmailRecord, FolderRecord, Label, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, ViewFilter } from '@sarvinbox/core';
 import type { StateCreator } from 'zustand';
 
 import type { AccountRevocation } from '../../electron/services/account-revocation';
@@ -398,6 +398,8 @@ export interface EmailActionsSlice {
    * has already happened, this only stops the list from lying about it.
    */
   applyPersistedTags: (emailId: string, tags: string) => void;
+  /** What the AI did to one email changed in the database (emails.ai_actions): redraw its row. */
+  applyAiActions: (emailId: string, aiActions: AiAction[]) => void;
   markAsStarred: (emailId: string, starred: boolean) => Promise<void>;
   /** Per-message star (chat/bubble view) — stars one email, not the whole thread. */
   markMessageStarred: (emailId: string, starred: boolean) => Promise<void>;

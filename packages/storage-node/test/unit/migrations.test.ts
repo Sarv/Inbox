@@ -127,7 +127,8 @@ describe('fresh install reaches the current production schema', () => {
     // v102 tracks provider/manual authority separately from AI.
     // v104 improves built-in business/reply prompts without overwriting user edits.
     // v105 preserves bounded human sender behavior after permanent deletion.
-    expect(CURRENT_VERSION).toBe(105);
+    // v106 adds emails.ai_actions, what the AI did to each email.
+    expect(CURRENT_VERSION).toBe(106);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
     // v24 is stamped by schema.sql itself; the chain stamps 25..101 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));

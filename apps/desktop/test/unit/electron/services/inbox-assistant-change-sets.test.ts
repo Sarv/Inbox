@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AssistantReadReceipt } from '../../../../electron/services/assistant-mail-actions';
 import {
-  agentUndoWait, applyChangeSet, ATTACHMENTS_UNCHECKED, autoApplyWait, cancelChangeSet, changeCounts, changeProtection, changeSummary, createConversationGuard, emailProtection, hidesMail,
+  agentUndoWait, aiActionKindOfChange, applyChangeSet, ATTACHMENTS_UNCHECKED, autoApplyWait, cancelChangeSet, changeCounts, changeProtection, changeSummary, createConversationGuard, emailProtection, hidesMail,
   INBOX_AGENT_CHANGE_LIMITS, NOT_DOWNLOADED, openApprovalWindow, stageChangeSet, undoChangeSet, undoHides, type HeldChangeSet, type InboxAgentMailActions,
 } from '../../../../electron/services/inbox-assistant-change-sets';
 import type { InboxAgentChangeAction } from '../../../../src/types/inbox-assistant-changes';
@@ -867,5 +867,106 @@ describe('approval rules for the agent', () => {
       openApprovalWindow(decided, delivered);
       expect(decided.set.approveBy).toBe(T0 + approveMs);
     }
+  });
+});
+
+describe('what the agent did, on each email (emails.ai_actions)', () => {
+  /** The mailbox with the two recorder hooks, keeping what they were told. */
+  function recordingBox(initial: Parameters<typeof mailbox>[0]) {
+    const box = mailbox(initial);
+    const recorded: Array<{ accountId: string; ids: string[]; kind: string; auto?: boolean }> = [];
+    const forgotten: Array<{ accountId: string; ids: string[]; kind: string }> = [];
+    Object.assign(box.actions, {
+      recordAiActions: async (accountId: string, ids: string[], kind: string, auto: boolean) => { recorded.push({ accountId, ids, kind, auto }); },
+      forgetAiActions: async (accountId: string, ids: string[], kind: string) => { forgotten.push({ accountId, ids, kind }); },
+    });
+    return { box, recorded, forgotten };
+  }
+
+  // Breaks: the list's AI icon is missing on mail the user approved changing,
+  // or says "automatically" for a change the user approved.
+  it('records the rows the user approved, as approved, per account', async () => {
+    const { box, recorded } = recordingBox([{ id: 'm1', account: 'a1' }, { id: 'm2', account: 'a1' }, { id: 'm1', account: 'a2' }]);
+    const held = stage(box, 'mark_read', [['a1', 'm1'], ['a1', 'm2'], ['a2', 'm1']]);
+    await applyChangeSet(held, options(box));
+    expect(recorded).toEqual([
+      { accountId: 'a1', ids: ['m1', 'm2'], kind: 'read', auto: false },
+      { accountId: 'a2', ids: ['m1'], kind: 'read', auto: false },
+    ]);
+  });
+
+  // Breaks: "Approve for me" changes are shown as approved by the user.
+  it('records an "Approve for me" change as automatic', async () => {
+    const { box, recorded } = recordingBox([{ id: 'm1' }]);
+    await applyChangeSet(stage(box, 'archive', ['m1']), options(box, { auto: true }));
+    expect(recorded).toEqual([{ accountId: 'a1', ids: ['m1'], kind: 'archive', auto: true }]);
+  });
+
+  // Breaks: an email the agent did not change (it failed, the user left it
+  // unticked, or it was already that way) gets the AI icon anyway.
+  it('records only rows that really changed', async () => {
+    const { box, recorded } = recordingBox([{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }, { id: 'm4', tags: '|INBOX|read|' }]);
+    box.failing.add('m2');
+    const held = stage(box, 'mark_read', ['m1', 'm2', 'm3', 'm4'], { protect: ['m3'] });
+    await applyChangeSet(held, options(box));
+    expect(statuses(held)).toEqual(['applied', 'failed', 'skipped', 'unchanged']);
+    expect(recorded).toEqual([{ accountId: 'a1', ids: ['m1'], kind: 'read', auto: false }]);
+  });
+
+  // Breaks: a retried failure records the rows that already succeeded twice.
+  it('records a retried row once, on the attempt that changed it', async () => {
+    const { box, recorded } = recordingBox([{ id: 'm1' }, { id: 'm2' }]);
+    box.failing.add('m2');
+    const held = stage(box, 'star', ['m1', 'm2']);
+    await applyChangeSet(held, options(box));
+    box.failing.clear();
+    await applyChangeSet(held, options(box));
+    expect(recorded.map(entry => entry.ids)).toEqual([['m1'], ['m2']]);
+  });
+
+  // Breaks: after Undo the email still claims the AI changed it.
+  it('takes the action back off the rows Undo restored', async () => {
+    const { box, forgotten } = recordingBox([{ id: 'm1' }, { id: 'm2' }]);
+    const held = stage(box, 'add_label', ['m1', 'm2'], { labelName: 'Receipts' });
+    await applyChangeSet(held, options(box));
+    await undoChangeSet(held, options(box));
+    expect(forgotten).toEqual([{ accountId: 'a1', ids: ['m1', 'm2'], kind: 'label' }]);
+  });
+
+  // Breaks: an Undo that failed for a row forgets the action anyway, so the
+  // row is still changed but has lost its AI icon.
+  it('keeps the action on a row whose Undo failed', async () => {
+    const { box, forgotten } = recordingBox([{ id: 'm1' }, { id: 'm2' }]);
+    const held = stage(box, 'mark_read', ['m1', 'm2']);
+    await applyChangeSet(held, options(box));
+    box.failing.add('m2');
+    await undoChangeSet(held, options(box));
+    expect(forgotten).toEqual([{ accountId: 'a1', ids: ['m1'], kind: 'read' }]);
+  });
+
+  // Breaks: a database error while recording turns an applied change into a
+  // failed one, so the user retries a change that already happened.
+  it('applies and undoes normally when recording throws', async () => {
+    const box = mailbox([{ id: 'm1' }]);
+    Object.assign(box.actions, {
+      recordAiActions: async () => { throw new Error('disk full'); },
+      forgetAiActions: async () => { throw new Error('disk full'); },
+    });
+    const held = stage(box, 'mark_read', ['m1']);
+    await applyChangeSet(held, options(box));
+    expect(statuses(held)).toEqual(['applied']);
+    await undoChangeSet(held, options(box));
+    expect(statuses(held)).toEqual(['undone']);
+  });
+
+  // Breaks: an action is named wrongly in the tooltip and the AI section's counts.
+  it.each([
+    ['mark_read', undefined, 'read'], ['mark_unread', undefined, 'unread'], ['star', undefined, 'star'], ['unstar', undefined, 'unstar'],
+    ['archive', undefined, 'archive'], ['trash', undefined, 'trash'], ['restore', undefined, 'restore'], ['move', undefined, 'move'],
+    ['add_category', 'important', 'important'], ['add_category', 'finance', 'category'], ['remove_category', 'important', 'category'],
+    ['add_label', undefined, 'label'], ['remove_label', undefined, 'unlabel'], ['snooze', undefined, 'snooze'], ['unsnooze', undefined, 'unsnooze'],
+    ['spam', undefined, 'spam'], ['not_spam', undefined, 'not_spam'],
+  ] as const)('names %s (%s) as %s', (action, category, kind) => {
+    expect(aiActionKindOfChange(action, category)).toBe(kind);
   });
 });

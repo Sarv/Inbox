@@ -6,12 +6,13 @@
  */
 
 import type { UserActionType, ActionSource } from '@sarvinbox/core';
-import { accountLogLabel, createLogger, setEmailReadFlag } from '@sarvinbox/core';
+import { accountLogLabel, aiActionKindForLoggedAction, createLogger, setEmailReadFlag } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { openAccountStorages, requireNamedOrActiveStorage, requireTargetAccountId } from '../services/account-target';
 import { resolveAccountIdentity } from '../services/accounts-registry';
 import { saveAgentConfig, loadAgentConfig } from '../services/agent-config-store';
+import { forgetAiActions, recordAiActions } from '../services/ai-action-record';
 import { refreshContactClassifications } from '../services/contact-classification-service';
 import { buildThreadMessages } from '../services/thread-context';
 import { getIntelligence, getUnifiedPipeline, setPipelineUserProfile, getPipelineAIConfig } from '../services/unified-pipeline-service';
@@ -137,6 +138,14 @@ export async function logUserAction(
       createdAt: Math.floor(Date.now() / 1000),
     });
 
+    // What the background AI did, on the email's own row for the list's AI
+    // icon. Only 'agent_auto': the Inbox Agent records its own changes where
+    // it applies them (it knows approved from automatic, and undoes them).
+    if (options.source === 'agent_auto') {
+      const kind = aiActionKindForLoggedAction(actionType, options.actionValue);
+      if (kind) recordAiActions(storage, [emailId], kind, { auto: true });
+    }
+
     // The timeline retains every source for activity/undo. Engagement must
     // describe the human's choices, not feed an agent's own decisions back
     // into categorization as if the user had read or discarded that mail.
@@ -247,6 +256,15 @@ export function registerAgentHandlers(): void {
       const agentRepo = getAgentRepo();
       const actions = await agentRepo.getActionsByEmail(emailId);
       return { success: true, data: actions };
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  // The AI section's counts of what the AI did (emails.ai_actions).
+  ipcMain.handle('agent:getAiActionCounts', async () => {
+    try {
+      return { success: true, data: getAgentRepo().getAiActionCounts() };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
@@ -628,6 +646,12 @@ export function registerAgentHandlers(): void {
           source: 'user',
           actionValue: JSON.stringify({ undoOf: actionId }),
         }, storage);
+      }
+
+      // The undone action no longer describes the email.
+      if (action.source === 'agent_auto' || action.source === 'agent_approved') {
+        const kind = aiActionKindForLoggedAction(action.actionType, action.actionValue);
+        if (kind) forgetAiActions(storage, [action.emailId], kind);
       }
 
       logger.info(`[Agent] Undo: reversed ${action.actionType} on ${action.emailId}`);

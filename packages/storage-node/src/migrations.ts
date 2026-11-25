@@ -4354,6 +4354,32 @@ export const durableSenderBehavior: Migration = {
   },
 };
 
+
+/**
+ * v106: what the AI did to each email, on the email's own row.
+ *
+ * `ai_actions` is a short JSON list ({ kind, at, auto }, newest last, at most
+ * MAX_AI_ACTIONS_PER_EMAIL) written by the agent paths through
+ * AgentRepository.recordAiActions. The email list reads it with the row it
+ * already loads to draw the AI icon; the AI dashboard counts it. A column, not
+ * a tag: a tag is shown as a label and can reach the server as a keyword.
+ * The partial index keeps the count to the few rows the AI touched.
+ */
+export const emailAiActions: Migration = {
+  version: 106,
+  name: 'email_ai_actions',
+  up: (db) => {
+    addColumnIfMissing(db, 'emails', 'ai_actions', 'TEXT DEFAULT NULL');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_emails_ai_actions ON emails(id) WHERE ai_actions IS NOT NULL;');
+    logger.info('AI actions (v106): emails.ai_actions added');
+  },
+  down: (db) => {
+    // As v100: clear rather than DROP COLUMN (a rewrite of the emails table).
+    db.exec('DROP INDEX IF EXISTS idx_emails_ai_actions;');
+    db.exec('UPDATE emails SET ai_actions = NULL WHERE ai_actions IS NOT NULL;');
+  },
+};
+
 export function createMigrationManager(
   db: Database.Database,
   context: MigrationContext = {},
@@ -4441,5 +4467,6 @@ export function createMigrationManager(
   manager.register(gmailPromotionsOnly);
   manager.register(businessConversationCategories);
   manager.register(durableSenderBehavior);
+  manager.register(emailAiActions);
   return manager;
 }

@@ -19,6 +19,7 @@ import {
   hasNewerMember as coreHasNewerMember,
   hasLiveUserDraftAmong,
   isDraftRow,
+  parseAiActions,
   parseCategorySelection,
   NATIVE_PROVIDER_CATEGORY_SLUGS,
   providerCategorySelection,
@@ -2469,6 +2470,8 @@ export class EmailRepository extends BaseRepository {
       aiProcessedAt: row.ai_processed_at,
       aiConfidence: row.ai_confidence,
       aiReasoning: row.ai_reasoning,
+      // Only rows the AI changed carry it; a list of thousands parses nothing else.
+      ...(row.ai_actions ? { aiActions: parseAiActions(row.ai_actions) } : {}),
 
       // Agent priority score
       priorityScore: row.priority_score || undefined,

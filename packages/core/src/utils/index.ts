@@ -39,6 +39,7 @@ export * from './log-text';
 export * from './log-labels';
 export * from './log-paths';
 export * from './tags';
+export * from './ai-actions';
 export * from './tls';
 export * from './connection-security';
 export * from './filters';
