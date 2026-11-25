@@ -1361,6 +1361,23 @@ export function setupPersistedTagListener(useEmailStore: { getState: () => any }
 }
 
 /**
+ * The AI icon's record changed in main (an agent action, or its Undo). The
+ * email list reads `aiActions` from the rows it loaded, so without this a row
+ * would show the old record until the list happened to reload.
+ */
+export function setupAiActionsListener(useEmailStore: { getState: () => any }): void {
+  if (typeof window === 'undefined' || !window.electronAPI?.emails?.onAiActionsUpdated) return;
+
+  window.electronAPI.emails.onAiActionsUpdated((update) => {
+    if (!update?.emailId) return;
+    const state = useEmailStore.getState();
+    const owner = state._accountIdFor?.(update.emailId);
+    if (update.accountId && owner && update.accountId !== owner) return;
+    state.applyAiActions(update.emailId, update.aiActions);
+  });
+}
+
+/**
  * A draft appeared: refresh the sidebar Drafts count and, when the Drafts folder
  * is the view on screen, its list. Shared by user saves and AI-drafted replies.
  */

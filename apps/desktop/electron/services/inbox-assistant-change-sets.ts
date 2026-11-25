@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { classifyFolder, existingCategoryClassification, hasTag, parseAttachmentNames, type ContactRecord, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
+import { classifyFolder, existingCategoryClassification, hasTag, parseAttachmentNames, type AiActionKind, type ContactRecord, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
 
 import type { InboxAssistantActionMode } from '../../src/types/inbox-assistant';
 import type {
@@ -74,6 +74,33 @@ export interface InboxAgentMailActions {
   /** The user's spam verdict, as Report spam / Not spam record it. */
   spamVerdict(accountId: string, emailIds: string[], verdict: 'spam' | 'ham'): Promise<AssistantReadReceipt>;
   revertSpamVerdict(accountId: string, rows: InboxAgentSpamRevert[]): Promise<AssistantReadReceipt>;
+  /** Stamp what the agent did on each changed email's own row (emails.ai_actions). Must not throw. */
+  recordAiActions?(accountId: string, emailIds: string[], kind: AiActionKind, auto: boolean): Promise<void> | void;
+  /** Take an undone change back off those rows. Must not throw. */
+  forgetAiActions?(accountId: string, emailIds: string[], kind: AiActionKind): Promise<void> | void;
+}
+
+/** What a set's action is, as the email's AI record names it. */
+export function aiActionKindOfChange(action: InboxAgentChangeAction, category?: string): AiActionKind {
+  switch (action) {
+    case 'mark_read': return 'read';
+    case 'mark_unread': return 'unread';
+    case 'add_category': return category === 'important' ? 'important' : 'category';
+    case 'remove_category': return 'category';
+    case 'add_label': return 'label';
+    case 'remove_label': return 'unlabel';
+    default: return action;
+  }
+}
+
+/** The changed rows of an outcome, per account. */
+function changedByAccount(entries: Iterable<HeldItem>, changed: (entry: HeldItem) => boolean): Map<string, string[]> {
+  const byAccount = new Map<string, string[]>();
+  for (const entry of entries) {
+    if (!changed(entry)) continue;
+    byAccount.set(entry.item.accountId, [...(byAccount.get(entry.item.accountId) ?? []), entry.item.emailId]);
+  }
+  return byAccount;
 }
 
 type EmailState = Pick<EmailRecord, 'tags' | 'folderId'> & Partial<EmailRecord>;
@@ -600,6 +627,11 @@ export async function applyChangeSet(held: HeldChangeSet, options: {
         if (MOVES.has(set.action) && entry.after?.folderId === entry.before.folderId && entry.after.tags === entry.before.tags) entry.item.status = 'unchanged';
       }
     }
+    // The emails now say what the agent did, and whether the user approved it.
+    const kind = aiActionKindOfChange(set.action, set.category);
+    for (const [accountId, ids] of changedByAccount(outcome.keys(), entry => entry.item.status === 'applied' || entry.item.status === 'queued')) {
+      try { await options.actions.recordAiActions?.(accountId, ids, kind, options.auto === true); } catch { /* The change stands without its record. */ }
+    }
     if (options.auto) set.autoApplied = true;
     else held.userApproved = true;
     if ([...held.items.values()].some(entry => isChanged(entry.item))) set.undoBy = options.nowMs + INBOX_AGENT_CHANGE_LIMITS.undoMs;
@@ -675,6 +707,10 @@ export async function undoChangeSet(held: HeldChangeSet, options: {
       for (const [entry, result] of outcome) {
         if (result === 'failed') entry.item.detail = 'Could not be undone. Try Undo again.';
         else { entry.item.status = 'undone'; delete entry.item.detail; }
+      }
+      const kind = aiActionKindOfChange(set.action, set.category);
+      for (const [accountId, ids] of changedByAccount(outcome.keys(), entry => entry.item.status === 'undone')) {
+        try { await options.actions.forgetAiActions?.(accountId, ids, kind); } catch { /* The emails are back; the record may linger. */ }
       }
     }
     // A label this set created goes again once none of its emails keeps it.

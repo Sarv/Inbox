@@ -37,6 +37,7 @@ export * from './format-bytes';
 export * from './log-aggregator';
 export * from './log-text';
 export * from './tags';
+export * from './ai-actions';
 export * from './tls';
 export * from './connection-security';
 export * from './filters';

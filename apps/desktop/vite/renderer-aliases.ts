@@ -163,6 +163,9 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
     // Pure (html-to-text, browser-safe, and already in the renderer graph
     // through quoted-text) — the one HTML-to-plain-text conversion. The AI
     // split's no-loss check reads Standard's segments line by line with it.
+    // Pure (zero imports) — what the AI did to an email, read the same way by
+    // the list's AI icon and the main process that records it.
+    '@sarvinbox/core/ai-actions': resolve(desktopDir, '../../packages/core/src/utils/ai-actions.ts'),
     '@sarvinbox/core/html-text': resolve(
       desktopDir,
       '../../packages/core/src/utils/html-text.ts',

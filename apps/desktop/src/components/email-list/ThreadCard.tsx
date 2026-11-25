@@ -11,6 +11,7 @@ import { LabelChips } from '../LabelChips';
 import { Tooltip } from '../Tooltip';
 
 
+import { AiActionsIcon } from './AiActionsIcon';
 import { CategoryBadges } from './CategoryBadges';
 import { readStateTextClass } from './read-state-text';
 import { snippetText } from './snippet-text';
@@ -126,6 +127,8 @@ export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, h
           {/* Category badges + Time - absolute right, hidden on hover */}
           <div className={`absolute right-0 flex items-center gap-1.5 transition-opacity ${isHovered ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
             <CategoryBadges emailId={thread.badgeEmailId} compact />
+            {/* Something here was done by the AI; on hover it leads the actions. */}
+            <AiActionsIcon emails={thread.emails} />
             <span className="text-xs text-muted-foreground whitespace-nowrap">
               {format(date, 'h:mm a')}
             </span>
@@ -133,6 +136,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, h
 
           {/* Action buttons - always rendered, visible on hover */}
           <div className={`relative z-10 flex items-center gap-1 transition-opacity ${isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+            <AiActionsIcon emails={thread.emails} className="px-1" />
             <CategoryMenu emailId={thread.badgeEmailId} accountId={latestEmail.accountId ?? undefined}
               buttonClassName="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground" />
 

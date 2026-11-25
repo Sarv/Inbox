@@ -6,7 +6,7 @@
 // preload script. Safe/no-op when Sentry has no DSN configured.
 import '@sentry/electron/preload';
 
-import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult, SarvCatalogResult } from '@sarvinbox/core';
+import type { AiAction, AiActionKind, AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult, SarvCatalogResult } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
 import type { DefaultAppsAPI } from '../src/types/default-apps';
@@ -443,6 +443,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ) => callback(update);
       ipcRenderer.on('emails:tags-updated', handler);
       return () => ipcRenderer.removeListener('emails:tags-updated', handler);
+    },
+    // What the AI did to an email changed (emails.ai_actions): redraw its row's AI icon.
+    onAiActionsUpdated: (
+      callback: (update: { emailId: string; accountId: string | null; aiActions: AiAction[] }) => void
+    ) => {
+      const handler = (
+        _event: unknown,
+        update: { emailId: string; accountId: string | null; aiActions: AiAction[] }
+      ) => callback(update);
+      ipcRenderer.on('emails:ai-actions-updated', handler);
+      return () => ipcRenderer.removeListener('emails:ai-actions-updated', handler);
     },
     markStarred: (emailId: string, starred: boolean, accountId?: string) =>
       ipcRenderer.invoke('emails:markStarred', emailId, starred, accountId),
@@ -1061,6 +1072,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('agent:getActionsByEmail', emailId),
     getActionStats: (since?: number) =>
       ipcRenderer.invoke('agent:getActionStats', since),
+    getAiActionCounts: () =>
+      ipcRenderer.invoke('agent:getAiActionCounts'),
     // Agent decisions
     getPendingDecisions: () => ipcRenderer.invoke('agent:getPendingDecisions'),
     resolveDecision: (decisionId: string, status: string, actualAction?: string, feedback?: string) =>
@@ -1501,6 +1514,9 @@ export interface ElectronAPI {
     markRead: (emailId: string, read: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     onTagsUpdated: (
       callback: (update: { emailId: string; accountId: string | null; tags: string }) => void
+    ) => () => void;
+    onAiActionsUpdated: (
+      callback: (update: { emailId: string; accountId: string | null; aiActions: AiAction[] }) => void
     ) => () => void;
     markStarred: (emailId: string, starred: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     markImportant: (emailId: string, important: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
@@ -1965,6 +1981,9 @@ export interface ElectronAPI {
       Promise<{ success: boolean; data?: any[]; error?: string }>;
     getActionStats: (since?: number) =>
       Promise<{ success: boolean; data?: any; error?: string }>;
+    /** What the AI did in the active account: by kind, emails it touched, and emails it categorized. */
+    getAiActionCounts: () =>
+      Promise<{ success: boolean; data?: { byKind: Record<AiActionKind, number>; emails: number; categorized: number }; error?: string }>;
     getPendingDecisions: () =>
       Promise<{ success: boolean; data?: any[]; error?: string }>;
     resolveDecision: (decisionId: string, status: string, actualAction?: string, feedback?: string) =>

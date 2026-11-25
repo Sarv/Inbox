@@ -10,6 +10,7 @@ import { LabelChips } from '../LabelChips';
 import { Tooltip } from '../Tooltip';
 
 
+import { AiActionsIcon } from './AiActionsIcon';
 import { CategoryBadges } from './CategoryBadges';
 import { readStateTextClass } from './read-state-text';
 import { snippetText } from './snippet-text';
@@ -171,6 +172,13 @@ export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions
           </svg>
         )}
 
+        {/* Something here was done by the AI. Hidden with the date on hover,
+            when the same mark leads the hover actions instead, so pointing at
+            the row never covers the one thing that explains it. */}
+        <span className={showActions ? 'hidden' : 'contents'}>
+          <AiActionsIcon emails={thread.emails} />
+        </span>
+
         {/* Date - hide on hover */}
         <span className={`text-xs text-muted-foreground text-right transition-opacity ${showActions ? 'opacity-0' : 'opacity-100'}`}>
           {formatCompactDate(date)}
@@ -179,6 +187,7 @@ export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions
         {/* Hover Actions - overlay on top */}
         <div aria-hidden={!showActions}
           className={`absolute right-0 top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 bg-accent/90 rounded px-1 ${showActions ? 'visible opacity-100' : 'invisible opacity-0 pointer-events-none'}`}>
+            <AiActionsIcon emails={thread.emails} className="px-1" />
             <CategoryMenu emailId={thread.badgeEmailId} accountId={latestEmail.accountId ?? undefined}
               onOpenChange={setCategoryMenuOpen}
               buttonClassName="p-1.5 hover:bg-background/50 rounded text-muted-foreground hover:text-foreground" />

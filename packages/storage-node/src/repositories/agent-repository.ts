@@ -12,8 +12,10 @@ import type {
   ContactType,
   ContactTypeSource,
   ClassifiedContact,
+  AiAction,
+  AiActionKind,
 } from '@sarvinbox/core';
-import { messageIdKey, parseAddresses, parseCategorySelection, stripHtmlTags } from '@sarvinbox/core';
+import { AI_ACTION_KINDS, appendAiAction, messageIdKey, parseAddresses, parseCategorySelection, removeLatestAiAction, stripHtmlTags } from '@sarvinbox/core';
 
 import { SHARED } from '../shared-contacts';
 
@@ -165,6 +167,69 @@ export function mergeNewestFirst<T extends { date: number }>(left: T[], right: T
  * Implements IAgentStorage for behavior tracking and learning
  */
 export class AgentRepository extends BaseRepository implements IAgentStorage {
+
+  // ========== What the AI did (emails.ai_actions) ==========
+
+  /**
+   * Add one AI action to each email's own record, in one transaction. Ids that
+   * are no longer in this database are skipped. Returns the ids written, so the
+   * caller can tell the open list which rows changed.
+   */
+  recordAiActions(emailIds: readonly string[], action: AiAction): string[] {
+    const read = this.db.prepare('SELECT ai_actions FROM emails WHERE id = ?');
+    const write = this.db.prepare('UPDATE emails SET ai_actions = ? WHERE id = ?');
+    const written: string[] = [];
+    this.db.transaction(() => {
+      for (const id of new Set(emailIds)) {
+        const row = read.get(id) as { ai_actions: string | null } | undefined;
+        if (!row) continue;
+        write.run(appendAiAction(row.ai_actions, action), id);
+        written.push(id);
+      }
+    })();
+    return written;
+  }
+
+  /** Take back the newest AI action of `kind` from each email (an Undo). Returns the ids changed. */
+  forgetAiActions(emailIds: readonly string[], kind: AiActionKind): string[] {
+    const read = this.db.prepare('SELECT ai_actions FROM emails WHERE id = ? AND ai_actions IS NOT NULL');
+    const write = this.db.prepare('UPDATE emails SET ai_actions = ? WHERE id = ?');
+    const changed: string[] = [];
+    this.db.transaction(() => {
+      for (const id of new Set(emailIds)) {
+        const row = read.get(id) as { ai_actions: string } | undefined;
+        if (!row) continue;
+        const next = removeLatestAiAction(row.ai_actions, kind);
+        if (next === row.ai_actions) continue;
+        write.run(next, id);
+        changed.push(id);
+      }
+    })();
+    return changed;
+  }
+
+  /** One email's AI actions as stored, for the renderer to redraw its row. */
+  getAiActionsRaw(emailId: string): string | null {
+    return (this.db.prepare('SELECT ai_actions FROM emails WHERE id = ?').get(emailId) as { ai_actions: string | null } | undefined)?.ai_actions ?? null;
+  }
+
+  /**
+   * How many times the AI did each kind of action, over every email that still
+   * exists here, plus how many emails the AI has categorized. Malformed records
+   * are skipped by SQLite's json_valid, never thrown on.
+   */
+  getAiActionCounts(): { byKind: Record<AiActionKind, number>; emails: number; categorized: number } {
+    const byKind = Object.fromEntries(AI_ACTION_KINDS.map(kind => [kind, 0])) as Record<AiActionKind, number>;
+    const rows = this.db.prepare(`
+      SELECT json_extract(item.value, '$.kind') AS kind, COUNT(*) AS count
+      FROM emails, json_each(emails.ai_actions) AS item
+      WHERE emails.ai_actions IS NOT NULL AND json_valid(emails.ai_actions)
+      GROUP BY kind`).all() as Array<{ kind: string; count: number }>;
+    for (const row of rows) if (row.kind in byKind) byKind[row.kind as AiActionKind] = row.count;
+    const emails = (this.db.prepare('SELECT COUNT(*) AS n FROM emails WHERE ai_actions IS NOT NULL').get() as { n: number }).n;
+    const categorized = (this.db.prepare('SELECT COUNT(*) AS n FROM emails WHERE ai_processed_at IS NOT NULL').get() as { n: number }).n;
+    return { byKind, emails, categorized };
+  }
 
   // ========== User Action Log ==========
 

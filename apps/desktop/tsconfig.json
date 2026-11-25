@@ -82,6 +82,7 @@
       // Same: the quote-marker corpus and the marker count.
       "@sarvinbox/core/quoted-text": ["../../packages/core/src/utils/quoted-text.ts"],
       // Same: the one HTML-to-plain-text conversion (the AI split's no-loss check).
+      "@sarvinbox/core/ai-actions": ["../../packages/core/src/utils/ai-actions.ts"],
       "@sarvinbox/core/html-text": ["../../packages/core/src/utils/html-text.ts"],
       // Same: the one FNV-1a (read-model stateVersion, duplicate buckets, split fingerprint).
       "@sarvinbox/core/fnv1a": ["../../packages/core/src/utils/fnv1a.ts"],

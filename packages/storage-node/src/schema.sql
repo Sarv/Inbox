@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS emails (
   -- OpenPGP shape ('encrypted' | 'signed'), see migration v100. An encrypted
   -- row's body is a placeholder; plaintext exists only in the reader.
   pgp_status TEXT,
+  -- What the AI did to this email: JSON [{kind, at, auto}], newest last (v106).
+  ai_actions TEXT,
 
   -- Snooze (replaces snoozed_emails table)
   snooze_until INTEGER,
