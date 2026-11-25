@@ -16,6 +16,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while copying text you selected in the message and typing into a field in it
   work as before.
 
+## [1.5.0] - 2026-11-24
+
+### Added
+- **Inbox Agent works through a request step by step.** It now decides for
+  itself what to look up before it answers: it searches with exact filters
+  (sender, date, unread, starred, folder, label, category), counts mail, reads
+  whole conversations and attachments, sorts many emails against a question
+  you ask ("which of these are about business?"), and looks up your contacts
+  and how much mail a sender has sent you. Answers still link to the emails
+  they come from. Requests it used to turn down, such as categorizing or
+  archiving mail from the chat, now work. A very large clean-up can take more
+  than one request.
+- **Inbox Agent can change your mail when you ask.** It can mark mail read or
+  unread, star or unstar it, archive it, move it to Trash or back, move it to a
+  folder, add or remove a label or category, snooze it until a time or wake it,
+  and report it as spam or not spam. Each change is a card under the answer
+  that lists the emails, and why each was picked when the agent sorted them.
+  With **Ask for approval** (every new conversation starts there), nothing
+  changes until you choose **Approve**, **Approve selected** or **Cancel**; a
+  card can be approved for 30 minutes after the answer arrives. Every applied
+  change has **Undo** on its card for 24 hours, and Undo leaves alone any email
+  that was changed again since. The agent can pick only emails it found for
+  that request, in the accounts you selected, so text inside an email cannot
+  point it at other mail. Approving a move to Trash asks you once more. A spam
+  report (which also sends that sender's future mail to Spam) and a label that
+  does not exist yet always wait for your approval. The agent never deletes
+  mail permanently and never sends mail.
+- **Protected emails stay as they are unless you tick them.** When a change
+  would take mail out of sight (marking it read, archiving it, moving it to
+  Trash, another folder or Spam, or snoozing it), the card leaves protected
+  emails unticked and says why: security codes, bank and card records,
+  invoices and contracts, business reports, starred or important mail,
+  calendar invitations, encrypted mail, mail you filed in a category yourself
+  (other than Promotions, Social, Updates and Forums), mail from a VIP sender
+  (a favorite contact, or a sender you made a VIP), conversations you replied
+  to in the last 30 days, mail from colleagues at your own company's domain,
+  mail whose content has not been downloaded yet, and mail with attachments.
+  If the app cannot check an email, it treats it as protected. An email stays
+  protected for the rest of a request even after an earlier step of that
+  request unstarred it or took it out of its category, and in the
+  conversation's later requests too while the agent's own change can still be
+  undone. An email you star or mark important after a card was prepared is
+  left as it is when you approve the card. Including a protected email asks
+  you to confirm.
+- **Inbox Agent can set up filters and change how a sender is treated.** Ask
+  it to create, change or delete a filter, or to block or unblock a sender,
+  make them a VIP or trust them. Each one is its own card and always waits for
+  your approval, even with Approve for me on. A new or changed filter offers to
+  act on the mail it matches now, and blocking a sender offers to move their
+  existing mail to Spam. Both boxes start unticked and show how many emails
+  they cover, and protected emails among them are not marked read, moved or
+  hidden. **Undo** reverses the setting and that mail, but keeps a filter or a
+  sender you changed yourself since. The agent acts only on a sender you named
+  or one whose mail it found, never on an address it read inside an email.
+- **"Undo that."** Ask Inbox Agent to undo an earlier change in the same
+  conversation. With Ask for approval, and for filters and sender changes
+  always, it shows that change's card again under its answer with only its
+  **Undo** button, and nothing changes until you click it. With Approve for me,
+  it undoes a change it made on its own straight away, counted in the same
+  200-email limit. A change you approved on its card, a spam report, a new
+  label, or an undo that would take mail out of sight again (marking it read,
+  moving it out of the Inbox or back to Trash, Archive or Spam, snoozing it
+  again) still waits for your click.
+- **Inbox Agent's cards keep working after a restart.** A card waiting for
+  your approval, or one you can still undo, keeps its buttons when the app
+  restarts, for as long as it can be approved (30 minutes) or undone
+  (24 hours). A change the agent made on its own is saved with its card the
+  moment it is made, so it keeps its Undo even if the app quits before the
+  agent finishes the request.
+- **Changing a whole conversation leaves your own mail alone.** When the agent
+  changes every email in a conversation, it never touches your drafts, and a
+  move to a folder leaves your own sent replies in Sent.
+
+### Changed
+- **Inbox Agent asks again before changing mail in conversations where
+  Approve for me was on.** Approve for me now also archives, moves to Trash or
+  back, moves to folders, adds and removes labels and categories, snoozes and
+  wakes, and stars and unstars mail, up to 200 emails per request with Undo on
+  each change, where before it only marked mail read or unread. A bigger
+  change waits for your approval on its card. So those conversations start on
+  **Ask for approval** after this update. Turn Approve for me on again in a
+  conversation to allow the wider changes; the app shows exactly what it
+  covers before it turns on. Marking read, archiving, moving or snoozing
+  protected emails, spam reports, new labels, filters and sender changes
+  always ask, and it never sends mail or deletes it permanently. The mode
+  cannot be changed while the agent is working on a request: stop the request
+  first.
+
+### Removed
+- **The unread and uncategorized mail review cards.** This includes **Mark
+  recommended & continue**, which marked recommended mail read in automatic
+  batches, up to ten per run. Ask Inbox Agent instead, for example "review my
+  unread mail and mark the newsletters as read": it finds and sorts the mail
+  and prepares a change card (or, with Approve for me on, applies it), and
+  protected emails stay unread unless you tick them. Reviews saved by an
+  earlier version still show their text, but their buttons are gone.
+- **The separate "mark as read" command.** A request such as "mark all from
+  this sender as read" no longer runs a phrase-matching command of its own. It
+  goes to the agent like any other request, which finds the emails it means
+  and prepares a card.
+
 ## [1.4.12] - 2026-11-24
 
 ### Fixed
@@ -1499,7 +1600,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.12...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/Sarv/Inbox/releases/tag/v1.5.0
 [1.4.12]: https://github.com/Sarv/Inbox/releases/tag/v1.4.12
 [1.4.11]: https://github.com/Sarv/Inbox/releases/tag/v1.4.11
 [1.4.10]: https://github.com/Sarv/Inbox/releases/tag/v1.4.10

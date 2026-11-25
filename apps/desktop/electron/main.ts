@@ -12,6 +12,11 @@
 // read as if the statements ran between them; they never did. Kept in one
 // block so `import/order` can sort it and the real startup order is the one
 // visible below.
+// First, and a bare import so import/order never moves it: names the app (and
+// so its data folder and keychain item) before any other module's top level
+// can read them. See app-identity.ts.
+import './app-identity';
+
 import { existsSync, readFileSync } from 'fs';
 import netModule from 'net';
 import { join } from 'path';
@@ -199,8 +204,8 @@ const DEV_LAUNCHER_PID = process.ppid;
 // Storage") that encrypts the DB key / credential vault / OAuth tokens. The
 // packaged build keeps the real "Sarv Inbox". (Bundle id is separated too — see
 // scripts/postinstall.mjs, which stamps com.sarv.sarvinbox.dev on the dev binary.)
-const APP_NAME = isDev ? 'Sarv Inbox Dev' : 'Sarv Inbox';
-app.name = APP_NAME;
+// Set by app-identity.ts, the first import, before any other module loads.
+const APP_NAME = app.name;
 
 // A confirmed reset runs only in a fresh process, before a logger, crash queue,
 // encrypted database or browser session can retain/recreate the old profile.

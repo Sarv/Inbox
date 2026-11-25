@@ -8,7 +8,7 @@ const folder = (id: string, path: string, specialUse: string): FolderRecord => (
 
 function target() {
   const folders = [folder('inbox', 'INBOX', '\\Inbox'), folder('archive', 'Archive', '\\Archive'),
-    folder('trash', 'Trash', '\\Trash'), folder('sent', 'Sent', '\\Sent')];
+    folder('trash', 'Trash', '\\Trash'), folder('sent', 'Sent', '\\Sent'), folder('work', 'Clients/Work', '')];
   const rows = new Map([
     ['one', emailRecord({ id: 'one', uid: 10, folderId: 'inbox', tags: '|INBOX|starred|read|Client|' })],
     ['two', emailRecord({ id: 'two', uid: 11, folderId: 'inbox', tags: '|INBOX|' })],
@@ -194,5 +194,40 @@ describe('Inbox Agent account-bound reversible mail moves', () => {
     const owner = target();
     await expect(changeAssistantMailLocation(owner, ids as unknown as string[], 'trash')).rejects.toThrow('Invalid mail move action');
     expect(owner.storage.getEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe('Inbox Agent moves to a named folder', () => {
+  // Breaks: "move to Work" leaves the message in the Inbox list, or drops its other labels.
+  it('moves Inbox mail to the folder, out of the Inbox, keeping other tags', async () => {
+    const owner = target();
+    expect(await changeAssistantMailLocation(owner, ['one'], { folderId: 'work' })).toEqual({ appliedIds: [], queuedIds: ['one'], failedIds: [] });
+    expect(owner.engine.move).toHaveBeenCalledExactlyOnceWith('INBOX', 10, 'Clients/Work', 'one');
+    expect(owner.rows.get('one')).toMatchObject({ folderId: 'work', uid: null, tags: '|starred|read|Client|Clients/Work|' });
+    expect(owner.onChanged).toHaveBeenCalledExactlyOnceWith('one', 'move', 'Clients/Work');
+  });
+
+  // Breaks: Undo of an archive cannot put mail back in the Inbox (the move strips the Inbox tag it is adding).
+  it('moves archived mail back into the Inbox', async () => {
+    const owner = target();
+    expect(await changeAssistantMailLocation(owner, ['archived'], { folderId: 'inbox' })).toEqual({ appliedIds: [], queuedIds: ['archived'], failedIds: [] });
+    expect(owner.engine.move).toHaveBeenCalledExactlyOnceWith('Archive', 40, 'INBOX', 'archived');
+    expect(owner.rows.get('archived')).toMatchObject({ folderId: 'inbox', tags: '|INBOX|' });
+  });
+
+  // Breaks: a message already in the folder is moved onto itself (a server MOVE to the same mailbox).
+  it('acknowledges mail already in the folder without queueing a move', async () => {
+    const owner = target();
+    expect(await changeAssistantMailLocation(owner, ['archived'], { folderId: 'archive' })).toEqual({ appliedIds: ['archived'], queuedIds: [], failedIds: [] });
+    expect(owner.engine.move).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a missing or malformed destination silently moves mail somewhere else.
+  it('refuses an unknown or malformed destination', async () => {
+    const owner = target();
+    await expect(changeAssistantMailLocation(owner, ['one'], { folderId: 'gone' })).rejects.toThrow('The destination folder is unavailable');
+    await expect(changeAssistantMailLocation(owner, ['one'], { folderId: '' })).rejects.toThrow('Invalid mail move action.');
+    await expect(changeAssistantMailLocation(owner, ['one'], 'delete' as never)).rejects.toThrow('Invalid mail move action.');
+    expect(owner.engine.move).not.toHaveBeenCalled();
   });
 });

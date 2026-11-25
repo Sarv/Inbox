@@ -37,6 +37,8 @@ export interface Mail {
   ics?: string;
   /** Unread mail, for the review and mark-as-read cases. Everything else is read. */
   unread?: boolean;
+  /** Its body was never downloaded (IDLE added it with headers only): `body` is ignored. */
+  bodyMissing?: boolean;
 }
 
 /** IST wall clock to Unix seconds. */
@@ -357,6 +359,12 @@ export const TRIAGE_MAILS: TriageMail[] = [
   { id: 'tri-corrigendum', acct: 'A1', folder: 'inbox', from: ['eprocurement@bsnl.example', 'BSNL eProcurement'], to: A1.email, at: '2026-11-11 18:20', unread: true, format: 'html',
     subject: 'Corrigendum 2: bid due date changed', label: 'keep', why: 'a tender deadline that moved earlier',
     body: 'Bidders may note that the bid due date for tender BSNL/MH/NW/2026/118 is preponed to 17 November 2026, 3:00 PM. All other terms remain unchanged.' },
+  { id: 'tri-no-body', acct: 'A2', folder: 'inbox', from: ['notify@kotakbank.example', 'Kotak Bank'], to: A2.email, at: '2026-11-12 08:05', unread: true, format: 'html',
+    subject: 'Important update for you', label: 'keep', why: 'a bank message whose body was never downloaded, so nothing in it could be checked',
+    body: '', bodyMissing: true },
+  { id: 'tri-attached-only', acct: 'A2', folder: 'inbox', from: ['accounts@pinnaclelogistics.example', 'Pinnacle Logistics Accounts'], to: A2.email, at: '2026-11-11 16:45', unread: true, format: 'html',
+    subject: 'Documents as requested', label: 'keep', why: 'a document whose content is only in the attached file',
+    body: 'Dear Sir,\n\nPlease find attached.\n\nRegards,\nPinnacle Logistics', attachments: ['Statement-of-account.pdf'] },
   { id: 'tri-linkedin', acct: 'A1', folder: 'inbox', from: ['updates@linkedin.example', 'LinkedIn'], to: A1.email, at: '2026-11-12 07:30', unread: true, format: 'html',
     subject: 'You appeared in 12 searches this week', label: 'disposable', why: 'a social network digest',
     body: 'See who is looking at your profile. Unsubscribe' },

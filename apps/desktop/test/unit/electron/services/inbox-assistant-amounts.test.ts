@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildInboxAssistantAnswerPrompt, inboxAssistantAnswerPass, parseInboxAssistantAnswer } from '../../../../electron/services/inbox-assistant-answer';
-import type { InboxAssistantAccountCoverage, InboxAssistantEvidence } from '../../../../src/types/inbox-assistant';
+import { inboxAssistantEvidenceText, normalizeExcerpt, verifyInboxAssistantFacts } from '../../../../electron/services/inbox-assistant-answer';
+import type { InboxAssistantEvidence, InboxAssistantFactRejectionReason } from '../../../../src/types/inbox-assistant';
 
 /**
  * The amount checker: every amount in an answer must be in the quoted email
@@ -10,10 +10,6 @@ import type { InboxAssistantAccountCoverage, InboxAssistantEvidence } from '../.
  * amounts were thrown away (audit issue 9); the figures here are made up.
  */
 
-const coverage: InboxAssistantAccountCoverage[] = [{
-  accountId: 'primary', email: 'owner@example.test', status: 'searched', matchedMessages: 2, reviewedMessages: 2,
-  missingBodies: 0, attachmentsRead: 0, attachmentsSkipped: 0, truncated: false, warnings: [],
-}];
 const source = (id: string, text: string, overrides: Partial<InboxAssistantEvidence> = {}): InboxAssistantEvidence => ({
   id, kind: 'message', accountId: 'primary', accountEmail: 'owner@example.test', emailId: `email-${id}`,
   subject: `Message ${id}`, from: 'billing@vendor.example', to: ['owner@example.test'],
@@ -21,10 +17,14 @@ const source = (id: string, text: string, overrides: Partial<InboxAssistantEvide
 });
 type Quote = { sourceId: string; text: string };
 const fact = (text: string, quotes: Quote[]) => ({ text, sourceIds: [...new Set(quotes.map(quote => quote.sourceId))], quotes });
-const verify = (sources: InboxAssistantEvidence[], ...facts: unknown[]) =>
-  parseInboxAssistantAnswer(JSON.stringify({ facts }), sources, coverage);
-const rejections = (sources: InboxAssistantEvidence[], ...facts: unknown[]) =>
-  inboxAssistantAnswerPass(JSON.stringify({ facts }), sources, coverage).rejected;
+/** The verifier as the Inbox Agent runs it: each email checked against the evidence text it was shown as. */
+const verify = (sources: InboxAssistantEvidence[], ...facts: unknown[]) => verifyInboxAssistantFacts(facts,
+  new Map(sources.map(item => [item.id, normalizeExcerpt(inboxAssistantEvidenceText(item))])), sources);
+const rejections = (sources: InboxAssistantEvidence[], ...facts: unknown[]) => {
+  const counts: Partial<Record<InboxAssistantFactRejectionReason, number>> = {};
+  for (const { reason } of verify(sources, ...facts).rejectedFacts) counts[reason] = (counts[reason] ?? 0) + 1;
+  return counts;
+};
 
 describe('amounts whose currency is written as a label', () => {
   const invoice = source('S1', 'Business WhatsApp postpaid invoice. Period: Oct\'26\nTotal tax(INR): 1,234.56 \nRound Off: 0.25 \nTotal Amount(INR): 8,100.00');
@@ -180,16 +180,5 @@ describe('how many quotes one statement may carry', () => {
     expect(rejections(sources, fact('Six receipts were found.', [...twoEach, { sourceId: 'S1', text: 'Receipt 1.' }])))
       .toEqual({ invalid_fact_shape: 1 });
   });
-
-  // Breaks: the model is told a smaller limit than the checker enforces, and keeps splitting or dropping citations.
-  it('tells the model the same limits the checker enforces', () => {
-    expect(buildInboxAssistantAnswerPrompt('How much?', sources, coverage)).toContain('at most 6 source IDs and 12 quotes');
-  });
 });
 
-// Breaks: the model is no longer told to name a total's parts or to leave reminders and refunds out of money spent.
-it('tells the model how a total must be stated and what it may not count', () => {
-  const prompt = buildInboxAssistantAnswerPrompt('How much did I spend today?', [source('S1', 'INR 10')], coverage);
-  expect(prompt).toContain('A total may be stated only by also naming each amount it adds');
-  expect(prompt).toMatch(/never a reminder, a scheduled or upcoming autopay/);
-});

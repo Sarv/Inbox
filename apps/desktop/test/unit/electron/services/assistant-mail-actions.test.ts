@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { changeAssistantReadFlags, type AssistantReadTarget } from '../../../../electron/services/assistant-mail-actions';
+import { changeAssistantReadFlags, changeAssistantStarFlags, type AssistantReadTarget } from '../../../../electron/services/assistant-mail-actions';
 import { emailRecord } from '../../../helpers/email-fixtures';
 
 function target() {
@@ -89,5 +89,73 @@ describe('Inbox Agent account-bound read receipts', () => {
     expect(await changeAssistantReadFlags(owner, ['unread'], false)).toEqual({ appliedIds: ['unread'], queuedIds: [], failedIds: [] });
     expect(owner.engine.bulkMarkAsUnread).toHaveBeenCalledExactlyOnceWith('INBOX', [10]);
     expect(owner.rows.get('read')?.tags).toContain('|read|');
+  });
+});
+
+describe('Inbox Agent account-bound star receipts', () => {
+  function starTarget() {
+    const owner = target();
+    const engine = { ...owner.engine, bulkStar: vi.fn(async () => 'queued' as const), bulkUnstar: vi.fn(async () => 'success' as const) };
+    return { ...owner, engine };
+  }
+
+  // Breaks: a star the agent set never reaches the server, or touches the read flag and unread badge.
+  it('stars through the durable queue without touching read state or counts', async () => {
+    const owner = starTarget();
+    expect(await changeAssistantStarFlags(owner, ['read', 'unread'], true)).toEqual({ appliedIds: [], queuedIds: ['read'], failedIds: [] });
+    expect(owner.engine.bulkStar).toHaveBeenCalledExactlyOnceWith('INBOX', [11]);
+    expect(owner.rows.get('read')?.tags).toBe('|INBOX|read|starred|');
+    expect(owner.storage.applyReadFlagToFolderCountsBatch).not.toHaveBeenCalled();
+    expect(owner.onChanged).toHaveBeenCalledExactlyOnceWith('read', true);
+  });
+
+  // Breaks: unstarring removes some other tag, or reports an already-unstarred message as changed.
+  it('unstars only starred mail and keeps every other tag', async () => {
+    const owner = starTarget();
+    expect(await changeAssistantStarFlags(owner, ['unread', 'read'], false)).toEqual({ appliedIds: ['unread'], queuedIds: [], failedIds: [] });
+    expect(owner.engine.bulkUnstar).toHaveBeenCalledExactlyOnceWith('INBOX', [10]);
+    expect(owner.rows.get('unread')?.tags).toBe('|INBOX|');
+  });
+
+  // Breaks: an engine without star support (or a failed queue write) leaves a local star the server never gets.
+  it('changes nothing when the queue cannot take the star', async () => {
+    const owner = target();
+    expect(await changeAssistantStarFlags(owner, ['read'], true)).toEqual({ appliedIds: [], queuedIds: [], failedIds: ['read'] });
+    const failing = starTarget();
+    failing.engine.bulkStar.mockResolvedValue('failed' as never);
+    expect(await changeAssistantStarFlags(failing, ['read'], true)).toEqual({ appliedIds: [], queuedIds: [], failedIds: ['read'] });
+    expect(failing.storage.updateEmail).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a row whose folder is gone, an account with no queue, or a star someone set meanwhile is reported as the agent's change.
+  it('fails rows it cannot queue and does not count a star that was already set', async () => {
+    const owner = starTarget();
+    owner.storage.getFolder.mockResolvedValueOnce(null as never);
+    expect(await changeAssistantStarFlags(owner, ['read'], true)).toEqual({ appliedIds: [], queuedIds: [], failedIds: ['read'] });
+    expect(await changeAssistantStarFlags({ ...owner, engine: null }, ['read'], true)).toEqual({ appliedIds: [], queuedIds: [], failedIds: ['read'] });
+    const raced = starTarget();
+    raced.engine.bulkStar.mockImplementation(async () => { raced.rows.get('read')!.tags = '|INBOX|read|starred|'; return 'queued'; });
+    expect(await changeAssistantStarFlags(raced, ['read'], true)).toEqual({ appliedIds: [], queuedIds: [], failedIds: [] });
+    expect(raced.storage.updateEmail).not.toHaveBeenCalled();
+    expect(raced.onChanged).not.toHaveBeenCalled();
+    // A row deleted while the queue wrote is not reported as changed either.
+    const gone = starTarget();
+    gone.engine.bulkStar.mockImplementation(async () => { gone.rows.delete('read'); return 'queued'; });
+    expect(await changeAssistantStarFlags(gone, ['read'], true)).toEqual({ appliedIds: [], queuedIds: [], failedIds: [] });
+  });
+
+  // Breaks: a row with no tags at all cannot be starred.
+  it('stars a row that has no tags yet', async () => {
+    const owner = starTarget();
+    owner.rows.get('read')!.tags = null as unknown as string;
+    expect(await changeAssistantStarFlags(owner, ['read'], true)).toEqual({ appliedIds: [], queuedIds: ['read'], failedIds: [] });
+    expect(owner.rows.get('read')?.tags).toBe('|starred|');
+  });
+
+  // Breaks: a malformed selection reaches the queue.
+  it('rejects a malformed star request', async () => {
+    await expect(changeAssistantReadFlags(starTarget(), [''], true)).rejects.toThrow('Invalid read action.');
+    await expect(changeAssistantStarFlags(starTarget(), [''], true)).rejects.toThrow('Invalid star action.');
+    await expect(changeAssistantStarFlags(starTarget(), ['read'], 'yes' as unknown as boolean)).rejects.toThrow('Invalid star action.');
   });
 });
