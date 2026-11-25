@@ -12,6 +12,11 @@
  */
 
 import {
+  errorDiagnostic,
+  failureCause,
+  categoryLogLabel,
+  folderLogLabel,
+  accountLogLabel,
   BehaviorIntelligence,
   LogAggregator,
   MAX_API_RETRIES,
@@ -121,7 +126,7 @@ async function restorePersistedAIConfig(persisted: AIProviderConfig): Promise<vo
     // The renderer's own push is authoritative: never report over it.
     if (aiConfig || aiConfigPushed) return;
     if (isAIEndpointRefusedError(error)) refuseAIConfig(error);
-    else logger.error('[Pipeline] could not restore the saved AI config:', error);
+    else logger.error('[Pipeline] could not restore the saved AI config:', errorDiagnostic(error));
     return;
   }
   // A push that arrived meanwhile wins — including one main refused, which
@@ -137,7 +142,7 @@ async function restorePersistedAIConfig(persisted: AIProviderConfig): Promise<vo
   // never resumes the error spam on restart. It clears aiConfig + re-emits
   // status when the account is gone.
   void disablePipelineAIIfProviderRemoved().catch((e: Error) => {
-    logger.warn(`[Pipeline] could not re-check the saved AI provider's sign-in: ${e.message}`);
+    logger.warn(`[Pipeline] could not re-check the saved AI provider's sign-in: ${failureCause(e)}`);
   });
 }
 
@@ -441,7 +446,8 @@ let aiConfigPushes = 0;
 function refuseAIConfig(error: AIEndpointRefusedError): void {
   aiConfig = null;
   lastAIErrorReason = error.message;
-  logger.warn(`[Pipeline] AI provider refused — background AI is off until it is fixed: ${error.message}`);
+  // The reason, not the message: the message describes the address it refused.
+  logger.warn(`[Pipeline] AI provider refused — background AI is off until it is fixed: ${error.reason}`);
   emitAiPipelineStatus();
   reportAIEndpointRefused(error);
 }
@@ -569,7 +575,7 @@ export async function disablePipelineAIIfProviderRemoved(): Promise<boolean> {
   try {
     saved = oauthSignInOfAIConfig(loadPipelineAIConfigSync());
   } catch (error) {
-    logger.warn(`[Pipeline] could not read the saved AI config: ${(error as Error).message}`);
+    logger.warn(`[Pipeline] could not read the saved AI config: ${failureCause(error)}`);
   }
   const liveGone = !!live && !(await getOAuthAccount(live.provider, live.email));
   const savedGone = !!saved && !(await getOAuthAccount(saved.provider, saved.email));
@@ -759,7 +765,7 @@ export function initializeUnifiedPipeline(
   try {
     ensureBundledAgentPrompts((repos as any).prompts);
   } catch (err) {
-    logger.warn('[Pipeline] Failed to seed prompt templates:', err);
+    logger.warn('[Pipeline] Failed to seed prompt templates:', errorDiagnostic(err));
   }
 
   // Create UnifiedPipeline
@@ -808,7 +814,7 @@ export function initializeUnifiedPipeline(
       getPromptTemplate: (id: string) => {
         try {
           const promptRepo = (pRepos() as any)?.prompts;
-          return readBundledAgentPrompt(promptRepo, id, error => logger.warn('[Pipeline] Failed to upgrade this account\'s prompt defaults:', error));
+          return readBundledAgentPrompt(promptRepo, id, error => logger.warn('[Pipeline] Failed to upgrade this account\'s prompt defaults:', errorDiagnostic(error)));
         }
         catch { return null; }
       },
@@ -887,7 +893,7 @@ export function initializeUnifiedPipeline(
         if (m > 0) logger.info(`[Pipeline] Built ${m} sender memories`);
       }
     } catch (e) {
-      logger.warn('[Pipeline] deferred initial learning failed:', (e as Error).message);
+      logger.warn('[Pipeline] deferred initial learning failed:', failureCause(e));
     }
   }, 3000);
   initialLearnTimer.unref?.();
@@ -926,7 +932,7 @@ export function initializeUnifiedPipeline(
           const m = repos.agent.buildAllSenderMemories(email);
           if (m > 0) logger.info(`[Pipeline] Built ${m} sender memories`);
         }
-      } catch (e) { logger.error('[Pipeline] Backfill check error:', e); clearInterval(backfillCheck); }
+      } catch (e) { logger.error('[Pipeline] Backfill check error:', errorDiagnostic(e)); clearInterval(backfillCheck); }
     }, 10_000);
   }
 }
@@ -988,7 +994,7 @@ export async function runPipeline1(emailId: string, storage: any = getStorage())
   try {
     storage.getRepositories()?.agent?.markExtractionDone(emailId);
   } catch (error) {
-    logger.error(`[Pipeline] P1 error for ${emailId}:`, error);
+    logger.error(`[Pipeline] P1 error for ${emailId}:`, errorDiagnostic(error));
   }
 }
 
@@ -1044,7 +1050,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
         priorityReasoning = score.reasoning;
         recommendedAction = score.recommendedAction || null;
       } catch (err) {
-        logger.error(`[Pipeline] Scoring error for ${emailId}:`, err);
+        logger.error(`[Pipeline] Scoring error for ${emailId}:`, errorDiagnostic(err));
       } finally {
         activeProcessingStorage = prevProcessingStorage;
       }
@@ -1132,7 +1138,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
           // disconnected engine / restart / burst can never strand it unlabeled.
         }
       } catch (err) {
-        logger.error(`[Pipeline] Categorization error for ${emailId}:`, err);
+        logger.error(`[Pipeline] Categorization error for ${emailId}:`, errorDiagnostic(err));
         // Auth/credit terminal errors pause categorization globally + raise the
         // Fix banner. A per-email 4xx ('client', not paused) is a doomed request
         // for THIS message only — accept it (mark done, no categories) so we
@@ -1292,7 +1298,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
     // 4. Auto-draft reply when pipeline proposes "reply" action
     if (proposed && (recommendedAction === 'reply' || recommendedAction === 'reply_all') && aiConfig) {
       autoDraftReply(emailId, storage).catch(err =>
-        logger.error(`[Pipeline] Auto-draft failed for ${emailId}:`, err)
+        logger.error(`[Pipeline] Auto-draft failed for ${emailId}:`, errorDiagnostic(err))
       );
     }
 
@@ -1316,7 +1322,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
       });
     }
   } catch (error) {
-    logger.error(`[Pipeline] P2 error for ${emailId}:`, error);
+    logger.error(`[Pipeline] P2 error for ${emailId}:`, errorDiagnostic(error));
   }
 }
 
@@ -1403,7 +1409,7 @@ function lateAutoDraftStop(
   try {
     reason = autoDraftSkipReason(storage, email);
   } catch (err) {
-    logger.warn(`[Pipeline] Drop auto-draft for ${email.id} before ${stage} — thread gates could not be checked:`, err);
+    logger.warn(`[Pipeline] Drop auto-draft for ${email.id} before ${stage} — thread gates could not be checked:`, errorDiagnostic(err));
     return 'gates-unreadable';
   }
   if (reason) logger.info(`[Pipeline] Drop auto-draft for ${email.id} before ${stage} — ${reason} (changed while drafting)`);
@@ -1425,7 +1431,7 @@ async function settleLateAutoDraftStop(
   try {
     await agentRepo.updateDecisionStatus(decision.id, 'rejected', 'dismissed', USER_HAS_DRAFT_FEEDBACK);
   } catch (err) {
-    logger.warn(`[Pipeline] Could not resolve decision ${decision.id} as '${USER_HAS_DRAFT_FEEDBACK}':`, err);
+    logger.warn(`[Pipeline] Could not resolve decision ${decision.id} as '${USER_HAS_DRAFT_FEEDBACK}':`, errorDiagnostic(err));
   }
 }
 
@@ -1462,7 +1468,7 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
   try {
     skip = autoDraftSkipReason(storage, email);
   } catch (err) {
-    logger.warn(`[Pipeline] Skip auto-draft for ${emailId} — thread gates could not be checked:`, err);
+    logger.warn(`[Pipeline] Skip auto-draft for ${emailId} — thread gates could not be checked:`, errorDiagnostic(err));
     return;
   }
   if (skip === 'not-active-account') {
@@ -1649,7 +1655,7 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
       }
     }
   } catch (err) {
-    logger.warn('[Pipeline] Relationship gate check failed, continuing:', err);
+    logger.warn('[Pipeline] Relationship gate check failed, continuing:', errorDiagnostic(err));
   }
 
   // The AI's `should_auto_draft` decision already weighed reply-worthiness,
@@ -1724,7 +1730,7 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
       getPromptTemplate: (id: 'agent_plan' | 'agent_draft') => {
         try {
           const r = (storage as any).getRepositories?.()?.prompts;
-          return readBundledAgentPrompt(r, id, error => logger.warn('[Pipeline] Failed to upgrade this account\'s prompt defaults:', error));
+          return readBundledAgentPrompt(r, id, error => logger.warn('[Pipeline] Failed to upgrade this account\'s prompt defaults:', errorDiagnostic(error)));
         } catch { return null; }
       },
       getNotes: (e: string) => agentRepo.getNotesForPrompt(e),
@@ -1902,14 +1908,14 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
     try {
       draftKeyRecorded = agentRepo.recordDecisionDraftMessageId(decision.id, draftMessageId);
     } catch (err) {
-      logger.warn(`[Pipeline] Could not record the draft Message-ID for decision ${decision.id}:`, err);
+      logger.warn(`[Pipeline] Could not record the draft Message-ID for decision ${decision.id}:`, errorDiagnostic(err));
     }
     const forgetDraftKey = (): void => {
       if (!draftKeyRecorded) return;
       try {
         agentRepo.clearDecisionDraftMessageId(decision.id, draftMessageId);
       } catch (err) {
-        logger.warn(`[Pipeline] Could not clear the draft Message-ID for decision ${decision.id}:`, err);
+        logger.warn(`[Pipeline] Could not clear the draft Message-ID for decision ${decision.id}:`, errorDiagnostic(err));
       }
     };
 
@@ -1946,7 +1952,7 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
             'draft saved to Drafts folder',
           );
         } catch (err) {
-          logger.warn(`[Pipeline] Could not mark decision ${decision.id} as auto:`, err);
+          logger.warn(`[Pipeline] Could not mark decision ${decision.id} as auto:`, errorDiagnostic(err));
         }
         // Log in the user_action_log timeline (source='agent_auto') so the
         // Activity Log tab shows the draft alongside auto-read / auto-archive
@@ -1959,11 +1965,13 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
         });
       } else {
         forgetDraftKey();
-        logger.warn(`[Pipeline] IMAP draft save failed for ${emailId}: ${result.error}`);
+        // Our own words only (what precedes the first colon): the rest of a
+        // save error can quote the server's answer or the encryption failure.
+        logger.warn(`[Pipeline] IMAP draft save failed for ${emailId}: ${String(result.error ?? 'no result').split(':')[0]}`);
       }
     } catch (err) {
       forgetDraftKey();
-      logger.error(`[Pipeline] IMAP draft save error for ${emailId}:`, err);
+      logger.error(`[Pipeline] IMAP draft save error for ${emailId}:`, errorDiagnostic(err));
     }
 
     // Notify renderer that draft is ready
@@ -1976,7 +1984,7 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
       });
     }
   } catch (error) {
-    logger.error(`[Pipeline] Auto-draft error for ${emailId}:`, error);
+    logger.error(`[Pipeline] Auto-draft error for ${emailId}:`, errorDiagnostic(error));
   }
 }
 
@@ -2131,7 +2139,7 @@ async function tryAutoSendReply(params: {
       try {
         await appendSentCopy(result.rawMessage, result.messageId, sendOptions);
       } catch (err) {
-        logger.warn(`[Pipeline] Sent-folder append for auto-sent ${emailId} failed (non-fatal):`, (err as Error)?.message || err);
+        logger.warn(`[Pipeline] Sent-folder append for auto-sent ${emailId} failed (non-fatal):`, failureCause(err));
       }
     }
 
@@ -2146,7 +2154,7 @@ async function tryAutoSendReply(params: {
         REPLY_SENT_FEEDBACK,
       );
     } catch (err) {
-      logger.warn(`[Pipeline] Could not mark decision ${decision.id} as sent:`, err);
+      logger.warn(`[Pipeline] Could not mark decision ${decision.id} as sent:`, errorDiagnostic(err));
     }
 
     // Same activity-log surface as every other agent action (learning +
@@ -2174,7 +2182,7 @@ async function tryAutoSendReply(params: {
     }
     return true;
   } catch (err) {
-    logger.error(`[Pipeline] Auto-send error for ${emailId} — falling back to Drafts:`, err);
+    logger.error(`[Pipeline] Auto-send error for ${emailId} — falling back to Drafts:`, errorDiagnostic(err));
     return false;
   }
 }
@@ -2213,7 +2221,7 @@ async function resolveGmailToken(accountId: string | null): Promise<string | nul
   try {
     const email = registryAccountEmail(accountId).toLowerCase();
     if (!email) {
-      if (traceEnabled()) logger.trace(`[Pipeline] resolveGmailToken: no address for acct=${accountId ?? 'default'} → plain labels`);
+      if (traceEnabled()) logger.trace(`[Pipeline] resolveGmailToken: no address for acct=${accountLogLabel(accountId, 'default')} → plain labels`);
       return null;
     }
     const grant = (await listAccounts()).find((a) => a.provider === 'gmail' && a.email?.toLowerCase() === email);
@@ -2222,13 +2230,13 @@ async function resolveGmailToken(accountId: string | null): Promise<string | nul
       return null;
     }
     const token = await getValidAccessToken('gmail' as any, grant.email).catch((e) => {
-      logger.warn(`[Pipeline] resolveGmailToken: token fetch failed for ${grant.email}:`, e?.message || e);
+      logger.warn(`[Pipeline] resolveGmailToken: token fetch failed for ${grant.email}:`, failureCause(e));
       return null;
     });
     if (traceEnabled()) logger.trace(`[Pipeline] resolveGmailToken: token=${token ? 'yes' : 'no'} (${grant.email})`);
     return token;
   } catch (e) {
-    logger.warn('[Pipeline] resolveGmailToken error:', (e as Error).message);
+    logger.warn('[Pipeline] resolveGmailToken error:', failureCause(e));
     return null;
   }
 }
@@ -2297,7 +2305,7 @@ async function applyEmailLabels(
     if (stale.length) {
       if (canApply && !await canApply()) return 'superseded';
       try { await queue.removeGmailLabels(folderPath, email.uid, stale); }
-      catch (e) { logger.warn('[Pipeline] stale Gmail label cleanup failed:', (e as Error).message); }
+      catch (e) { logger.warn('[Pipeline] stale Gmail label cleanup failed:', failureCause(e)); }
     }
   }
 
@@ -2369,7 +2377,7 @@ export async function mirrorCategoryLabels(storage: any, email: any, categorySlu
       // label is re-applied later (next categorization / the backfill action).
       const engine: any = getSyncEngineForStorage(storage);
       if (!engine) {
-        logger.warn(`[Pipeline] mirror skipped acct=${acct} uid=${email.uid}: no engine for this account's storage (won't apply to a wrong account)`);
+        logger.warn(`[Pipeline] mirror skipped acct=${accountLogLabel(acct)} uid=${email.uid}: no engine for this account's storage (won't apply to a wrong account)`);
         return;
       }
       if (!engine.isConnected?.() || !engine.operationQueue) {
@@ -2379,7 +2387,7 @@ export async function mirrorCategoryLabels(storage: any, email: any, categorySlu
 
       const folder = await storage.getFolder(email.folderId);
       if (!folder?.path) {
-        logger.info(`[Pipeline] mirror skipped acct=${acct} uid=${email.uid}: folder ${email.folderId} has no path`);
+        logger.info(`[Pipeline] mirror skipped acct=${accountLogLabel(acct)} uid=${email.uid}: folder ${email.folderId} has no path`);
         return;
       }
 
@@ -2393,7 +2401,7 @@ export async function mirrorCategoryLabels(storage: any, email: any, categorySlu
       // ACTIVE account, so a background Gmail account's labels used to be created
       // and coloured in the active account's mailbox instead of its own.
       const token = isGmail ? await resolveGmailToken(accountId) : null;
-      if (traceEnabled()) logger.trace(`[Pipeline] mirror acct=${acct} uid=${email.uid} folder="${folder.path}" isGmail=${isGmail} token=${token ? 'yes' : 'no'} cats=[${cats.map((c) => c.slug).join(',')}]`);
+      if (traceEnabled()) logger.trace(`[Pipeline] mirror acct=${accountLogLabel(acct)} uid=${email.uid} folder=${folderLogLabel(folder.path)} isGmail=${isGmail} token=${token ? 'yes' : 'no'} cats=[${cats.map((c) => categoryLogLabel(c.slug, defs.some((d: any) => d.slug === c.slug && d.isSystem))).join(',')}]`);
       const result = await applyEmailLabels(engine, email, folder.path, cats, isGmail, token, bySlug, canApply);
       // Automatic mirrors mark label_status → 'done' only on a CONFIRMED apply. A merely-'queued' op
       // (background account mid-sync) is NOT yet on the server — if it later
@@ -2403,7 +2411,7 @@ export async function mirrorCategoryLabels(storage: any, email: any, categorySlu
         try { (storage as any).getRepositories?.()?.agent?.markLabelDone?.(email.id); } catch { /* non-fatal */ }
       }
     } catch (e) {
-      logger.warn(`[Pipeline] mirror acct=${acct} uid=${email?.uid} best-effort failed:`, (e as Error).message);
+      logger.warn(`[Pipeline] mirror acct=${accountLogLabel(acct)} uid=${email?.uid} best-effort failed:`, failureCause(e));
     }
   });
 }
@@ -2445,7 +2453,7 @@ export async function backfillCategoryLabels(limit = 50): Promise<{ accounts: nu
         labeled++;
       }
     } catch (e) {
-      logger.warn('[Pipeline] backfill (one account) failed:', (e as Error).message);
+      logger.warn('[Pipeline] backfill (one account) failed:', failureCause(e));
     }
   }
   logger.info(`[Pipeline] category-label backfill: ${labeled} mail(s) across ${accounts} account(s)`);
@@ -2505,7 +2513,7 @@ async function provisionAccountLabels(
     }
     return { handled: true, created };
   } catch (e) {
-    logger.warn('[Pipeline] provision (one account) failed:', (e as Error).message);
+    logger.warn('[Pipeline] provision (one account) failed:', failureCause(e));
     return { handled: false, created: 0 };
   }
 }
@@ -2614,7 +2622,7 @@ export async function renameCategoryLabelEverywhere(oldName: string, newName: st
         await queue.renameCategoryLabel({ slug: '', name: oldName }, { slug: '', name: newName }, categoryLabelConfig.folderMode);
       }
     } catch (e) {
-      logger.warn('[Pipeline] rename label (one account) failed:', (e as Error).message);
+      logger.warn('[Pipeline] rename label (one account) failed:', failureCause(e));
     }
   }
 }
@@ -2654,7 +2662,7 @@ export async function removeAllCategoryLabels(): Promise<{ accounts: number; rem
         removed += await queue.removeSarvInboxLabels(categoryLabelConfig.folderMode);
       }
     } catch (e) {
-      logger.warn('[Pipeline] remove labels (one account) failed:', (e as Error).message);
+      logger.warn('[Pipeline] remove labels (one account) failed:', failureCause(e));
     }
   }
   logger.info(`[Pipeline] removed ${removed} Sarv Inbox label(s) across ${accounts} account(s)`);
@@ -2708,7 +2716,7 @@ async function executeAgentAction(emailId: string, action: UserActionType, _valu
         // Failures are logged, never swallowed to console (CLAUDE.md: always the
         // shared logger). A dropped line here is a divergence nobody can see.
         const onFail = (what: string) => (err: unknown) =>
-          logger.error(`[Pipeline] agent ${what} did not reach IMAP for ${emailId}:`, err);
+          logger.error(`[Pipeline] agent ${what} did not reach IMAP for ${emailId}:`, errorDiagnostic(err));
         if (action === 'read') syncEngine.markAsRead(folder.path, email.uid).catch(onFail('mark-read'));
         else if (action === 'star') syncEngine.markAsStarred(folder.path, email.uid, true).catch(onFail('star'));
         else if (action === 'archive') (syncEngine as any).operationQueue?.archive(folder.path, email.uid).catch(onFail('archive'));
@@ -2775,7 +2783,7 @@ async function triggerCategorizeFor(emailId: string, hintAccountId?: string, sou
 
   const threadId = email.threadId;
   if (!threadId) return;
-  logger.info(`[Pipeline:Event] ${source} → ${emailId} thread=${threadId} acct=${getAccountIdForStorage(storage) ?? 'active'}`);
+  logger.info(`[Pipeline:Event] ${source} → ${emailId} thread=${threadId} acct=${accountLogLabel(getAccountIdForStorage(storage), 'active')}`);
   processEmail(emailId, threadId, storage);
 }
 
@@ -2878,7 +2886,7 @@ function startPollingTrigger(): void {
               stillStuck.map((r: { id: string; reason: string }) => `${r.id}(${r.reason})`).join(', '));
           }
         } catch (e) {
-          logger.warn('[Pipeline:Poll] stuck-row heal failed:', (e as Error).message);
+          logger.warn('[Pipeline:Poll] stuck-row heal failed:', failureCause(e));
         }
 
         // Per-account snapshot for the log line — body-FREE. This used to call
@@ -2957,7 +2965,7 @@ function startPollingTrigger(): void {
      } catch (e) {
        // Isolate one account's failure so it never skips the accounts after it
        // in this tick (the loop must keep fanning out across all accounts).
-       logger.warn('[Pipeline:Poll] account tick failed (isolated):', (e as Error).message);
+       logger.warn('[Pipeline:Poll] account tick failed (isolated):', failureCause(e));
      }
     }
 
@@ -3067,7 +3075,7 @@ function registerPipelineIPC(): void {
     try {
       await clearPipelineAIConfig();
     } catch (e) {
-      logger.warn(`[Pipeline] could not clear the saved AI config: ${(e as Error).message}`);
+      logger.warn(`[Pipeline] could not clear the saved AI config: ${failureCause(e)}`);
     }
     return { success: true };
   });
@@ -3089,7 +3097,7 @@ function registerPipelineIPC(): void {
       logger.warn(`[Pipeline] AI config refused: its ${signIn.provider} sign-in is no longer on this device`);
       dropLiveAIConfig();
       lastAIErrorReason = reason;
-      void clearPipelineAIConfig().catch((e: Error) => logger.warn(`[Pipeline] could not clear the saved AI config: ${e.message}`));
+      void clearPipelineAIConfig().catch((e: Error) => logger.warn(`[Pipeline] could not clear the saved AI config: ${failureCause(e)}`));
       emitAiPipelineStatus();
       // The renderer ignores a push's answer, and a provider still listed there
       // with no sign-in behind it would otherwise show no sign of a problem.
@@ -3105,10 +3113,10 @@ function registerPipelineIPC(): void {
       if (isAIEndpointRefusedError(error)) {
         refuseAIConfig(error);
         // Nor is a refused provider the one to bring back after a restart.
-        void clearPipelineAIConfig().catch((e: Error) => logger.warn(`[Pipeline] could not clear the saved AI config: ${e.message}`));
+        void clearPipelineAIConfig().catch((e: Error) => logger.warn(`[Pipeline] could not clear the saved AI config: ${failureCause(e)}`));
         return { success: false, error: error.message };
       }
-      logger.error('[Pipeline] AI config could not be prepared:', error);
+      logger.error('[Pipeline] AI config could not be prepared:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
     if (push !== aiConfigPushes) return overtaken;

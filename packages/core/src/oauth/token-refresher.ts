@@ -118,6 +118,11 @@ async function postToTokenEndpoint(
       headers: init.headers,
       body: init.body,
       signal,
+      // Never followed: a 307/308 answer would make fetch POST the same body
+      // (a refresh token, an authorization code and its verifier) again, to
+      // wherever the Location names. Node reports it as a network failure,
+      // classified below.
+      redirect: 'error',
     });
   } catch (err) {
     // An abort is not a network fault, and above all not an auth fault: the
@@ -143,6 +148,14 @@ async function postToTokenEndpoint(
     }
 
     const e = err as Error & { cause?: { code?: string; message?: string } };
+    // undici's word for a redirect refused by `redirect: 'error'`.
+    if (e.cause?.message === 'unexpected redirect') {
+      logger.error('[OAuth] Token endpoint answered with a redirect, not followed:', tokenEndpoint);
+      throw new OAuthError(
+        `OAuth server at ${tokenEndpoint} answered with a redirect, which is not followed (it would resend the request's credentials)`,
+        codes.network,
+      );
+    }
     const causeCode = e.cause?.code ? ` [${e.cause.code}]` : '';
     const causeMsg = e.cause?.message ? `: ${e.cause.message}` : '';
     logger.error('[OAuth] Network error reaching', tokenEndpoint, e);
@@ -163,8 +176,11 @@ async function postToTokenEndpoint(
  *     with a bare `SyntaxError`, whose `code` is `undefined`, so callers that
  *     branch on `err.code` (see `isTerminalOAuthError` in the desktop
  *     oauth-service) can classify it neither as terminal nor as transient.
- *     A snippet of the body is carried in the message/detail so the log shows
- *     WHAT answered instead of just "Unexpected token <".
+ *     The message and the log say what answered by its content type and size
+ *     only: a body that is not JSON can still be a token response in another
+ *     encoding (`access_token=…&refresh_token=…`), so not a character of it
+ *     is written. The whole body stays on `detail`, which is read to classify
+ *     the error and never logged.
  *
  *  2. EMPTY / WHITESPACE access_token on a 200 — some servers report a
  *     transient internal failure this way. Passing it through means the caller
@@ -175,6 +191,16 @@ async function postToTokenEndpoint(
  *     the source gives it its own code so the caller can tell "the server gave
  *     us nothing usable" from "our token is dead".
  */
+// A media type is a token (`text/html`), not prose; anything else is not written.
+const MEDIA_TYPE = /^[a-z0-9!#$&^_.+-]{1,64}\/[a-z0-9!#$&^_.+-]{1,64}$/;
+
+/** A body for a log line: its content type (without parameters) and its length. */
+function describeBody(res: Response, raw: string): string {
+  const type = (res.headers?.get?.('content-type') ?? '').split(';')[0].trim().toLowerCase();
+  const kind = MEDIA_TYPE.test(type) ? type : 'unknown type';
+  return raw.length === 0 ? `empty body, ${kind}` : `${raw.length} characters of ${kind}`;
+}
+
 async function parseTokenResponse(
   res: Response,
   codes: { invalidResponse: string; emptyAccessToken: string },
@@ -185,10 +211,10 @@ async function parseTokenResponse(
   try {
     parsed = JSON.parse(raw) as OAuthTokenResponse;
   } catch {
-    const snippet = raw.trim().slice(0, 200);
-    logger.error(`[OAuth] ${what} returned a non-JSON body:`, snippet || '(empty)');
+    const shape = describeBody(res, raw);
+    logger.error(`[OAuth] ${what} returned a non-JSON body: ${shape}`);
     throw new OAuthError(
-      `${what} returned a non-JSON body (${res.status}): ${snippet || 'empty body'}`,
+      `${what} returned a non-JSON body (${res.status}): ${shape}`,
       codes.invalidResponse,
       raw,
     );

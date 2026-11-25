@@ -407,6 +407,18 @@ describe('describeDuplicateRoles', () => {
     );
   });
 
+  // Breaks: a user-named candidate (a person's or client's name) reaches app.log
+  // through the duplicate-role line; system names stay readable.
+  it('writes a user-named candidate and winner as their folder label', () => {
+    const summary = describeDuplicateRoles([
+      { path: 'Acme Outgoing', specialUse: '\\Sent' },
+      { path: 'Sent' },
+    ]);
+    expect(summary).not.toContain('Acme');
+    expect(summary).toMatch(/^sent: folder#[0-9a-f]{8} \(/);
+    expect(summary).toContain('| Sent (');
+  });
+
   // Breaks: the case that actually needs explaining — a duplicate that was NOT
   // collapsed. "uidValidity=none" in the line is the whole answer.
   it('shows the missing evidence when a mailbox has never been selected', () => {

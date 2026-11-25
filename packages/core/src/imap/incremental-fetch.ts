@@ -15,6 +15,7 @@
 // incremental path — never duplicate the windowing.
 
 import type { FetchOptions, IIMAPClient, IMAPMessage } from '../types/imap';
+import { failureCause } from '../utils/error-diagnostic';
 import { logger } from '../utils/logger';
 
 // ── Pacing ──────────────────────────────────────────────────────────────────
@@ -144,7 +145,7 @@ function createWindowRun(windowOptions: WindowedFetchOptions | undefined) {
  * how a slow server became "no new mail at all".
  */
 function keepPartial(collected: number, error: unknown): void {
-  logger.warn(`New-mail fetch stopped early with ${collected} message(s) kept: ${(error as Error)?.message ?? error}`);
+  logger.warn(`New-mail fetch stopped early with ${collected} message(s) kept: ${failureCause(error)}`);
 }
 
 /**
@@ -222,6 +223,13 @@ export interface NewestFirstFetch {
    * forever.
    */
   scannedDownToUid: number;
+  /**
+   * True when the pass stopped because a window FAILED (after earlier ones
+   * succeeded), not on its cap or time budget. The hole below is then a
+   * transient miss that the next pass should retry, so the caller must not
+   * record the folder as caught up.
+   */
+  interrupted?: boolean;
 }
 
 /**
@@ -266,6 +274,7 @@ export async function fetchNewestMessagesWindowed(
   const maxMessages = windowOptions?.maxMessages;
   const collected: IMAPMessage[] = [];
   let scannedDownToUid = hiEnd + 1;
+  let interrupted = false;
 
   for (let hi = hiEnd; hi > sinceUid;) {
     const span = run.span();
@@ -281,6 +290,7 @@ export async function fetchNewestMessagesWindowed(
       // `scannedDownToUid` tells the caller a hole remains below it.
       if (scannedDownToUid > hiEnd) throw error;
       keepPartial(collected.length, error);
+      interrupted = true;
       break;
     }
     for (const m of window) {
@@ -294,5 +304,5 @@ export async function fetchNewestMessagesWindowed(
   }
 
   collected.sort((a, b) => a.uid - b.uid);
-  return { messages: collected, scannedDownToUid };
+  return { messages: collected, scannedDownToUid, ...(interrupted ? { interrupted } : {}) };
 }

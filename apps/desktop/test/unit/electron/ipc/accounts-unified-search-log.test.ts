@@ -1,4 +1,4 @@
-import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core';
+import { accountLogLabel, getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -69,6 +69,8 @@ afterEach(() => { logs.stop(); });
 describe('accounts:unifiedSearch — what reaches the log', () => {
   // Breaks: 'unifiedSearch: skipping account <id> <error message>' quotes the
   // search words; or one failing account fails the whole search.
+  // Changed deliberately (log privacy): the id is written as its label (an
+  // account id spells out its owner's address).
   it('skips a failing account, logging its id and the error class and code only', async () => {
     const result = await search(['ok', 'broken']);
 
@@ -76,7 +78,7 @@ describe('accounts:unifiedSearch — what reaches the log', () => {
     expect(result.data?.map((row) => row.id)).toEqual(['m1']);
     expect(logs.containing(SENTINEL)).toEqual([]);
     expect(logs.containing('unifiedSearch: skipping account')).toEqual([
-      "[WARN] [accounts-handlers] [Accounts] unifiedSearch: skipping account broken { name: 'Error', code: 'SQLITE_ERROR' }",
+      `[WARN] [accounts-handlers] [Accounts] unifiedSearch: skipping account ${accountLogLabel('broken')} { name: 'Error', code: 'SQLITE_ERROR' }`,
     ]);
   });
 

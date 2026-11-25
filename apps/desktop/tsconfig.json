@@ -97,7 +97,9 @@
       // Same: where a Sarv token may be sent (the Blocklists tab's reputation warning).
       "@sarvinbox/core/token-destinations": ["../../packages/core/src/oauth/token-destinations.ts"],
       // Same: what a log line may say about text that is not ours (field names, sizes, a URL's scheme).
-      "@sarvinbox/core/log-text": ["../../packages/core/src/utils/log-text.ts"]
+      "@sarvinbox/core/log-text": ["../../packages/core/src/utils/log-text.ts"],
+      // Same: the stand-ins for the account, a user-named folder, label or AI category in a log line.
+      "@sarvinbox/core/log-labels": ["../../packages/core/src/utils/log-labels.ts"]
     }
   },
   "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],

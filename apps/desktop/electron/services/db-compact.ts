@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
 import {
+  accountLogLabel,
   compactionEstimate,
   formatBytes,
   hasCompactionHeadroom,
@@ -36,7 +37,6 @@ import {
   type CompactionEstimate,
 } from '@sarvinbox/core';
 import { app } from 'electron';
-
 
 import { getAccountRuntime } from '../shared';
 import type { CompactWorkerResult } from '../workers/db-compact.worker';
@@ -118,7 +118,7 @@ export function estimateCompaction(accountId: string): CompactionReport | null {
     const estimate = compactionEstimate(storage.getPageStats());
     return { accountId, ...estimate, worthwhile: isCompactionWorthwhile(estimate) };
   } catch (error) {
-    logger.warn(`[Compact] could not read page stats for ${accountId}`, error);
+    logger.warn(`[Compact] could not read page stats for ${accountLogLabel(accountId)}`, error);
     return null;
   }
 }
@@ -212,7 +212,7 @@ export async function compactAccountDatabase(accountId: string): Promise<Compact
   const startedAt = Date.now();
   const dbPath = accountDbPath(accountId);
   logger.info(
-    `[Compact] starting ${accountId}: ${formatBytes(estimate.fileBytes)} file, ` +
+    `[Compact] starting ${accountLogLabel(accountId)}: ${formatBytes(estimate.fileBytes)} file, ` +
       `${formatBytes(estimate.freeBytes)} reclaimable`,
   );
 
@@ -240,7 +240,7 @@ export async function compactAccountDatabase(accountId: string): Promise<Compact
     const autoVacuumEnabled = result.autoVacuum === AUTO_VACUUM_INCREMENTAL;
 
     logger.info(
-      `[Compact] ${accountId} done in ${Math.round(elapsedMs / 1000)}s: ` +
+      `[Compact] ${accountLogLabel(accountId)} done in ${Math.round(elapsedMs / 1000)}s: ` +
         `${formatBytes(before.fileBytes)} -> ${formatBytes(after.fileBytes)}, ` +
         `${result.rowsAfter ?? '?'} emails, auto_vacuum=${result.autoVacuum}`,
     );
@@ -248,7 +248,7 @@ export async function compactAccountDatabase(accountId: string): Promise<Compact
       // Should be impossible — VACUUM is a lossless rebuild. If it ever fires,
       // it is the single most important line in the log.
       logger.error(
-        `[Compact] ROW COUNT CHANGED for ${accountId}: ${result.rowsBefore} emails before, ` +
+        `[Compact] ROW COUNT CHANGED for ${accountLogLabel(accountId)}: ${result.rowsBefore} emails before, ` +
           `${result.rowsAfter} after`,
       );
     }
@@ -256,7 +256,7 @@ export async function compactAccountDatabase(accountId: string): Promise<Compact
       // Not fatal — the space was still reclaimed — but the file will re-bloat
       // and need this again, so the next person reading the log should know.
       logger.warn(
-        `[Compact] ${accountId} did NOT convert to incremental auto-vacuum ` +
+        `[Compact] ${accountLogLabel(accountId)} did NOT convert to incremental auto-vacuum ` +
           `(auto_vacuum=${result.autoVacuum}); it will bloat again`,
       );
     }
@@ -283,7 +283,7 @@ export async function compactAccountDatabase(accountId: string): Promise<Compact
     try {
       await ensureAccountRuntime(accountId);
     } catch (error) {
-      logger.error(`[Compact] FAILED to reopen ${accountId} after compaction`, error);
+      logger.error(`[Compact] FAILED to reopen ${accountLogLabel(accountId)} after compaction`, error);
     }
   }
 }

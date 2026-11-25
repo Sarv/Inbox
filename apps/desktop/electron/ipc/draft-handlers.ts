@@ -6,7 +6,7 @@
 
 import { basename } from 'path';
 
-import { emailContentHash, errorDiagnostic, resolveStandardFolder, createLogger, messageIdKey, withFolderSelected } from '@sarvinbox/core';
+import { folderLogLabel, emailContentHash, errorDiagnostic, resolveStandardFolder, createLogger, messageIdKey, withFolderSelected } from '@sarvinbox/core';
 import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, accountDraftRowSql, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
@@ -421,7 +421,7 @@ export async function saveDraftToIMAP(draft: {
         draftLog('save:uid-update:error', { error: errorDiagnostic(e) });
       }
     }
-    logger.info('[Drafts] Draft saved to IMAP', folderPath, messageId, 'uid', appendedUid);
+    logger.info('[Drafts] Draft saved to IMAP', folderLogLabel(folderPath), messageId, 'uid', appendedUid);
   } catch (err: any) {
     logger.error('[Drafts] IMAP append failed (local copy kept):', err);
     return { success: true, folderPath, messageId, error: `IMAP append failed: ${err?.message || err}` };
@@ -465,7 +465,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
   // Resolve folder id by path
   const folder = db.prepare('SELECT id FROM folders WHERE path = ?').get(row.folderPath) as any;
   if (!folder?.id) {
-    logger.warn('[Drafts] No local folder row for', row.folderPath);
+    logger.warn('[Drafts] No local folder row for', folderLogLabel(row.folderPath));
     return undefined;
   }
 
@@ -652,7 +652,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
     writeThreadKey(db, { id, subject: row.subject, date: now });
   })();
 
-  logger.info('[Drafts] Local draft row inserted', id, 'folder=', row.folderPath);
+  logger.info('[Drafts] Local draft row inserted', id, 'folder=', folderLogLabel(row.folderPath));
   // A new draft raises the Drafts badge; same raw-write gap as the update above.
   pokeReadModel(storage);
   return id;

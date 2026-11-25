@@ -5,6 +5,7 @@ import {
   type FirstSplitGetResult,
   type FirstSplitRow,
 } from '@sarvinbox/core/first-split';
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -214,12 +215,15 @@ describe('useFirstEmailSplit — reading the cache', () => {
     await mount(AUTO, depsFor(bridge));
     expect(latest!.state).toBe('unknown');
     expect(run).not.toHaveBeenCalled();
-    expect(warn.mock.calls.some((call) => String(call[0]).includes('get acct=acct-b thread=t1 failed'))).toBe(true);
+    // Changed deliberately (log privacy): the account id is its label, and an
+    // error is logged by its kind, never its text.
+    expect(warn.mock.calls.some((call) => String(call[0]).includes(`get acct=${accountLogLabel('acct-b')} thread=t1 failed`))).toBe(true);
 
     const threw: FirstSplitBridge = { ...bridge, get: vi.fn(async () => { throw new Error('ipc down'); }) };
     await rerender({ ...AUTO, first: OTHER }, depsFor(threw));
     expect(latest!.state).toBe('unknown');
-    expect(warn.mock.calls.some((call) => String(call[0]).includes('threw: ipc down'))).toBe(true);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('threw: Error'))).toBe(true);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('ipc down'))).toBe(false);
   });
 
   // THE race: the reader moved to another thread before the first read came

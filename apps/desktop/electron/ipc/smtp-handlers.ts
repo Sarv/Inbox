@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { SMTPClient, emailContentHash, resolveStandardFolder, providerAutoSavesSentCopy, isAuthTokenError, isStarttlsRefusedError, withFolderSelected, messageIdKey, parseAddresses, STARTTLS_UNAVAILABLE, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
+import { folderLogLabel, SMTPClient, emailContentHash, resolveStandardFolder, providerAutoSavesSentCopy, isAuthTokenError, isStarttlsRefusedError, withFolderSelected, messageIdKey, parseAddresses, STARTTLS_UNAVAILABLE, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
 import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, dialog } from 'electron';
@@ -744,7 +744,7 @@ export async function appendSentCopy(
   } else {
     await run((syncEngine as any).getClient());
   }
-  logger.info('[SMTP] Sent copy appended (UID stamped by the next Sent sync)', sentPath, messageId);
+  logger.info('[SMTP] Sent copy appended (UID stamped by the next Sent sync)', folderLogLabel(sentPath), messageId);
 }
 
 /**

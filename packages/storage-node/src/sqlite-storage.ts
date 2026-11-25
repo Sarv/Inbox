@@ -3,7 +3,6 @@
 
 import { basename, dirname, join } from 'path';
 
-
 import type {
   IEmailStorage,
   EmailRecord,
@@ -30,8 +29,10 @@ import type {
 } from '@sarvinbox/core';
 import {
   bareSenderAddress,
+  categoryLogLabel,
   parseAddresses,
   createLogger,
+  errorDiagnostic,
   firstMemberKeyOf,
   isSameFirstSplitKey,
   isSpamScore,
@@ -291,7 +292,7 @@ export class SQLiteStorage implements IEmailStorage {
     if (this.config.key) {
       if (legacyPlaintext) {
         encryptPlaintextDb(this.db, this.config.key);
-        log.info(`[SQLiteStorage] Migrated plaintext DB to encrypted: ${this.config.dbPath}`);
+        log.info(`[SQLiteStorage] Migrated plaintext DB to encrypted: ${basename(this.config.dbPath)}`);
       } else {
         applyDbKey(this.db, this.config.key);
       }
@@ -2720,7 +2721,7 @@ export class SQLiteStorage implements IEmailStorage {
       enqueueThreadsTaggedWith(this.db, slug);
       this.readModel?.schedule();
     } catch (error) {
-      log.warn(`[Storage] Failed to enqueue threads for category '${slug}':`, error);
+      log.warn(`[Storage] Failed to enqueue threads for category ${categoryLogLabel(slug, false)}:`, errorDiagnostic(error));
     }
   }
 

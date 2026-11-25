@@ -23,6 +23,7 @@
  */
 
 import {
+  labelLogLabel,
   createLogger,
   planWorkflowEffects,
   type EmailRecord,
@@ -182,7 +183,7 @@ export function createExtensionMailBackend(): ExtensionMailBackend {
       if (plan.changed || plan.flagChanges.length > 0) {
         logger.info(
           `${extensionId} changed ${email.id}: ` +
-            `+[${(changes.add ?? []).join(',')}] -[${(changes.remove ?? []).join(',')}]`
+            `+[${(changes.add ?? []).map(labelLogLabel).join(',')}] -[${(changes.remove ?? []).map(labelLogLabel).join(',')}]`
         );
       }
     },

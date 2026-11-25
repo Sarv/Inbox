@@ -4,6 +4,8 @@ import { EventEmitter } from 'events';
 
 import type { IIMAPClient, IMAPEvent } from '../types/imap';
 import type { IEmailStorage } from '../types/storage';
+import { errorDiagnostic, failureCause } from '../utils/error-diagnostic';
+import { folderLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 import { createMutex, type Mutex } from '../utils/mutex';
 
@@ -342,7 +344,7 @@ export class RealtimeManager extends EventEmitter {
       // this the pre-existing deletions never get noticed — the reported "mail
       // deleted on webmail still shows in the app INBOX".
       this.scheduleFlagSync();
-      logger.info(`Realtime: IDLE started for ${folderPath} (rt#${this.instanceId})`);
+      logger.info(`Realtime: IDLE started for ${folderLogLabel(folderPath)} (rt#${this.instanceId})`);
       return 'idle';
     }
 
@@ -364,7 +366,7 @@ export class RealtimeManager extends EventEmitter {
       // backoff so the first retry is prompt.
       this.idleUpgradeAttempts = 0;
       this.scheduleIdleUpgrade();
-      logger.info(`Realtime: Polling started for ${folderPath} (rt#${this.instanceId})`);
+      logger.info(`Realtime: Polling started for ${folderLogLabel(folderPath)} (rt#${this.instanceId})`);
       return 'polling';
     }
 
@@ -393,7 +395,7 @@ export class RealtimeManager extends EventEmitter {
         const folderPath = this.startIntent;
         // Someone stopped us, or a session came up by another route.
         if (!folderPath || this.mode !== 'none') return;
-        logger.info(`Realtime: retrying monitoring for ${folderPath} (rt#${this.instanceId})`);
+        logger.info(`Realtime: retrying monitoring for ${folderLogLabel(folderPath)} (rt#${this.instanceId})`);
         await this.startInternal(folderPath);
       });
     }, delay);
@@ -443,8 +445,8 @@ export class RealtimeManager extends EventEmitter {
       // `quiet` on the background polling->IDLE upgrade retries: a still-busy
       // connection is expected to fail, so log at debug to avoid spamming the
       // same error every retry. The initial start still logs at error (visible).
-      if (quiet) logger.debug('Realtime: IDLE upgrade attempt failed (still on polling):', (error as Error)?.message ?? error);
-      else logger.error('Realtime: Failed to start IDLE:', error);
+      if (quiet) logger.debug('Realtime: IDLE upgrade attempt failed (still on polling):', failureCause(error));
+      else logger.error('Realtime: Failed to start IDLE:', errorDiagnostic(error));
       return false;
     }
   }
@@ -500,7 +502,7 @@ export class RealtimeManager extends EventEmitter {
       this.scheduleFlagSync();
       this.clearIdleUpgradeTimer();
       this.idleUpgradeAttempts = 0;
-      logger.info(`Realtime: upgraded polling -> IDLE for ${folderPath} (rt#${this.instanceId})`);
+      logger.info(`Realtime: upgraded polling -> IDLE for ${folderLogLabel(folderPath)} (rt#${this.instanceId})`);
       return;
     }
     // Still couldn't start IDLE (connection busy) — keep polling, try again later.
@@ -574,7 +576,7 @@ export class RealtimeManager extends EventEmitter {
           break;
       }
     } catch (error) {
-      logger.error('Realtime: Error handling IDLE event:', error);
+      logger.error('Realtime: Error handling IDLE event:', errorDiagnostic(error));
       // EventEmitter throws synchronously on 'error' with no listener
       if (this.listenerCount('error') > 0) this.emit('error', error as Error);
     }
@@ -657,7 +659,7 @@ export class RealtimeManager extends EventEmitter {
         (status.messages > storedCount && storedCount > 0);
 
       if (hasNewMessages) {
-        logger.info(`Polling: New messages detected in ${this.monitoredFolder}`);
+        logger.info(`Polling: New messages detected in ${folderLogLabel(this.monitoredFolder)}`);
         await this.handleNewMessages();
       }
 
@@ -723,7 +725,7 @@ export class RealtimeManager extends EventEmitter {
         this.emit('disconnected');
         await this.handleReconnect();
       } else {
-        logger.error('Polling: Error:', error);
+        logger.error('Polling: Error:', errorDiagnostic(error));
         if (this.listenerCount('error') > 0) this.emit('error', error as Error);
       }
     } finally {
@@ -793,7 +795,7 @@ export class RealtimeManager extends EventEmitter {
           if (error instanceof Error && error.message.includes('Sync already in progress')) {
             logger.debug('Periodic sync: skipped (a sync is already in progress)');
           } else {
-            logger.error('Periodic sync: Failed:', error);
+            logger.error('Periodic sync: Failed:', errorDiagnostic(error));
           }
         }
         // The sync above can run for a minute; the session may be gone now.
@@ -943,13 +945,13 @@ export class RealtimeManager extends EventEmitter {
       // Fire-and-forget so a slow source sync never stalls the IDLE handler.
       const sources = (result.relinkedFromFolders || []).filter((f) => f && f !== folderPath);
       if (epoch === this.epoch && this.onSyncRequest && sources.length > 0) {
-        logger.info(`Realtime: move-back into ${folderPath} — reconciling source folder(s): ${sources.join(', ')}`);
+        logger.info(`Realtime: move-back into ${folderLogLabel(folderPath)} — reconciling source folder(s): ${sources.map((s) => folderLogLabel(s)).join(', ')}`);
         void this.onSyncRequest(sources).catch((err) =>
-          logger.warn(`Realtime: source-folder reconcile after move-back failed: ${(err as Error).message}`),
+          logger.warn(`Realtime: source-folder reconcile after move-back failed: ${failureCause(err)}`),
         );
       }
     } catch (error) {
-      logger.error('Realtime: Error handling new messages:', error);
+      logger.error('Realtime: Error handling new messages:', errorDiagnostic(error));
       if (this.listenerCount('error') > 0) this.emit('error', error as Error);
     }
   }
@@ -1044,7 +1046,7 @@ export class RealtimeManager extends EventEmitter {
       this.folderRecountTimers.delete(folderPath);
       if (epoch !== this.epoch) return;
       void storage.recalculateFolderCounts([folderPath]).catch((err) =>
-        logger.warn(`Realtime: debounced recount failed for ${folderPath}: ${(err as Error).message}`),
+        logger.warn(`Realtime: debounced recount failed for ${folderLogLabel(folderPath)}: ${(err as Error).message}`),
       );
     }, RealtimeManager.FOLDER_RECOUNT_DEBOUNCE_MS));
   }
@@ -1120,7 +1122,7 @@ export class RealtimeManager extends EventEmitter {
         logger.warn('Realtime: folder unread refresh after flag change failed:', err);
       }
     } catch (error) {
-      logger.warn(`Realtime: coalesced flag sync failed for ${folderPath}: ${(error as Error).message}`);
+      logger.warn(`Realtime: coalesced flag sync failed for ${folderLogLabel(folderPath)}: ${failureCause(error)}`);
     } finally {
       this.flagSyncInProgress = false;
     }
@@ -1165,7 +1167,7 @@ export class RealtimeManager extends EventEmitter {
       // Restart monitoring if it was active, or was trying to be
       if (previousFolder) {
         const what = previousMode === 'none' ? 'failed' : previousMode;
-        logger.info(`Realtime: Restarting ${what} monitoring on new client for ${previousFolder} (rt#${this.instanceId})`);
+        logger.info(`Realtime: Restarting ${what} monitoring on new client for ${folderLogLabel(previousFolder)} (rt#${this.instanceId})`);
         await this.startInternal(previousFolder);
       }
     });
@@ -1183,7 +1185,7 @@ export class RealtimeManager extends EventEmitter {
       // startPolling() does an initial poll — a floating rejection here would
       // surface as an unhandled rejection in the main process.
       void this.startPolling(this.monitoredFolder).catch((err) => {
-        logger.warn('Realtime: restart polling after setConfig failed:', err);
+        logger.warn('Realtime: restart polling after setConfig failed:', errorDiagnostic(err));
       });
     }
   }

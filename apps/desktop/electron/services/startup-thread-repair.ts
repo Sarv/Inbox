@@ -13,7 +13,7 @@
  * tick so it's independent of that scheduler's tested behavior.
  */
 
-import { createLogger } from '@sarvinbox/core';
+import { accountLogLabel, createLogger } from '@sarvinbox/core';
 
 import { getStorage, getSyncEngine, getAllAccountRuntimes, getCurrentAccountId } from '../shared';
 
@@ -102,13 +102,13 @@ async function handleAccount(storage: any, accountId: string): Promise<void> {
     recordThreadRepairPass(accountId, t0);
     if (r) {
       const scope = sinceCreatedAt === undefined ? 'full' : 'incremental';
-      logger.info(`[ThreadRepair] ${accountId}: ${scope}, ${r.emailsRetargeted} retargeted, ${r.threadsBefore}->${r.threadsAfter} threads, ${r.iterations} iter (${Date.now() - t0}ms)`);
+      logger.info(`[ThreadRepair] ${accountLogLabel(accountId)}: ${scope}, ${r.emailsRetargeted} retargeted, ${r.threadsBefore}->${r.threadsAfter} threads, ${r.iterations} iter (${Date.now() - t0}ms)`);
     }
   } catch (e) {
     // Leave it OUT of `done` (and unstamped) and clear the throttle so it retries
     // promptly on the next tick rather than waiting out REPAIR_INTERVAL_MS.
     lastRepairAt.delete(storage);
-    logger.warn(`[ThreadRepair] ${accountId} failed (will retry): ${(e as Error).message}`);
+    logger.warn(`[ThreadRepair] ${accountLogLabel(accountId)} failed (will retry): ${(e as Error).message}`);
     return;
   }
 

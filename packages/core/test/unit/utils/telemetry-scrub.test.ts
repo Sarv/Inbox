@@ -103,6 +103,74 @@ describe('redactSecrets', () => {
   });
 });
 
+describe('redactSecrets — the forms it used to miss', () => {
+  // Breaks if an OAuth token, code or key written WITHOUT quotes (a URL, a form
+  // body, a library's message) reaches app.log or a crash report.
+  it.each([
+    ['https://oauth2.example.com/token?access_token=ya29.SECRET1&x=1', 'ya29.SECRET1'],
+    ['grant_type=refresh_token&refresh_token=1//SECRET2&client_id=abc', '1//SECRET2'],
+    ['client_secret=SECRET3&code_verifier=SECRET4', 'SECRET3'],
+    ['client_secret=SECRET3&code_verifier=SECRET4', 'SECRET4'],
+    ['http://127.0.0.1:53682/callback?code=4/0SECRET5&state=STATE6', '4/0SECRET5'],
+    ['http://127.0.0.1:53682/callback?code=4/0SECRET5&state=STATE6', 'STATE6'],
+    ['https://generativelanguage.googleapis.com/v1/models?key=AIzaSECRET7', 'AIzaSECRET7'],
+    ['login failed: password: hunter2SECRET8 rejected', 'hunter2SECRET8'],
+    ['Authorization: Basic dXNlcjpTRUNSRVQ5', 'dXNlcjpTRUNSRVQ5'],
+    ['authorization=Digest SECRET10', 'SECRET10'],
+    ['token=SECRET11; path=/', 'SECRET11'],
+  ])('redacts the unquoted value in %s', (input, secret) => {
+    expect(redactSecrets(input)).not.toContain(secret);
+    expect(redactSecrets(input)).toContain('[REDACTED]');
+  });
+
+  // Breaks if key material or a PKCE verifier written as a config field leaks.
+  it.each(['code_verifier', 'codeVerifier', 'secretKey', 'secret_key', 'privateKey', 'private-key', 'passphrase', 'client_assertion'])(
+    'redacts the quoted %s field',
+    (key) => {
+      expect(redactSecrets(`{"${key}":"leak-me"}`)).toBe(`{"${key}":"[REDACTED]"}`);
+      expect(redactSecrets(`{ ${key}: 'leak-me' }`)).toBe(`{ ${key}: '[REDACTED]' }`);
+    },
+  );
+
+  // Breaks if a provider's error body logged inside an object (JSON within a
+  // JSON string, so every quote is escaped) carries its token out.
+  it('redacts credentials in escaped, nested JSON', () => {
+    const once = '{"body":"{\\"access_token\\":\\"ya29.NESTED1\\",\\"expires_in\\":3599}"}';
+    const out = redactSecrets(once);
+    expect(out).not.toContain('NESTED1');
+    expect(out).toContain('\\"expires_in\\":3599');
+    const twice = '"{\\\\\\"refresh_token\\\\\\":\\\\\\"1//NESTED2\\\\\\"}"';
+    expect(redactSecrets(twice)).not.toContain('NESTED2');
+    // A slash some encoders escape stays inside the value, so the rest of it is redacted too.
+    expect(redactSecrets('{\\"id_token\\":\\"abc\\/NESTED3\\"}')).not.toContain('NESTED3');
+  });
+
+  // Breaks if the wider rules eat the words our own lines write in place of a
+  // secret, or an error code, making app.log useless for triage.
+  it('keeps placeholders, error codes and ordinary words', () => {
+    const text = 'mirror token=yes isGmail=true; token: no; password: set; { name: \'Error\', code: \'ETIMEDOUT\' } exit code=1 bypass=2 prompt_tokens=120';
+    expect(redactSecrets(text)).toBe(text);
+    expect(redactSecrets('Authorization: Bearer abc.def')).toBe('Authorization: Bearer [REDACTED]');
+  });
+
+  // Breaks if a hostile line (a server's message, a long header) stalls the
+  // main thread in the logger: every line of the app passes through here.
+  it('stays linear on long adversarial input', () => {
+    const inputs = [
+      `\\"password\\":\\"${'\\'.repeat(100_000)}`,
+      `password=${'a'.repeat(200_000)}`,
+      `${'password: '.repeat(20_000)}x`,
+      `?code=${'&code='.repeat(20_000)}`,
+      `authorization: basic ${' '.repeat(100_000)}x`,
+    ];
+    for (const input of inputs) {
+      const started = performance.now();
+      redactSecrets(input);
+      expect(performance.now() - started).toBeLessThan(2000);
+    }
+  });
+});
+
 describe('stripUrlQuery', () => {
   // Gemini puts the API key in ?key=; search URLs carry queries and addresses.
   it('drops the query string and fragment and redacts addresses in the path', () => {
@@ -138,6 +206,31 @@ describe('scrubBreadcrumb', () => {
       },
     });
     expect(crumb.message).toBe('moveToSpam for x@y.com'); // input not mutated
+  });
+
+  // Breaks if a fetch/XHR breadcrumb ships the query string Sentry keeps beside
+  // the URL it already cut (`http.query`: API keys, OAuth codes, search words),
+  // which the privacy policy says is stripped.
+  it('drops http.query and http.fragment, which hold a URL query of their own', () => {
+    const crumb = {
+      category: 'fetch',
+      data: {
+        method: 'GET',
+        url: 'https://generativelanguage.googleapis.com/v1/models',
+        'http.query': '?key=AIzaSECRET&q=invoice%20acme',
+        'http.fragment': '#access_token=ya29.SECRET',
+        status_code: 200,
+        nested: { query: 'from:boss@example.com', query_string: 'a=b' },
+      },
+    };
+    const out = scrubBreadcrumb(crumb);
+    expect(out.data).toEqual({
+      method: 'GET',
+      url: 'https://generativelanguage.googleapis.com/v1/models',
+      status_code: 200,
+      nested: {},
+    });
+    expect(JSON.stringify(out)).not.toContain('SECRET');
   });
 
   it('passes through a breadcrumb with no message or data', () => {
@@ -263,6 +356,16 @@ describe('scrubEvent — the whole event, addresses AND secrets', () => {
     const event = { contexts: { imap: { account: 'me@gmail.com' } }, tags: { account: 'me@gmail.com' } };
     scrubEvent(event);
     expect(event).toEqual({ contexts: { imap: { account: 'me@gmail.com' } }, tags: { account: 'me@gmail.com' } });
+  });
+});
+
+describe('scrubText — account ids', () => {
+  // Breaks if a log-line breadcrumb carries an account id (acct-<local part>-
+  // <domain>--<host>) to Sentry, spelling out the owner's address.
+  it('replaces account ids with their label', () => {
+    const out = scrubText('[Backfill] skipping acct-jane-doe-example-com--imap-example-com — churning');
+    expect(out).not.toContain('jane-doe');
+    expect(out).toMatch(/skipping acct#[0-9a-f]{8} — churning/);
   });
 });
 

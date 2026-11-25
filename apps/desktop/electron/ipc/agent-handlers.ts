@@ -6,7 +6,7 @@
  */
 
 import type { UserActionType, ActionSource } from '@sarvinbox/core';
-import { createLogger, setEmailReadFlag } from '@sarvinbox/core';
+import { accountLogLabel, createLogger, setEmailReadFlag } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { openAccountStorages, requireNamedOrActiveStorage, requireTargetAccountId } from '../services/account-target';
@@ -97,9 +97,9 @@ function runBackfillForNewAccounts(limit: number): void {
       const n = (store as any).getRepositories().agent.requeueRecentInboxForAgent(limit);
       done.push(id);
       changed = true;
-      logger.info(`[Agent] AI Assist on — re-queued ${n} existing Inbox emails for account ${id}`);
+      logger.info(`[Agent] AI Assist on — re-queued ${n} existing Inbox emails for account ${accountLogLabel(id)}`);
     } catch (e) {
-      logger.error(`[Agent] backfill re-queue failed for account ${id}:`, e);
+      logger.error(`[Agent] backfill re-queue failed for account ${accountLogLabel(id)}:`, e);
     }
   }
   if (changed) saveAgentConfig({ backfillRequeuedAccounts: done });

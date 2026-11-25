@@ -1,4 +1,4 @@
-import { addTag, GMAIL_CLASSIFICATION_CATEGORY_SLUGS, SARV_LABEL_PARENT } from '@sarvinbox/core';
+import { accountLogLabel, addTag, GMAIL_CLASSIFICATION_CATEGORY_SLUGS, SARV_LABEL_PARENT } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -557,7 +557,8 @@ describe('token trace logging', () => {
     expect(h.log.trace).toEqual(expect.arrayContaining([
       expect.stringContaining('token=yes (a@gmail.com)'),
       expect.stringContaining('no gmail OAuth grant for b@gmail.com'),
-      expect.stringContaining('no address for acct=acct-c'),
+      // Changed deliberately (log privacy): the account id is written as its label.
+      expect.stringContaining(`no address for acct=${accountLogLabel('acct-c')}`),
       expect.stringContaining('token=no (d@gmail.com)'),
       expect.stringContaining('no address for acct=default'),
     ]));
@@ -614,7 +615,9 @@ describe('mirrorCategoryLabels (a freshly categorized mail)', () => {
   // Transient: a failed refresh labels plain for now; the next mirror after
   // the refresh recovers colours the label with B's own grant. The refresh
   // here rejects with a bare string, not an Error, and the warning must still
-  // say whose token failed and why.
+  // say whose token failed. Changed deliberately (log privacy): it says why by
+  // the failure's kind only (failureCause), and a bare string's kind is
+  // `string` — its text could be anything, so it is not written.
   it('falls back to plain labels while the refresh fails, then colours on recovery', async () => {
     const a = addAccount({ id: 'acct-a', email: 'a@gmail.com', auth: 'oauth' });
     const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
@@ -622,7 +625,7 @@ describe('mirrorCategoryLabels (a freshly categorized mail)', () => {
     await mirrorCategoryLabels(b.storage, b.emails[0], ['travel']);
     expect(names(b)).toEqual([PARENT, label('Travel')]);
     expect(coloured(b)).toEqual([]);
-    expect(h.log.warn.some((l) => l.includes('token fetch failed for b@gmail.com') && l.includes('ETIMEDOUT'))).toBe(true);
+    expect(h.log.warn.some((l) => l.includes('token fetch failed for b@gmail.com') && l.includes('string'))).toBe(true);
 
     h.refreshFailing.clear();
     await mirrorCategoryLabels(b.storage, b.emails[0], ['travel']);

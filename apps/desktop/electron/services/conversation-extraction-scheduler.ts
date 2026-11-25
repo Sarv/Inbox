@@ -36,6 +36,7 @@
  */
 
 import {
+  accountLogLabel,
   FIRST_SPLIT_MAX_ATTEMPTS,
   FIRST_SPLIT_VERSION,
   createLogger,
@@ -148,7 +149,7 @@ async function nominateCandidates(): Promise<void> {
       // again next pass.
       if (noEvidence.length > 0) retired += storage.skipFirstSplits(noEvidence, now);
     } catch (error) {
-      logger.warn(`nominate acct=${accountId} failed: ${(error as Error)?.message ?? error}`);
+      logger.warn(`nominate acct=${accountLogLabel(accountId)} failed: ${(error as Error)?.message ?? error}`);
     }
   }
   // The renderer re-nominates nothing it acted on, but a thread it cannot

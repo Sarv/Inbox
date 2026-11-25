@@ -15,6 +15,7 @@
  */
 
 import {
+  accountLogLabel,
   SendQueue,
   nextDrainDelayMs,
   type SendFn,
@@ -215,7 +216,7 @@ export async function drainOutboxForAccount(accountId: string): Promise<void> {
     await q.processQueue();
     notifyOutboxChanged();
   } catch (e) {
-    logger.error('[Outbox] Per-account drain failed:', accountId, e);
+    logger.error('[Outbox] Per-account drain failed:', accountLogLabel(accountId), e);
   }
 }
 

@@ -7,8 +7,9 @@
  * from a user's mailbox are mailbox data (Google's Limited Use policy covers
  * them for Gmail accounts), so they must not reach a crash-reporting vendor.
  * The shapes here are structural — no Sentry types — so both the Electron main
- * process and the renderer share ONE implementation. No imports: the renderer
- * deep-imports this file (`@sarvinbox/core/telemetry-scrub`).
+ * process and the renderer share ONE implementation. The renderer deep-imports
+ * this file (`@sarvinbox/core/telemetry-scrub`), so it imports only modules
+ * that import nothing themselves (`log-labels`, and its `fnv1a`).
  *
  * Why a regex and not a library: the job is to FIND addresses in free text, not
  * to parse an address header (`email-addresses` does that and can't scan
@@ -18,6 +19,8 @@
  * redacting a false positive loses nothing, missing an address leaks it.
  */
 
+import { redactAccountIds } from './log-labels';
+
 const EMAIL_RE = /[A-Za-z0-9._%+'-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+/g;
 
 export const REDACTED_EMAIL = '[email]';
@@ -26,6 +29,14 @@ export const REDACTED_EMAIL = '[email]';
 export function redactEmailAddresses(text: string): string {
   return text.replace(EMAIL_RE, REDACTED_EMAIL);
 }
+
+// The credential names, as one alternation: config keys, OAuth fields (the PKCE
+// verifier and a client assertion are as good as the secret they stand for),
+// key material (`secretKey`, `privateKey`, a key's `passphrase`) and header
+// names. Matched case-insensitively, `_`/`-` optional between words.
+const SECRET_NAMES =
+  'password|passwd|pass|passphrase|access[_-]?token|refresh[_-]?token|id[_-]?token|token|authorization|' +
+  'api[_-]?key|client[_-]?secret|client[_-]?assertion|code[_-]?verifier|secret[_-]?key|private[_-]?key|secret';
 
 // Credential-ish key/value pairs, matched in both JSON (`"password":"x"`) and
 // util.inspect (`password: 'x'`) forms, so a stray console.log(config) or an
@@ -40,8 +51,46 @@ export function redactEmailAddresses(text: string): string {
 // unterminated value full of backslashes (`"password":"\\a\\a…`) backtracked
 // exponentially — about 3 s of main-thread stall at 40 of them. What matches is
 // unchanged (fuzz-compared against the old pattern); only the blow-up is gone.
-const SECRET_KV_RE = /(["']?(?:password|passwd|pass|access[_-]?token|refresh[_-]?token|id[_-]?token|token|authorization|api[_-]?key|client[_-]?secret|secret)["']?\s*[:=]\s*)(["'`])(?:\\.|(?!\2)[^\\\n\r\u2028\u2029]|\\(?=\2))*\2/gi;
+const SECRET_KV_RE = new RegExp(
+  `(["']?(?:${SECRET_NAMES})["']?\\s*[:=]\\s*)(["'\`])(?:\\\\.|(?!\\2)[^\\\\\\n\\r\\u2028\\u2029]|\\\\(?=\\2))*\\2`,
+  'gi',
+);
+
+// The same pairs inside JSON that was itself put in a JSON string, so every
+// quote is escaped: `"body":"{\"access_token\":\"ya29…\"}"` (a provider's
+// error body logged inside an object). Up to three backslashes before each
+// quote cover one or two levels of nesting. The value is every character up
+// to the next escaped quote; a backslash that does not start one (`\/`, as
+// some encoders write a slash) stays part of the value. Each character can
+// only be read one way and every lookahead is bounded, so it is linear.
+const ESCAPED_SECRET_KV_RE = new RegExp(
+  `(\\\\{1,3}"(?:${SECRET_NAMES})\\\\{1,3}"\\s*:\\s*\\\\{1,3}")(?:[^\\\\"\\n\\r]|\\\\(?!\\\\{0,3}"))*`,
+  'gi',
+);
+
+// The same names written without quotes: `access_token=ya29…` in a URL or a
+// form body, `password: hunter2` in a library's message. The value runs to the
+// next space, separator or quote. A word we write ourselves in place of a
+// value (`token=yes`, `password: set`) is not a secret and is left as is.
+// An Authorization scheme word (`Bearer`, `Basic`) is not the credential
+// either: the rules above already replaced what follows it.
+const PLACEHOLDER = '(?:yes|no|true|false|null|undefined|none|set|unset|missing|present|absent|\\[REDACTED\\])(?![^\\s&,;"\'`<>)\\]}])';
+const AUTH_SCHEME_WORD = '(?:bearer|basic|digest|ntlm|negotiate|token)\\s';
+const UNQUOTED_SECRET_RE = new RegExp(
+  `(\\b(?:${SECRET_NAMES})\\s*[:=]\\s*)(?![\\s"'\`]|${PLACEHOLDER}|${AUTH_SCHEME_WORD})[^\\s&,;"'\`<>)\\]}]+`,
+  'gi',
+);
+
+// Names that are only secret in a URL's query or a form body, where they hold
+// an OAuth authorization `code`, an API `key` (Gemini's `?key=`), a request
+// `sig`nature or a client `assertion`. Not matched elsewhere: `code` is also
+// every error code we log (`code: 'ETIMEDOUT'`).
+const QUERY_SECRET_RE = /([?&;](?:code|key|sig|signature|x-amz-signature|x-goog-signature|assertion|state)=)[^&\s#"'`<>]+/gi;
+
 const BEARER_RE = /\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi;
+// Every other way an Authorization header carries a credential: `Basic`
+// (base64 user:password), `Digest`, `NTLM`, `Negotiate`, a bare `Token`.
+const AUTH_SCHEME_RE = /(\bauthorization\b["']?\s*[:=]\s*["']?(?:basic|digest|ntlm|negotiate|token)\s+)[^\s"',;]+/gi;
 
 export const REDACTED_SECRET = '[REDACTED]';
 
@@ -54,12 +103,19 @@ export const REDACTED_SECRET = '[REDACTED]';
 export function redactSecrets(s: string): string {
   return s
     .replace(SECRET_KV_RE, (_m, key: string, quote: string) => `${key}${quote}${REDACTED_SECRET}${quote}`)
-    .replace(BEARER_RE, `$1${REDACTED_SECRET}`);
+    .replace(ESCAPED_SECRET_KV_RE, `$1${REDACTED_SECRET}`)
+    .replace(AUTH_SCHEME_RE, `$1${REDACTED_SECRET}`)
+    .replace(BEARER_RE, `$1${REDACTED_SECRET}`)
+    .replace(UNQUOTED_SECRET_RE, `$1${REDACTED_SECRET}`)
+    .replace(QUERY_SECRET_RE, `$1${REDACTED_SECRET}`);
 }
 
-/** Secrets, then email addresses: what every text in a crash report gets. */
+/**
+ * Secrets, then email addresses, then account ids (which spell out an
+ * address, see accountLogLabel): what every text in a crash report gets.
+ */
 export function scrubText(text: string): string {
-  return redactEmailAddresses(redactSecrets(text));
+  return redactAccountIds(redactEmailAddresses(redactSecrets(text)));
 }
 
 /**
@@ -99,9 +155,19 @@ function scrubValue(key: string, value: unknown, depth: number): unknown {
   return scrubRecord(value as Record<string, unknown>, depth - 1);
 }
 
+// Fields that hold a URL's query string or fragment on their own, which no
+// URL key above sees: Sentry's fetch and XHR breadcrumbs keep `http.query`
+// (`?key=…&q=…`) and `http.fragment` beside a `url` it has already cut. They
+// are dropped, as the request's `query_string` is: a query carries API keys,
+// OAuth codes, search words and addresses, and triage needs the path only.
+const QUERY_KEY_RE = /^(?:http\.)?(?:query|fragment)$|^query[_-]?string$/i;
+
 function scrubRecord(record: Record<string, unknown>, depth = MAX_DEPTH): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(record)) out[k] = scrubValue(k, v, depth);
+  for (const [k, v] of Object.entries(record)) {
+    if (QUERY_KEY_RE.test(k)) continue;
+    out[k] = scrubValue(k, v, depth);
+  }
   return out;
 }
 
@@ -113,7 +179,7 @@ export interface ScrubbableBreadcrumb {
 /**
  * A copy of the breadcrumb with addresses and secrets redacted (in its message
  * and, by value and by field name, all through its data) and URL queries
- * dropped.
+ * dropped — from its URL fields and as fields of their own (`http.query`).
  */
 export function scrubBreadcrumb<T extends ScrubbableBreadcrumb>(crumb: T): T {
   const out: T = { ...crumb };

@@ -18,7 +18,7 @@
  *     renderer-side (2s between LLM calls).
  */
 
-import { getEventBus, createLogger } from '@sarvinbox/core';
+import { accountLogLabel, getEventBus, createLogger } from '@sarvinbox/core';
 
 import { getMainWindow, getStorage, getAllAccountRuntimes } from '../shared';
 const logger = createLogger('contact-enrichment-scheduler');
@@ -279,7 +279,7 @@ async function runTick(manual = false): Promise<number> {
         ...(excludeContactIds.length ? { excludeContactIds } : {}),
       });
     } catch (e) {
-      logger.error(`[EnrichmentScheduler] list candidates failed (acct=${id ?? 'active'}):`, e);
+      logger.error(`[EnrichmentScheduler] list candidates failed (acct=${accountLogLabel(id, 'active')}):`, e);
       continue;
     }
     if (generation !== tickGeneration) return 0;
@@ -294,7 +294,7 @@ async function runTick(manual = false): Promise<number> {
     // Lock already held from the claim above; refresh the start time so the
     // stale-lock timeout measures from the actual dispatch, not the claim.
     batchStartedAt = Date.now();
-    logger.info(`[EnrichmentScheduler] dispatching batch of ${candidates.length} contacts (acct=${id ?? 'active'})`);
+    logger.info(`[EnrichmentScheduler] dispatching batch of ${candidates.length} contacts (acct=${accountLogLabel(id, 'active')})`);
     activeBatch = {
       batchId: `${Date.now()}-${++batchSequence}`,
       contactIds: candidates.map((c) => c.id),

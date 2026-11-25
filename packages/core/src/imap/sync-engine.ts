@@ -9,13 +9,14 @@ import { IMAPError, type IMAPConfig, type IIMAPClient, type IMAPFolder, type IMA
 import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
-import { errorDiagnostic } from '../utils/error-diagnostic';
+import { errorDiagnostic, failureCause } from '../utils/error-diagnostic';
 import {
   decideMidSyncRecount,
   refreshCountsForFolders,
   withFiledCounts,
   type MidSyncRecountGate,
 } from '../utils/folder-counts';
+import { folderLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import { detectProvider, type EmailProvider } from '../utils/provider';
@@ -396,7 +397,7 @@ export class SyncEngine {
       try {
         await this.realtimeManager.updateClient(this.connectionManager.client);
       } catch (error) {
-        logger.error('Failed to restart realtime after reconnect:', error);
+        logger.error('Failed to restart realtime after reconnect:', errorDiagnostic(error));
       }
 
       // Process pending operations after reconnect. WRAPPED: this handler is an
@@ -409,7 +410,7 @@ export class SyncEngine {
         try {
           await this.operationQueue.processQueue();
         } catch (error) {
-          logger.warn(`Post-reconnect operation-queue drain failed (will retry): ${(error as Error)?.message ?? error}`);
+          logger.warn(`Post-reconnect operation-queue drain failed (will retry): ${failureCause(error)}`);
         }
       }
 
@@ -645,7 +646,7 @@ export class SyncEngine {
       if (this.connectionPool?.isInitialized()) { await this.connectionPool.withConnection(run); return; }
       await run(this.connectionManager.client);
     } catch (err) {
-      logger.warn(`setMailboxSubscribed(${path}, ${subscribed}) failed: ${(err as Error)?.message ?? err}`);
+      logger.warn(`setMailboxSubscribed(${folderLogLabel(path)}, ${subscribed}) failed: ${failureCause(err)}`);
     }
   }
 
@@ -802,7 +803,7 @@ export class SyncEngine {
       try {
         repaired += await this.repairFolderBatch(folderPath, records);
       } catch (error) {
-        logger.warn(`Repair: folder ${folderPath} failed: ${(error as Error)?.message ?? error}`);
+        logger.warn(`Repair: folder ${folderLogLabel(folderPath)} failed: ${failureCause(error)}`);
       }
     }
     logger.info(`Repair: corrected ${repaired}/${incomplete.length} incomplete emails`);
@@ -918,10 +919,10 @@ export class SyncEngine {
         this.pendingSourceReconcile.clear();
         for (const src of sources) {
           try {
-            logger.info(`[SyncEngine] move-back source reconcile: ${src}`);
+            logger.info(`[SyncEngine] move-back source reconcile: ${folderLogLabel(src)}`);
             await this.refreshFolderFlags(src);
           } catch (err) {
-            logger.warn(`[SyncEngine] move-back source reconcile failed for ${src}: ${(err as Error).message}`);
+            logger.warn(`[SyncEngine] move-back source reconcile failed for ${folderLogLabel(src)}: ${failureCause(err)}`);
           }
         }
       }
@@ -965,7 +966,7 @@ export class SyncEngine {
     this.syncDidMutateCounts = false;
     this.emitProgress();
 
-    logger.info(`Syncing ${selectableFolders.length} folders: ${selectableFolders.map(f => f.path).join(', ')}`);
+    logger.info(`Syncing ${selectableFolders.length} folders: ${selectableFolders.map(f => folderLogLabel(f.path)).join(', ')}`);
 
     const skipRecentMs = (options.skipRecentMinutes || 0) * 60 * 1000;
 
@@ -980,7 +981,7 @@ export class SyncEngine {
 
       // Per-folder policy: a folder the user turned OFF is skipped entirely.
       if (!isFolderSyncEnabled(storedFolder)) {
-        logger.info(`Skipping ${folder.path} — sync disabled for this folder`);
+        logger.info(`Skipping ${folderLogLabel(folder.path)} — sync disabled for this folder`);
         this.syncState.completeFolder(folder.path);
         continue;
       }
@@ -989,7 +990,7 @@ export class SyncEngine {
       if (skipRecentMs > 0 && storedFolder?.lastSyncTime) {
         const timeSinceSync = Date.now() - storedFolder.lastSyncTime * 1000;
         if (timeSinceSync < skipRecentMs) {
-          logger.info(`Skipping ${folder.path} - synced ${Math.round(timeSinceSync / 60000)} min ago`);
+          logger.info(`Skipping ${folderLogLabel(folder.path)} - synced ${Math.round(timeSinceSync / 60000)} min ago`);
           this.syncState.completeFolder(folder.path);
           continue;
         }
@@ -997,7 +998,7 @@ export class SyncEngine {
 
       // Skip unchanged
       if (options.skipUnchanged && storedFolder && !await this.folderSyncer.hasChanges(client, storedFolder)) {
-        logger.info(`Skipping unchanged: ${folder.path}`);
+        logger.info(`Skipping unchanged: ${folderLogLabel(folder.path)}`);
         this.syncState.completeFolder(folder.path);
         continue;
       }
@@ -1128,7 +1129,7 @@ export class SyncEngine {
           this.syncState.setFolderError(folder.path, result.error || new Error('Sync failed'));
         }
       } catch (error) {
-        logger.error(`Parallel sync error for ${folder.path}:`, error);
+        logger.error(`Parallel sync error for ${folderLogLabel(folder.path)}:`, errorDiagnostic(error));
         this.syncState.setFolderError(folder.path, error as Error);
       }
     });
@@ -1271,7 +1272,7 @@ export class SyncEngine {
       await this.reselectMonitoredFolder();
       return r;
     } catch (error) {
-      logger.warn(`[GmailLabels] repair of ${folderPath} failed (isolated): ${(error as Error).message}`);
+      logger.warn(`[GmailLabels] repair of ${folderLogLabel(folderPath)} failed (isolated): ${failureCause(error)}`);
       return null;
     }
   }
@@ -1307,9 +1308,9 @@ export class SyncEngine {
       return { fetched: r.fetched, inserted: r.inserted, done: r.done };
     } catch (error) {
       if (this.connectionManager.isConnectionError(error)) {
-        logger.warn(`Backfill ${folderPath}: connection lost — will retry next tick`);
+        logger.warn(`Backfill ${folderLogLabel(folderPath)}: connection lost — will retry next tick`);
       } else {
-        logger.warn(`Backfill ${folderPath} failed: ${(error as Error).message}`);
+        logger.warn(`Backfill ${folderLogLabel(folderPath)} failed: ${failureCause(error)}`);
       }
       return null;
     }
@@ -1346,7 +1347,7 @@ export class SyncEngine {
       return r;
     } catch (error) {
       if (!this.connectionManager.isConnectionError(error)) {
-        logger.warn(`Background deletion reconcile ${folderPath} failed: ${(error as Error).message}`);
+        logger.warn(`Background deletion reconcile ${folderLogLabel(folderPath)} failed: ${failureCause(error)}`);
       }
       return null;
     }
@@ -1441,7 +1442,7 @@ export class SyncEngine {
           // failure (not per message): a drain that silently returned null on
           // every tick is how an INBOX stayed days behind with nothing logged.
           pace.size = fetchSizeAfterFailure(size, bounds.min);
-          logger.warn(`Drain ${folderPath}: a fetch of ${sub.length} header(s) failed (${(error as Error)?.message ?? error}); next batch ${pace.size}`);
+          logger.warn(`Drain ${folderLogLabel(folderPath)}: a fetch of ${sub.length} header(s) failed (${failureCause(error)}); next batch ${pace.size}`);
           // Batches already stored this call are real progress: report them
           // (the unfetched UIDs stay untried and count as remaining) instead of
           // throwing the whole call away.
@@ -1488,12 +1489,12 @@ export class SyncEngine {
       }
       if (result.inserted > 0) {
         try { await this.storage.recalculateFolderCounts([folderPath]); } catch { /* recount best-effort */ }
-        logger.info(`Drain ${folderPath}: +${result.inserted} downloaded (${result.remaining} still missing)`);
+        logger.info(`Drain ${folderLogLabel(folderPath)}: +${result.inserted} downloaded (${result.remaining} still missing)`);
       }
       return result;
     } catch (error) {
       if (!this.connectionManager.isConnectionError(error)) {
-        logger.warn(`Drain ${folderPath} failed: ${(error as Error).message}`);
+        logger.warn(`Drain ${folderLogLabel(folderPath)} failed: ${failureCause(error)}`);
       }
       return null;
     }
@@ -1582,12 +1583,12 @@ export class SyncEngine {
       }
       if (result.inserted > 0) {
         try { await this.storage.recalculateFolderCounts([folderPath]); } catch { /* recount best-effort */ }
-        logger.info(`Server search ${folderPath}: matched ${result.matched}, +${result.inserted} downloaded`);
+        logger.info(`Server search ${folderLogLabel(folderPath)}: matched ${result.matched}, +${result.inserted} downloaded`);
       }
       return result;
     } catch (error) {
       if (!this.connectionManager.isConnectionError(error)) {
-        logger.warn(`Server search ${folderPath} failed: ${(error as Error).message}`);
+        logger.warn(`Server search ${folderLogLabel(folderPath)} failed: ${failureCause(error)}`);
       }
       return null;
     }
@@ -1620,7 +1621,7 @@ export class SyncEngine {
       return await this.connectionPool.withConnection(doFetch);
     } catch (error) {
       if (!this.connectionManager.isConnectionError(error)) {
-        logger.warn(`[BulkBackfill] classify ${folderPath} failed: ${(error as Error).message}`);
+        logger.warn(`[BulkBackfill] classify ${folderLogLabel(folderPath)} failed: ${failureCause(error)}`);
       }
       return bulk;
     }
@@ -1666,7 +1667,7 @@ export class SyncEngine {
       return await this.connectionPool.withConnection(doFetch);
     } catch (error) {
       if (!this.connectionManager.isConnectionError(error)) {
-        logger.warn(`[HeaderBackfill] fetch ${folderPath} failed: ${(error as Error).message}`);
+        logger.warn(`[HeaderBackfill] fetch ${folderLogLabel(folderPath)} failed: ${failureCause(error)}`);
       }
       return out;
     }
@@ -1736,7 +1737,7 @@ export class SyncEngine {
     try {
       await this.connectionManager.client.selectFolder(folder);
     } catch (err) {
-      logger.debug('Re-select of monitored folder failed (ignored):', err);
+      logger.debug('Re-select of monitored folder failed (ignored):', errorDiagnostic(err));
     }
   }
 
@@ -2151,7 +2152,7 @@ export class SyncEngine {
               // than wait for the 30s poll. Best-effort; the poll is the fallback.
               try { getEventBus().emit(createEvent.emailBodyReady(item.emailId)); } catch { /* non-fatal */ }
             } else {
-              logger.trace(`Body fetch returned no body: ${item.emailId} (UID ${item.uid} in ${item.folderPath})`);
+              logger.trace(`Body fetch returned no body: ${item.emailId} (UID ${item.uid} in ${folderLogLabel(item.folderPath)})`);
             }
             this.bodyFetchFailures.delete(item.emailId); // Clear failure count on success
             // The FETCH round-tripped (a body, or a definitive "no body" verdict)
@@ -2202,7 +2203,7 @@ export class SyncEngine {
             if (this.connectionManager.isRateLimited(error) || this.connectionManager.isQuotaError(error)) {
               const base = Math.min(getSuggestedBackoffMs(error) ?? 60_000, 5 * 60_000);
               const backoff = Math.round(base * (0.75 + Math.random() * 0.5));
-              logger.warn(`Body fetch throttled/quota for ${item.emailId} — backing off ${backoff}ms (not counted as failure): ${(error as Error)?.message ?? error}`);
+              logger.warn(`Body fetch throttled/quota for ${item.emailId} — backing off ${backoff}ms (not counted as failure): ${failureCause(error)}`);
               this.requeueBodyFetch(item);
               this.scheduleBodyFetchResume(backoff);
               return 'rate_limited';
@@ -2234,7 +2235,7 @@ export class SyncEngine {
                   // about throughput, not about whether the message exists —
                   // resolving null here handed the scheduler a fake verdict and
                   // was one of the two paths that tagged live mail `|nobody|`.
-                  logger.warn(`Body fetch timed out ${count}x for ${item.emailId} — deferring (UID ${item.uid} in ${item.folderPath})`);
+                  logger.warn(`Body fetch timed out ${count}x for ${item.emailId} — deferring (UID ${item.uid} in ${folderLogLabel(item.folderPath)})`);
                   const deferred = createDeferredFetchError(`${count} consecutive timeouts`);
                   for (const l of item.listeners) l.reject(deferred);
                   item.listeners.length = 0;
@@ -2267,7 +2268,7 @@ export class SyncEngine {
             if ((error as { code?: string })?.code === 'SELECT_FOLDER_ERROR') {
               if (!this.unselectableFolders.has(item.folderPath)) {
                 this.unselectableFolders.set(item.folderPath, true);
-                logger.warn(`Body fetch: folder "${item.folderPath}" would not open — skipping its body fetches for ${UNSELECTABLE_FOLDER_TTL_MS / 60_000}m (${(error as Error)?.message ?? error})`);
+                logger.warn(`Body fetch: folder "${folderLogLabel(item.folderPath)}" would not open — skipping its body fetches for ${UNSELECTABLE_FOLDER_TTL_MS / 60_000}m (${failureCause(error)})`);
               }
               // Everyone waiting on this folder is told DEFERRED, not handed the
               // raw server error: a `NO SELECT` says nothing about any single
@@ -2291,7 +2292,7 @@ export class SyncEngine {
             const count = (this.bodyFetchFailures.get(item.emailId) || 0) + 1;
             // lru-cache caps size and evicts the least-recently-used entry.
             this.bodyFetchFailures.set(item.emailId, count);
-            logger.warn(`Body fetch failed for ${item.emailId} (attempt ${count}/${this.MAX_BODY_FETCH_RETRIES}): ${(error as Error)?.message ?? error}`);
+            logger.warn(`Body fetch failed for ${item.emailId} (attempt ${count}/${this.MAX_BODY_FETCH_RETRIES}): ${failureCause(error)}`);
             for (const l of item.listeners) l.reject(error);
             item.listeners.length = 0; // Release listener references
           }
@@ -2871,7 +2872,7 @@ export class SyncEngine {
 
       return uids.length > 0 ? uids[0] : null;
     } catch (error) {
-      logger.error('Failed to fetch UID by message ID:', error);
+      logger.error('Failed to fetch UID by message ID:', errorDiagnostic(error));
       return null;
     }
   }
@@ -3031,7 +3032,7 @@ export class SyncEngine {
       } catch (error) {
         // Deciding on a stale count is still better than not deciding.
         logger.warn(
-          `Could not recount folders sharing a role (${contested.join(', ')}): ${(error as Error).message}`,
+          `Could not recount folders sharing a role (${contested.map((p) => folderLogLabel(p)).join(', ')}): ${(error as Error).message}`,
         );
       }
     }
@@ -3053,7 +3054,7 @@ export class SyncEngine {
       const decision =
         aliases.size === 0
           ? 'collapsing none (the server has not proven any two are one mailbox)'
-          : `skipping ${[...aliases.keys()].join(', ')}`;
+          : `skipping ${[...aliases.keys()].map((p) => folderLogLabel(p)).join(', ')}`;
       const summary = `${roles} — ${decision}`;
       if (summary !== this.lastDuplicateRoleSummary) {
         this.lastDuplicateRoleSummary = summary;
@@ -3091,11 +3092,11 @@ export class SyncEngine {
       try {
         const moved = await this.storage.refileLocalRows(from, to);
         if (moved > 0) {
-          logger.info(`Re-filed ${moved} local-only message(s) from ${aliasPath} to ${canonicalPath}`);
+          logger.info(`Re-filed ${moved} local-only message(s) from ${folderLogLabel(aliasPath)} to ${folderLogLabel(canonicalPath)}`);
         }
       } catch (error) {
         logger.warn(
-          `Could not re-file local rows from ${aliasPath} to ${canonicalPath}: ${(error as Error).message}`,
+          `Could not re-file local rows from ${folderLogLabel(aliasPath)} to ${folderLogLabel(canonicalPath)}: ${(error as Error).message}`,
         );
       }
     }

@@ -19,6 +19,7 @@ const h = vi.hoisted(() => ({
   baseSend: vi.fn(async () => ({ statusCode: 200 })),
   baseFlush: vi.fn(async () => true),
   offlineWrapped: [] as unknown[],
+  setUser: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -37,7 +38,7 @@ vi.mock('@sentry/electron/main', () => ({
   flush: vi.fn(async () => true),
   setTag: vi.fn(),
   setContext: vi.fn(),
-  setUser: vi.fn(),
+  setUser: h.setUser,
   // The real base transport posts over the network: a recorder stands in.
   makeElectronTransport: () => ({ send: h.baseSend, flush: h.baseFlush }),
   // The real offline wrapper queues on disk around the base it is given; this
@@ -55,6 +56,7 @@ h.userData = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const PREF = join(dir, 'crash-reports.json');
+const ID_FILE = join(dir, 'crash-report-id');
 
 type SentryModule = typeof import('../../../electron/sentry');
 let sentry: SentryModule;
@@ -78,6 +80,8 @@ const configuredTransport = () =>
 
 beforeEach(async () => {
   rmSync(PREF, { recursive: true, force: true });
+  rmSync(ID_FILE, { recursive: true, force: true });
+  h.setUser.mockClear();
   h.baseSend.mockClear();
   h.baseFlush.mockClear();
   h.offlineWrapped.length = 0;
@@ -199,6 +203,60 @@ describe('Sentry privacy filters (main)', () => {
     const report = vi.mocked(setSlowQueryReporter).mock.calls.at(-1)![0]!;
     report({ label: 'getByFolder', ms: 900, rows: 3, totalEmails: 10, meta: { folder: 'Clients/Jane Doe', n: 2, scoped: true } });
     expect(h.captureMessage.mock.calls.at(-1)![1].extra).toEqual({ ms: 900, rows: 3, totalEmails: 10, n: 2, scoped: true });
+  });
+});
+
+describe('which installation a report came from', () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  // Breaks if the report's user id is derived from the address again: a
+  // truncated SHA-256 of it is confirmed by anyone holding a guess at it.
+  it('sets the user to a random id kept in userData, the same across restarts', async () => {
+    const first = h.setUser.mock.calls.at(-1)?.[0] as { id: string };
+    expect(first.id).toMatch(UUID);
+    expect(readFileSync(ID_FILE, 'utf8').trim()).toBe(first.id);
+
+    h.setUser.mockClear();
+    await freshInit();
+    expect(h.setUser).toHaveBeenCalledWith({ id: first.id });
+  });
+
+  // Breaks if connecting an account puts anything about its address on the
+  // report (the old code set the user to a hash of it on every connect).
+  it('identifyClient tags the server and never sets a user', () => {
+    h.setUser.mockClear();
+    sentry.identifyClient({ provider: 'gmail', host: 'imap.gmail.com', port: 993 });
+    expect(h.setUser).not.toHaveBeenCalled();
+  });
+
+  // Breaks if a malformed or planted file is trusted as the id, or the app
+  // fails to start reporting when the id cannot be saved.
+  it('replaces a malformed id file, and makes a per-run id when it cannot save one', async () => {
+    writeFileSync(ID_FILE, 'jane.doe@example.com\n');
+    await freshInit();
+    const replaced = (h.setUser.mock.calls.at(-1)?.[0] as { id: string }).id;
+    expect(replaced).toMatch(UUID);
+    expect(readFileSync(ID_FILE, 'utf8')).not.toContain('jane');
+
+    // A directory squatting on the name: unreadable as a file and unwritable.
+    rmSync(ID_FILE, { force: true });
+    mkdirSync(ID_FILE);
+    h.setUser.mockClear();
+    await freshInit();
+    const perRun = (h.setUser.mock.calls.at(-1)?.[0] as { id: string }).id;
+    expect(perRun).toMatch(UUID);
+    expect(perRun).not.toBe(replaced);
+  });
+
+  // Breaks if a fetch breadcrumb's `http.query` (Sentry keeps the query
+  // beside the URL it cut) reaches Sentry through main's real filter.
+  it('drops http.query and http.fragment from a breadcrumb main lets through', () => {
+    sentry.setCrashReportsEnabled(true);
+    const crumb = sentry.filterBreadcrumb({
+      category: 'fetch',
+      data: { url: 'https://api.example.test/v1/models', 'http.query': '?key=AIzaSECRET', 'http.fragment': '#t=1', status_code: 200 },
+    });
+    expect(crumb).toEqual({ category: 'fetch', data: { url: 'https://api.example.test/v1/models', status_code: 200 } });
   });
 });
 

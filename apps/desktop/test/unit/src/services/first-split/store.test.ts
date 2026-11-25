@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // The run splits real bodies (regions, cleaning) with the DOM.
 import { isUsableSplit, parseFirstSplitParts } from '@sarvinbox/core/first-split';
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core/logger';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -390,11 +391,14 @@ describe('runFirstSplit — the log line of a run that threw', () => {
       expect(await runFirstSplit(B, { trigger: 'manual' }, flaky)).toMatchObject({ state: 'error' });
 
       expect(logs.containing(SENTINEL)).toEqual([]);
-      expect(logs.containing('split acct=acct-a thread=t1 threw')).toEqual([
-        "[WARN] [FirstSplit] split acct=acct-a thread=t1 threw { name: 'Error' }",
+      // Changed deliberately (log privacy): the account id is written as its label.
+      const a = accountLogLabel('acct-a');
+      const b = accountLogLabel('acct-b');
+      expect(logs.containing(`split acct=${a} thread=t1 threw`)).toEqual([
+        `[WARN] [FirstSplit] split acct=${a} thread=t1 threw { name: 'Error' }`,
       ]);
-      expect(logs.containing('split acct=acct-b thread=t1 threw')).toEqual([
-        "[WARN] [FirstSplit] split acct=acct-b thread=t1 threw { name: 'Error', code: 'ETIMEDOUT', status: 503 }",
+      expect(logs.containing(`split acct=${b} thread=t1 threw`)).toEqual([
+        `[WARN] [FirstSplit] split acct=${b} thread=t1 threw { name: 'Error', code: 'ETIMEDOUT', status: 503 }`,
       ]);
     } finally {
       logs.stop();

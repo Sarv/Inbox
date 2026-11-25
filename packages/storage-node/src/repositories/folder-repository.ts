@@ -1,7 +1,7 @@
 // Folder Repository - All folder-related database operations
 
 import type { FolderRecord } from '@sarvinbox/core';
-import { addTag, removeTag, parseTags, buildTags, tagsToImapFlags, imapFlagsToTags, FLAG_TAG_NAMES, createLogger } from '@sarvinbox/core';
+import { addTag, removeTag, parseTags, buildTags, tagsToImapFlags, imapFlagsToTags, FLAG_TAG_NAMES, createLogger, folderLogLabel } from '@sarvinbox/core';
 import type { Statement } from 'better-sqlite3';
 
 import { BaseRepository, type DatabaseAccessor } from './base-repository';
@@ -255,7 +255,7 @@ export class FolderRepository extends BaseRepository {
     });
     move(rows);
 
-    logger.info(`Re-filed ${rows.length} local-only row(s) from ${from.path} to ${to.path}`);
+    logger.info(`Re-filed ${rows.length} local-only row(s) from ${folderLogLabel(from.path)} to ${folderLogLabel(to.path)}`);
     return rows.length;
   }
 

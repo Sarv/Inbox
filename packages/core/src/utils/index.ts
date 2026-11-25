@@ -36,6 +36,8 @@ export * from './stale-flags';
 export * from './format-bytes';
 export * from './log-aggregator';
 export * from './log-text';
+export * from './log-labels';
+export * from './log-paths';
 export * from './tags';
 export * from './tls';
 export * from './connection-security';

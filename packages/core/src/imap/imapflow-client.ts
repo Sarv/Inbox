@@ -47,7 +47,9 @@ import {
   headerValueFromText,
 } from '../utils/bulk-mail';
 import { resolveConnectionSecurity, starttlsUnavailableMessage } from '../utils/connection-security';
+import { failureCause } from '../utils/error-diagnostic';
 import { GMAIL_CLASSIFICATION_CATEGORY_SLUGS } from '../utils/gmail-labels';
+import { folderLogLabel, labelLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 import { messageIdKey } from '../utils/message-id';
 import { createMutex, type Mutex } from '../utils/mutex';
@@ -88,6 +90,13 @@ const CONNECT_BUDGET_WAIT_MS = 20000;
 const DEFAULT_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 const ATTACHMENT_WIRE_ALLOWANCE = 1024 * 1024;
 const MAX_ATTACHMENT_WIRE_BYTES = DEFAULT_ATTACHMENT_MAX_BYTES * 4 + ATTACHMENT_WIRE_ALLOWANCE;
+
+/**
+ * A message flag for a log line: a system flag (`\Seen`, `\Flagged`) as written,
+ * any keyword as a `label#` hash. Keywords are how categories and tags reach the
+ * server, so a custom one is a name the user chose.
+ */
+const flagLogText = (flag: string): string => (flag.startsWith('\\') ? flag : labelLogLabel(flag));
 
 interface IdleHandlers {
   exists: (data: ExistsEvent) => void;
@@ -571,7 +580,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     if (logger.isLevelEnabled('trace')) {
       void wrapped.then(
         () => logger.trace(`IMAP ${label} (${Date.now() - started}ms)`),
-        (e) => logger.trace(`IMAP ${label} FAILED (${Date.now() - started}ms): ${(e as Error)?.message ?? e}`),
+        (e) => logger.trace(`IMAP ${label} FAILED (${Date.now() - started}ms): ${failureCause(e)}`),
       );
     }
     return wrapped;
@@ -684,7 +693,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     // returns highestModseq — no separate code path needed.
     const status = await this.openFolder(folderPath);
     if (status.highestModseq) {
-      logger.debug(`CONDSTORE: ${folderPath} highestModseq=${status.highestModseq}`);
+      logger.debug(`CONDSTORE: ${folderLogLabel(folderPath)} highestModseq=${status.highestModseq}`);
     }
     return status;
   }
@@ -875,7 +884,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       if (limit <= 0) return null; // unlimited / not meaningful — nothing to show
       return { used, limit };
     } catch (err) {
-      logger.debug(`getQuota failed (ignored): ${(err as Error)?.message ?? err}`); // low-frequency call
+      logger.debug(`getQuota failed (ignored): ${failureCause(err)}`); // low-frequency call
       return null;
     }
   }
@@ -1509,7 +1518,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
 
     if (failedBatches > 0) {
       logger.warn(
-        `Batched FLAGS fetch on ${this.currentFolder}: ${failedBatches} batch(es) failed; `
+        `Batched FLAGS fetch on ${folderLogLabel(this.currentFolder)}: ${failedBatches} batch(es) failed; `
         + `got flags for ${out.length}/${uids.length} uids`,
       );
     }
@@ -1851,12 +1860,12 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     // webmail simply doesn't render.
     const keywords = flags.filter((f) => !f.startsWith('\\'));
     if (keywords.length > 0) {
-      const folder = (this.client as any)?.mailbox?.path ?? '?';
-      logger.info(`[IMAP] UID STORE ${uids.join(',')} +FLAGS (${keywords.join(' ')}) in "${folder}" → matched=${matched}`);
+      const folder = (this.client as any)?.mailbox?.path;
+      logger.info(`[IMAP] UID STORE ${uids.join(',')} +FLAGS (${keywords.map(flagLogText).join(' ')}) in "${folder ? folderLogLabel(folder) : '?'}" → matched=${matched}`);
       if (process.env.SARV_DEBUG_KEYWORDS === '1') {
         try {
           const list = await this.client!.fetchAll(uids.join(','), { uid: true, flags: true, ...(this.supportsGmailLabels() ? { labels: true } : {}) }, { uid: true });
-          const back = list.map((m: any) => `uid ${m.uid}: [${[...(m.flags ?? [])].join(' ')}]`);
+          const back = list.map((m: any) => `uid ${m.uid}: [${[...(m.flags ?? [])].map(flagLogText).join(' ')}]`);
           logger.info(`[IMAP] server FLAGS after STORE → ${back.join('; ') || '(no messages returned)'}`);
         } catch (e) {
           logger.warn(`[IMAP] keyword verify FETCH failed: ${(e as Error).message}`);

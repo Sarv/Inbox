@@ -129,6 +129,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that one slow start ended the recovery: the extension stayed off until the
   app was restarted. A start that is too slow now counts as one attempt and
   the next one follows. You are told only once every attempt has failed.
+- **New mail no longer stops arriving in a folder after one failed sync.** If
+  fetching a folder's new mail failed once (a timeout, a dropped connection, a
+  busy server), the app still noted the folder as up to date, and the regular
+  background sync then skipped it as unchanged. The missed mail stayed on the
+  server until something else arrived in that folder or you refreshed it by
+  hand. A folder is now noted as up to date only once its new mail has really
+  been downloaded, so the next sync picks up what the failed one missed.
 
 ### Security
 - **The XML reader used for office attachments is updated to 5.12.** It fixes a
@@ -136,6 +143,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([GHSA-474x-hrwr-fgx4](https://github.com/advisories/GHSA-474x-hrwr-fgx4)).
   Sarv Inbox never used the affected feature, so earlier versions were not
   exposed.
+- **The log file no longer names your accounts, folders or user folder.**
+  Every line about an account carried its internal id, which spells out the
+  email address, and lines about syncing named your folders, labels and AI
+  categories. These are now written as short codes (system folders such as
+  Inbox and Sent keep their names), file locations are written without your
+  home folder, and failures that could quote mail or a server's answer are
+  recorded by their kind only.
+- **Crash reports carry less about you.** A report no longer identifies you by
+  a shortened hash of your email address, which anyone guessing your address
+  could confirm; it uses a random code made on your computer instead. Web
+  requests in a report no longer keep their query string (which can hold keys
+  and search words), and sign-in codes, keys, passphrases and `Basic`
+  passwords are removed from reports and the log file wherever they appear.
+- **Sign-in tokens are never resent to a redirected address.** If an email
+  provider's token service answered a refresh with a redirect, the app would
+  have sent your refresh token again to wherever it pointed. It now refuses
+  the redirect and retries later, and the same goes for fetching your profile
+  after sign-in.
+
 
 ## [1.4.12] - 2026-11-24
 
