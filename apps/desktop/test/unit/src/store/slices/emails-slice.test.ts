@@ -1,3 +1,4 @@
+import { folderLogLabel } from '@sarvinbox/core/log-labels';
 import { getLogLevel, setLogLevel, setLogSink } from '@sarvinbox/core/logger';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createStore } from 'zustand/vanilla';
@@ -1378,5 +1379,14 @@ describe('selectEmail — the view log line', () => {
   ])('keeps a built-in view by name (%o)', (view, expected) => {
     const { lines } = open('', 'e1', view);
     expect(lines.find((text) => text.includes('[View] selectEmail'))).toContain(`${expected}, pool=1 emails`);
+  });
+
+  // Breaks: `view=<folder path>` wrote a folder the user named (a client's or
+  // person's name) on every email opened in it; system folders stay readable.
+  it('logs a user-named folder as its folder label', () => {
+    const path = 'Clients/Sentinel Acme';
+    const { lines } = open('', 'e1', { folders: [{ id: 'f1', path }] });
+    expect(lines.find((text) => text.includes('[View] selectEmail'))).toContain(`view=${folderLogLabel(path)}, pool=1 emails`);
+    for (const text of lines) expect(text).not.toContain('Sentinel');
   });
 });

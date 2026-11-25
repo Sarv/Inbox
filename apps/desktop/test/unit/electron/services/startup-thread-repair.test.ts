@@ -51,9 +51,17 @@ vi.mock('../../../../electron/shared', () => ({
   getAllAccountRuntimes: () => h.runtimes,
 }));
 
-vi.mock('@sarvinbox/core', () => ({
-  createLogger: () => ({ info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {} }),
-}));
+const logLines = vi.hoisted(() => [] as string[]);
+vi.mock('@sarvinbox/core', async () => {
+  const record = (...args: unknown[]) => { logLines.push(args.map(String).join(' ')); };
+  return {
+    createLogger: () => ({ info: record, warn: record, error: record, debug: record, trace: record }),
+    // The real labels: what a line says about the account is under test.
+    ...(await vi.importActual<typeof import('../../../../../../packages/core/src/utils/log-labels')>(
+      '../../../../../../packages/core/src/utils/log-labels',
+    )),
+  };
+});
 
 vi.mock('../../../../electron/services/core-db', () => ({
   getMeta: (k: string) => h.meta.get(k) ?? null,
@@ -70,6 +78,7 @@ const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms);
 
 beforeEach(() => {
   vi.useFakeTimers();
+  logLines.length = 0;
   const storage = freshStorage();
   h = {
     storage, engine: { isConnected: () => true }, accountId: 'acct-1',
@@ -251,6 +260,28 @@ describe('startup-thread-repair', () => {
 //
 // `h.meta` stands in for `registry_meta` in the core DB, so it persists across a
 // `load()` exactly as the real table persists across a relaunch.
+describe('startup-thread-repair — what reaches the log', () => {
+  // Breaks: '[ThreadRepair] <account id>: …' wrote the id, which spells out the
+  // owner's address (acct-<local part>-<domain>--<host>), on every pass and
+  // every failure, in a release app.log.
+  it('names the account by its label on success and on failure', async () => {
+    const { accountIdFor, accountLogLabel } = await import('../../../../../../packages/core/src/utils/log-labels').then(
+      async (labels) => ({ ...labels, ...(await import('../../../../../../packages/core/src/utils/id')) }),
+    );
+    h.accountId = accountIdFor('owner.sentinel@example.com', 'imap.example.com');
+    const svc = await load();
+    h.repairThrows = true;
+    svc.startStartupThreadRepair();
+    await advance(45_000);
+    h.repairThrows = false;
+    await advance(60_000);
+
+    expect(logLines.filter((l) => l.includes('sentinel'))).toEqual([]);
+    expect(logLines.some((l) => l.includes(`[ThreadRepair] ${accountLogLabel(h.accountId)} failed (will retry)`))).toBe(true);
+    expect(logLines.some((l) => l.startsWith(`[ThreadRepair] ${accountLogLabel(h.accountId)}: `))).toBe(true);
+  });
+});
+
 describe('startup-thread-repair — the window survives a relaunch', () => {
   /** One app run: fresh module registry, same meta store, repair fires once. */
   async function runOnce(): Promise<Svc> {

@@ -13,15 +13,13 @@ import { createHash } from 'crypto';
 import { existsSync, readdirSync, readFileSync, renameSync, unlinkSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { join } from 'path';
 
-
-import { SyncEngine, createLogger } from '@sarvinbox/core';
+import { accountLogLabel, failureCause, redactAccountIds, SyncEngine, createLogger } from '@sarvinbox/core';
 import { SHARED_CONTACTS_FILE, SQLiteStorage } from '@sarvinbox/storage-node';
 import { app } from 'electron';
 
-
 import type { AccountRuntime } from '../shared';
 import { claimDefaultRuntime, getAccountIdForStorage, getAccountRuntime, hasAccountRuntime, registerAccountRuntime, rekeyRuntime, sendToWindow, unregisterRuntime } from '../shared';
-
+import { logPath } from '../utils/log-path';
 
 import { listRegistryAccounts } from './accounts-registry';
 import { deleteAccountAttachments, rekeyAccountAttachments } from './attachment-cache';
@@ -114,7 +112,7 @@ export async function createAccountRuntime(
   // second account does not double the queries sent about the same sender.
   attachReputation(syncEngine);
   attachAutocrypt(syncEngine);
-  logger.info('[Accounts] Created runtime ->', dbPath);
+  logger.info('[Accounts] Created runtime ->', logPath(dbPath));
   return { storage, syncEngine, smtpClient: null };
 }
 
@@ -237,7 +235,7 @@ export async function ensureAccountRuntime(accountId: string): Promise<AccountRu
   // Held off the air for exclusive maintenance — do NOT open a second handle.
   // See `underMaintenance`.
   if (underMaintenance.has(accountId)) {
-    logger.warn(`[Accounts] refused to open ${accountId} — database maintenance in progress`);
+    logger.warn(`[Accounts] refused to open ${accountLogLabel(accountId)} — database maintenance in progress`);
     return null;
   }
 
@@ -319,7 +317,7 @@ export async function rekeyAccount(oldId: string, newId: string): Promise<void> 
   await rekeyAccountSecrets(oldId, newId);
   if (loadPrimaryAccountId() === oldId) savePrimaryAccountId(newId);
   rekeyRuntime(oldId, newId);
-  logger.info('[AccountMigration] rekeyed account', oldId, '->', newId);
+  logger.info('[AccountMigration] rekeyed account', accountLogLabel(oldId), '->', accountLogLabel(newId));
 }
 
 // ===== Account removal (wipe local data) ===================================
@@ -331,7 +329,7 @@ function deleteDbFiles(dbFullPath: string): void {
     try {
       if (existsSync(p)) unlinkSync(p);
     } catch (e) {
-      logger.warn('[Accounts] Failed to delete DB file', p, e);
+      logger.warn('[Accounts] Failed to delete DB file', logPath(p), failureCause(e));
     }
   }
 }
@@ -406,7 +404,7 @@ export async function deleteAccountData(accountId: string): Promise<void> {
     try { await deleteAccountSecrets(accountId); } catch (e) { logger.warn('[Accounts] vault delete failed', e); }
     // Its cached attachments too (CASA M-7): they used to outlive the account.
     try { await deleteAccountAttachments(accountId); } catch (e) { logger.warn('[Accounts] attachment cache delete failed', e); }
-    logger.info('[Accounts] wiped account data', accountId, isPrimary ? '(primary/sarvinbox.db)' : `(${dbFile})`);
+    logger.info('[Accounts] wiped account data', accountLogLabel(accountId), isPrimary ? '(primary/sarvinbox.db)' : `(${dbFile})`);
   } finally {
     // The account is gone, but the id must not stay marked: re-adding the same
     // address later resolves to the same id, and it would be unopenable.
@@ -493,7 +491,7 @@ export function cleanupOrphanedAccountDbs(opts?: {
   try {
     entries = readdirSync(dir);
   } catch (e) {
-    logger.warn('[Accounts] cleanup: could not read userData dir', e);
+    logger.warn('[Accounts] cleanup: could not read userData dir', failureCause(e));
     return removed;
   }
   for (const name of entries) {
@@ -508,7 +506,7 @@ export function cleanupOrphanedAccountDbs(opts?: {
         if (keepFiles && !keepFiles.has(name) && isStale(name)) {
           deleteDbFiles(join(dir, name));
           removed.push(name);
-          logger.info('[Accounts] removed orphaned hashed account DB:', name);
+          logger.info('[Accounts] removed orphaned hashed account DB:', redactAccountIds(name));
         }
         continue;
       }
@@ -519,12 +517,12 @@ export function cleanupOrphanedAccountDbs(opts?: {
       // file is far more likely to be a store added since this code was
       // written than a stale one. Leave it and say so.
       if (!LEGACY_ACCOUNT.test(name)) {
-        logger.warn('[Accounts] cleanup: keeping unrecognised DB file (not an account DB):', name);
+        logger.warn('[Accounts] cleanup: keeping unrecognised DB file (not an account DB):', redactAccountIds(name));
         continue;
       }
       deleteDbFiles(join(dir, name));
       removed.push(name);
-      logger.info('[Accounts] removed orphaned legacy DB:', name);
+      logger.info('[Accounts] removed orphaned legacy DB:', redactAccountIds(name));
       continue;
     }
     // Oldest scheme: per-account DB named by the RAW account id with no
@@ -535,9 +533,9 @@ export function cleanupOrphanedAccountDbs(opts?: {
       try {
         unlinkSync(join(dir, name));
         removed.push(name);
-        logger.info('[Accounts] removed legacy plaintext account DB:', name);
+        logger.info('[Accounts] removed legacy plaintext account DB:', redactAccountIds(name));
       } catch (e) {
-        logger.warn('[Accounts] could not remove legacy plaintext DB', name, e);
+        logger.warn('[Accounts] could not remove legacy plaintext DB', redactAccountIds(name), failureCause(e));
       }
     }
   }
@@ -569,7 +567,7 @@ export function cleanupStaleUserDataArtifacts(): string[] {
       unlinkSync(p);
       removed.push(name);
     } catch (e) {
-      logger.warn('[Accounts] could not remove stale artifact', name, (e as Error).message);
+      logger.warn('[Accounts] could not remove stale artifact', redactAccountIds(name), failureCause(e));
     }
   };
 
@@ -583,7 +581,7 @@ export function cleanupStaleUserDataArtifacts(): string[] {
     }
   } catch { /* dir unreadable — nothing to do */ }
 
-  if (removed.length) logger.info('[Accounts] removed stale artifacts:', removed.join(', '));
+  if (removed.length) logger.info('[Accounts] removed stale artifacts:', redactAccountIds(removed.join(', ')));
   return removed;
 }
 

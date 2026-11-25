@@ -182,6 +182,34 @@ describe('fetchNewestMessagesWindowed', () => {
     expect(out.scannedDownToUid).toBe(4); // sinceUid + 1 => nothing left behind
   });
 
+  // The caller must tell a FAILED window (a transient miss the next pass should
+  // retry, so the folder is not caught up) from the cap or the budget stopping
+  // the pass (the drain's job). Without the flag both read as "a hole below",
+  // and the folder was recorded as caught up after a failure.
+  it('reports interrupted when a window fails after newer ones arrived, and not otherwise', async () => {
+    const { client } = rangeClient(range(1, 1200));
+    let calls = 0;
+    const flaky = {
+      async fetchMessagesByUidRange(lo: number, hi: number) {
+        calls += 1;
+        if (calls === 2) throw new Error('IMAP FETCH timed out');
+        return client.fetchMessagesByUidRange!(lo, hi);
+      },
+    } as unknown as IIMAPClient;
+
+    const failed = await fetchNewestMessagesWindowed(flaky, 0, 1201, undefined, { windowSize: 500 });
+    expect(failed.interrupted).toBe(true);
+    expect(failed.scannedDownToUid).toBe(701);
+    expect(failed.messages).toHaveLength(500);
+
+    const capped = await fetchNewestMessagesWindowed(client, 0, 1201, undefined, { windowSize: 500, maxMessages: 500 });
+    expect(capped.scannedDownToUid).toBe(701);
+    expect(capped.interrupted).toBeUndefined();
+
+    const whole = await fetchNewestMessagesWindowed(client, 0, 1201, undefined, { windowSize: 500 });
+    expect(whole.interrupted).toBeUndefined();
+  });
+
   // Minimal fakes without bounded ranges still work; the unbounded fetch covers
   // the whole range, so it must report no hole.
   it('falls back to getNewMessages and reports no hole', async () => {

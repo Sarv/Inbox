@@ -17,13 +17,14 @@ import type { AddressInfo } from 'node:net';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { createEventBus, ExtensionManager } from '@sarvinbox/core';
+import { createEventBus, ExtensionManager, SANDBOX_RESTART_DELAYS_MS, SANDBOX_START_TIMEOUT_MS } from '@sarvinbox/core';
 import { app, BrowserWindow, ipcMain, protocol, session, WebContentsView, webContents } from 'electron';
 
 import { downloadScanners, isScannerExtensionAvailable } from '../../electron/services/attachment-download-protection';
 import { createExtensionNetworkBackend } from '../../electron/services/extension-network-backend';
-import { createSandboxChannel, SANDBOX_SCHEME_PRIVILEGES, sandboxPartition } from '../../electron/services/extension-runtime';
+import { createSandboxChannel, PAGE_LOAD_TIMEOUT_MS, SANDBOX_SCHEME_PRIVILEGES, sandboxPartition } from '../../electron/services/extension-runtime';
 import { installIpcSenderGuard } from '../../electron/utils/ipc-sender-guard';
+import { appJsFlags } from '../../electron/v8-flags';
 
 const FIXTURES = process.env.SANDBOX_ESCAPE_FIXTURES as string;
 const WORK = process.env.SANDBOX_ESCAPE_WORK as string;
@@ -31,6 +32,11 @@ const SCENARIO = process.env.SANDBOX_ESCAPE_SCENARIO ?? 'escapes';
 
 app.setName('sarv-inbox-sandbox-escape');
 app.setPath('userData', path.join(WORK, 'userData'));
+// The app's V8 flags, which reach every renderer: extension code here runs under the
+// heap cap it ships with. Without them the out-of-memory probe filled ~3.7 GB instead
+// of 2 GB, and on a 7 GB CI runner the machine was still swapping when the next
+// sandbox had to start.
+app.commandLine.appendSwitch('js-flags', appJsFlags());
 protocol.registerSchemesAsPrivileged([SANDBOX_SCHEME_PRIVILEGES]);
 installIpcSenderGuard(ipcMain as never, {
   mainWindow: () => null,
@@ -283,9 +289,15 @@ async function escapes(): Promise<void> {
   check('out of memory: the call ends with a reason', String(oom.threw).includes('stopped'), oom);
   check('out of memory: its renderer is gone', (await until(() => !isAlive(pidBefore), 5000)) === true);
   check('out of memory: another extension still answers', (await call(manager, 'victim', 'ping')) === 'victim alive');
+  // It comes back by itself, through the restart the app plans after any crash, retries
+  // included. Not a reload raced against that restart: the machine is still reclaiming
+  // what the crashed renderer held, and a first start after it can overrun the load
+  // timeout. Bounded by every attempt: each delay, plus a start that times out.
+  const restartBound = SANDBOX_RESTART_DELAYS_MS.reduce((sum, delay) => sum + delay + PAGE_LOAD_TIMEOUT_MS + SANDBOX_START_TIMEOUT_MS, 0);
+  const restarted = await until(() => manager.getExtensionInfo('probe')?.state === 'active', restartBound);
+  check('out of memory: it comes back by itself', Boolean(restarted), manager.getExtensionInfo('probe')?.state);
 
   // A hang is killed, and the other keeps working while it spins.
-  await manager.getHost().reload('probe');
   const hungPid = (sandboxOf('probe') as Electron.WebContents).getOSProcessId();
   const started = Date.now();
   const hanging = call<unknown>(manager, 'probe', 'hang');

@@ -24,6 +24,7 @@
  *     persisted failure gets its own automatic retry when it is due.
  */
 import type { EmailRecord } from '@sarvinbox/core';
+import { failureCause } from '@sarvinbox/core/error-diagnostic';
 import {
   FIRST_SPLIT_BACKOFF_CAP_SECONDS,
   firstMemberKeyOf,
@@ -35,6 +36,7 @@ import {
   type FirstSplitRow,
   type FirstSplitState,
 } from '@sarvinbox/core/first-split';
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { createLogger } from '@sarvinbox/core/logger';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -159,7 +161,7 @@ export function useFirstEmailSplit(input: FirstEmailSplitInput, deps: FirstEmail
     bridge.get(accountId, threadId).then(
       (result) => {
         if (!result.success || !result.data) {
-          if (live) log.warn(`get acct=${accountId} thread=${threadId} failed: ${result.error ?? 'no data'}`);
+          if (live) log.warn(`get acct=${accountLogLabel(accountId)} thread=${threadId} failed: ${result.error ? 'error' : 'no data'}`);
           land(null);
           return;
         }
@@ -170,7 +172,7 @@ export function useFirstEmailSplit(input: FirstEmailSplitInput, deps: FirstEmail
           // it caches belongs to this email. Once per email, not per read.
           if (live && warnedRef.current !== identity) {
             warnedRef.current = identity;
-            log.warn(`acct=${accountId} thread=${threadId} main's first member is not the one on screen — no AI split for it`);
+            log.warn(`acct=${accountLogLabel(accountId)} thread=${threadId} main's first member is not the one on screen — no AI split for it`);
           }
           land(null);
           return;
@@ -178,7 +180,7 @@ export function useFirstEmailSplit(input: FirstEmailSplitInput, deps: FirstEmail
         land(result.data);
       },
       (error: unknown) => {
-        if (live) log.warn(`get acct=${accountId} thread=${threadId} threw: ${(error as Error)?.message ?? error}`);
+        if (live) log.warn(`get acct=${accountLogLabel(accountId)} thread=${threadId} threw: ${failureCause(error)}`);
         land(null);
       },
     );

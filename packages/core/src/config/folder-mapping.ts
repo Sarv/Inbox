@@ -1,6 +1,8 @@
 // Folder Mapping Configuration
 // Maps provider folders to virtual folders and controls visibility
 
+import { folderLogLabel } from '../utils/log-labels';
+
 /**
  * Provider folder patterns to hide from UI
  * These folders are synced but not shown in sidebar
@@ -535,7 +537,8 @@ export function describeFolderSyncState(folder: ClassifiableFolder): string {
     `server=${folder.serverMessageCount ?? 'unknown'}`,
   ];
   if (folder.specialUse) parts.push(`specialUse=${folder.specialUse}`);
-  return `${folder.path} (${parts.join(', ')})`;
+  // A log line: a folder the user named is written as its label.
+  return `${folderLogLabel(folder.path)} (${parts.join(', ')})`;
 }
 
 /**
@@ -555,7 +558,7 @@ export function describeDuplicateRoles(folders: ClassifiableFolder[]): string | 
       const chosen = findFolderByType(folders, type);
       return (
         `${type}: ${candidates.map(describeFolderSyncState).join(' | ')}` +
-        ` -> ${chosen ? chosen.path : 'none'}`
+        ` -> ${chosen ? folderLogLabel(chosen.path) : 'none'}`
       );
     })
     .join('; ');

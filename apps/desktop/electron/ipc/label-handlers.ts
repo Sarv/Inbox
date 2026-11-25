@@ -6,7 +6,7 @@
  * Local-only, like AI-category tags — no IMAP keyword sync.
  */
 
-import { createLogger, type LabelInput } from '@sarvinbox/core';
+import { failureCause, labelLogLabel, createLogger, type LabelInput } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { ensureAccountRuntime } from '../services/accounts-runtime';
@@ -62,10 +62,10 @@ export function registerLabelHandlers(): void {
           if (engine?.isConnected?.()) {
             syncedToServer = await engine.createServerLabel(name);
           } else {
-            logger.warn(`[labels] syncToServer requested for "${name}" but the account isn't connected — created local-only`);
+            logger.warn(`[labels] syncToServer requested for ${labelLogLabel(name)} but the account isn't connected — created local-only`);
           }
         } catch (e) {
-          logger.warn(`[labels] server CREATE for "${name}" failed — created local-only: ${(e as Error).message}`);
+          logger.warn(`[labels] server CREATE for ${labelLogLabel(name)} failed — created local-only: ${failureCause(e)}`);
         }
       }
       return { success: true, data: await storage.createLabel({ name, color: input.color }, syncedToServer) };

@@ -27,6 +27,7 @@ import { app, Notification } from 'electron';
 import { autoUpdater, type Logger as UpdaterLogger } from 'electron-updater';
 
 import { getMainWindow } from '../shared';
+import { withoutHomeDir } from '../utils/log-path';
 import { restoreAndFocusWindow } from '../utils/window-focus';
 
 import { verifyUpdate } from './update-manifest';
@@ -66,9 +67,13 @@ const logger = createLogger('update-service');
  * calls it when it exists, and it is per-request noise.
  */
 const electronUpdaterLog = createLogger('electron-updater');
-/** Keeps an Error's stack; electron-updater mostly logs plain strings. */
-const describeUpdaterMessage = (message: unknown): string =>
-  message instanceof Error ? (message.stack ?? message.message) : String(message);
+/**
+ * Keeps an Error's stack; electron-updater mostly logs plain strings. Its
+ * lines name the update cache and the installer by absolute path ("downloaded
+ * to /Users/<name>/Library/Caches/…"), so the home folder is written as `~`.
+ */
+export const describeUpdaterMessage = (message: unknown): string =>
+  withoutHomeDir(message instanceof Error ? (message.stack ?? message.message) : String(message));
 const updaterLogger: UpdaterLogger = {
   info: (message) => electronUpdaterLog.info(describeUpdaterMessage(message)),
   warn: (message) => electronUpdaterLog.warn(describeUpdaterMessage(message)),

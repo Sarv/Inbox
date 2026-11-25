@@ -30,6 +30,7 @@
  * `assertOAuthMailHost`, and an entry holding only a token is never returned.
  */
 import {
+  accountLogLabel,
   accountIdFor,
   createLogger,
   limitTransport,
@@ -139,7 +140,7 @@ export function vaultIdCandidates(accountId: string | undefined | null, username
       const acct = registryAccount(accountId);
       if (acct) ids.push(accountIdFor(acct.email, acct.imapConfig?.host));
     } catch (error) {
-      logger.warn(`[Vault] account registry unreadable while resolving ids for ${accountId}: ${(error as Error).message}`);
+      logger.warn(`[Vault] account registry unreadable while resolving ids for ${accountLogLabel(accountId)}: ${(error as Error).message}`);
     }
   }
   ids.push(accountIdFor(username, host), accountIdFor(username));
@@ -258,7 +259,7 @@ async function savedTransport(id: string, kind: VaultCredentialKind, entry: Vaul
     allowPlaintext: typeof entry.allowPlaintext === 'boolean' ? entry.allowPlaintext : legacy.allowPlaintext,
   };
   await bindAccountSecretTransport(id, kind, bound);
-  logger.info(`[Vault] bound how the saved ${kind} password for ${id} is sent: self-signed ${bound.allowInsecureTLS ? 'allowed' : 'refused'}, unencrypted ${bound.allowPlaintext ? 'allowed' : 'refused'}`);
+  logger.info(`[Vault] bound how the saved ${kind} password for ${accountLogLabel(id)} is sent: self-signed ${bound.allowInsecureTLS ? 'allowed' : 'refused'}, unencrypted ${bound.allowPlaintext ? 'allowed' : 'refused'}`);
   return bound;
 }
 
@@ -302,7 +303,7 @@ export async function resolveVaultPassword(
         continue;
       }
       await bindAccountSecretHost(id, kind, wanted);
-      logger.info(`[Vault] bound the saved ${kind} password for ${id} to ${wanted} (${decision.because})`);
+      logger.info(`[Vault] bound the saved ${kind} password for ${accountLogLabel(id)} to ${wanted} (${decision.because})`);
     }
     const transport = await savedTransport(id, kind, entry, wanted);
     if (!transport) continue;

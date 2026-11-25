@@ -25,6 +25,8 @@ vi.mock('electron', () => ({
   ipcMain: { handle: (name: string, fn: (...a: any[]) => any) => h.handlers.set(name, fn) },
 }));
 vi.mock('@sarvinbox/core', async () => ({
+  // The real log helpers (see the helper): product log lines go through them.
+  ...(await import('../../../helpers/core-log-helpers')),
   // The real transport rules (pure): which relaxations a config asks for and may have.
   ...(await import('@sarvinbox/core/connection-security')),
   withTimeout: (p: Promise<unknown>) => p,

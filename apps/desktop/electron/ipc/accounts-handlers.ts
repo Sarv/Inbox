@@ -16,9 +16,8 @@
  * is active on launch, so no account can grab the primary's database.
  */
 import type { EmailRecord, SearchQuery, ViewFilter } from '@sarvinbox/core';
-import { createLogger, errorDiagnostic } from '@sarvinbox/core';
+import { accountLogLabel, createLogger, errorDiagnostic, redactAccountIds } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
-
 
 import { settleRevocation, type AccountRevocation } from '../services/account-revocation';
 import {
@@ -197,7 +196,7 @@ export function registerAccountsHandlers(): void {
       try {
         keepAccountIds = readRegistryAccounts().map((a) => a.id);
         const removed = cleanupOrphanedAccountDbs({ keepAccountIds, staleAfterMs: 0 });
-        if (removed.length) logger.info(`[Accounts] removal swept ${removed.length} orphan file(s):`, removed.join(', '));
+        if (removed.length) logger.info(`[Accounts] removal swept ${removed.length} orphan file(s):`, redactAccountIds(removed.join(', ')));
       } catch (e) {
         logger.warn('[Accounts] orphan DB sweep after removal failed or was skipped:', (e as Error).message);
       }
@@ -360,7 +359,7 @@ export function registerAccountsHandlers(): void {
               ]);
               return { emails: emails.map((e) => ({ ...e, accountId })), total };
             } catch (e) {
-              logger.warn('[Accounts] unifiedInbox: skipping account', accountId, (e as Error).message);
+              logger.warn('[Accounts] unifiedInbox: skipping account', accountLogLabel(accountId), (e as Error).message);
               return { emails: [], total: 0 };
             }
           }),
@@ -449,7 +448,7 @@ export function registerAccountsHandlers(): void {
             return { emails: emails.map((e) => ({ ...e, accountId })), total };
           } catch (e) {
             // Class and code only: a search error can name the query's words.
-            logger.warn('[Accounts] unifiedSearch: skipping account', accountId, errorDiagnostic(e));
+            logger.warn('[Accounts] unifiedSearch: skipping account', accountLogLabel(accountId), errorDiagnostic(e));
             return { emails: [], total: 0 };
           }
         }),

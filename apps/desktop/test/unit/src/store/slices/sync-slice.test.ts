@@ -1103,3 +1103,36 @@ describe('refreshVisibleViewForFolder — the AI category view in the log', () =
     for (const line of lines) expect(line.toLowerCase()).not.toContain('sentinel');
   });
 });
+
+describe('syncSingleFolder — the folder in the log', () => {
+  const PATH = 'Clients/Sentinel Acme';
+
+  // Breaks: '[Store] syncSingleFolder: …<folder path>…' wrote a folder the user
+  // named on every line of a sync, and the failure line wrote the server's
+  // error text, which can quote the name again. The folder is its label.
+  it('names the folder by its label, and a failure by its kind', async () => {
+    const { folderLogLabel } = await import('@sarvinbox/core/log-labels');
+    const state: Record<string, any> = {
+      syncing: false, syncingFolders: new Map(), noteSyncOk: vi.fn(), noteSyncFailure: vi.fn(),
+      loadFolders: vi.fn(async () => {}), folders: [], selectedFolderId: null,
+    };
+    const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
+    vi.resetModules();
+    (globalThis as any).window = { electronAPI: { imap: { sync: vi.fn(async () => { throw new Error(`SELECT "${PATH}" failed: ${PATH} does not exist`); }) } } };
+    (globalThis as any).localStorage = { getItem: () => null, setItem: () => {} };
+    const mod = await import('../../../../../src/store/slices/sync-slice');
+    const slice: any = mod.createSyncSlice(set as any, () => ({ ...slice, ...state }), {} as any);
+    const logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
+    try {
+      await slice.syncSingleFolder(PATH);
+    } finally {
+      logs.stop();
+      delete (globalThis as any).localStorage;
+    }
+
+    expect(state.noteSyncFailure).toHaveBeenCalled();
+    for (const line of logs.lines) expect(line).not.toContain('Sentinel');
+    expect(logs.lines.some((line) => line.includes(`syncSingleFolder: Starting sync for ${folderLogLabel(PATH)}`))).toBe(true);
+    expect(logs.lines.some((line) => line.includes(`Failed to sync ${folderLogLabel(PATH)}:`) && line.includes("name: 'Error'"))).toBe(true);
+  });
+});

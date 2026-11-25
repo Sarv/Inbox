@@ -31,9 +31,10 @@
  *     per-account adoption pass (see `migrations.ts`, `unified_contact_directory`)
  *     only ever merges rows INTO the directory.
  */
+import { basename } from 'path';
+
 import { createLogger } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
-
 
 import { encryptPlaintextDb, isExistingPlaintextDb, pinDbCipher } from './db-encryption';
 
@@ -258,7 +259,7 @@ export function attachSharedContacts(
   if (legacyPlaintext) {
     // WAL is restored below.
     encryptPlaintextDb(db, key!, SHARED_SCHEMA);
-    log.info(`[SharedContacts] migrated plaintext directory to encrypted: ${path}`);
+    log.info(`[SharedContacts] migrated plaintext directory to encrypted: ${basename(path)}`);
   }
 
   // Every CREATE here is schema-qualified and IF NOT EXISTS: applying the
@@ -288,5 +289,5 @@ export function attachSharedContacts(
   // briefly instead of throwing SQLITE_BUSY at whichever account wrote second.
   db.pragma('busy_timeout = 5000');
 
-  log.info(`[SharedContacts] attached ${path} (${probe.n} contacts)`);
+  log.info(`[SharedContacts] attached ${basename(path)} (${probe.n} contacts)`);
 }

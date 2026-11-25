@@ -3,7 +3,9 @@
 import { IMAPError, type IIMAPClient, type IMAPFolder } from '../types/imap';
 import type { IEmailStorage } from '../types/storage';
 import { existingCategoryClassification } from '../utils/category-authority';
+import { errorDiagnostic, failureCause } from '../utils/error-diagnostic';
 import { categorySlugFromLabel, GMAIL_CLASSIFICATION_CATEGORY_SLUGS, type KnownCategory } from '../utils/gmail-labels';
+import { categoryLogLabel, folderLogLabel, labelLogLabel } from '../utils/log-labels';
 import { logger } from '../utils/logger';
 import { isSpamProtectedEmail } from '../utils/spam-protection';
 
@@ -207,7 +209,7 @@ export class OperationQueue {
       } catch (error) {
         // Never fail reconciliation because the backstop query errored — the
         // in-memory set is still a valid (if narrower) guard.
-        logger.warn(`getPendingUids: durable backstop query failed for ${folderPath}`, error);
+        logger.warn(`getPendingUids: durable backstop query failed for ${folderLogLabel(folderPath)}`, error);
       }
     }
     return uids;
@@ -359,7 +361,7 @@ export class OperationQueue {
       await strategy.rename(oldCat, newCat);
       return true;
     } catch (e) {
-      logger.debug(`rename label failed: ${(e as Error).message}`);
+      logger.debug(`rename label failed: ${failureCause(e)}`);
       return false;
     }
   }
@@ -378,7 +380,7 @@ export class OperationQueue {
     targets.sort((a, b) => b.length - a.length);
     let n = 0;
     for (const p of targets) {
-      try { await this.client.deleteMailbox(p); n++; } catch (e) { logger.debug(`delete ${p} failed: ${(e as Error).message}`); }
+      try { await this.client.deleteMailbox(p); n++; } catch (e) { logger.debug(`delete ${folderLogLabel(p)} failed: ${failureCause(e)}`); }
     }
     return n;
   }
@@ -407,12 +409,12 @@ export class OperationQueue {
         await strategy.ensure({ slug: c.slug, name: c.name });
         n++;
       } catch (e) {
-        logger.warn(`ensure label failed for ${c.slug}: ${(e as Error).message}`);
+        logger.warn(`ensure label failed for ${categoryLogLabel(c.slug, false)}: ${failureCause(e)}`);
       }
       try {
         await strategy.migrate?.({ slug: c.slug, name: c.name });
       } catch (e) {
-        logger.debug(`migrate label failed for ${c.slug}: ${(e as Error).message}`);
+        logger.debug(`migrate label failed for ${categoryLogLabel(c.slug, false)}: ${failureCause(e)}`);
       }
     }
     return n;
@@ -432,15 +434,15 @@ export class OperationQueue {
     if (!path) return false;
     try {
       await this.client.createMailbox(path);
-      logger.info(`[labels] user label synced to server — CREATE "${path}"`);
+      logger.info(`[labels] user label synced to server — CREATE "${labelLogLabel(path)}"`);
       return true;
     } catch (e) {
       const msg = ((e as Error).message || '').toLowerCase();
       if (msg.includes('exist')) {
-        logger.info(`[labels] user label "${path}" already exists on server`);
+        logger.info(`[labels] user label "${labelLogLabel(path)}" already exists on server`);
         return true; // already there is success
       }
-      logger.warn(`[labels] createServerLabel "${path}" failed: ${(e as Error).message}`);
+      logger.warn(`[labels] createServerLabel "${labelLogLabel(path)}" failed: ${failureCause(e)}`);
       return false;
     }
   }
@@ -547,7 +549,7 @@ export class OperationQueue {
           }
           const detail = extractOpFailureDetail(error);
           await this.storage!.markPendingOperationFailed(id, detail.message, detail);
-          logger.error(`Operation ${type} on UID ${uid}: failed (dead-lettered)`, error);
+          logger.error(`Operation ${type} on UID ${uid}: failed (dead-lettered)`, errorDiagnostic(error));
           throw error;
         }
         lease.release();
@@ -577,7 +579,7 @@ export class OperationQueue {
         // command we sent + the server's reply so the Outbox can show both.
         const detail = extractOpFailureDetail(error);
         await this.storage!.markPendingOperationFailed(id, detail.message, detail);
-        logger.error(`Operation ${type} on UID ${uid}: failed (dead-lettered)`, error);
+        logger.error(`Operation ${type} on UID ${uid}: failed (dead-lettered)`, errorDiagnostic(error));
         throw error;
       }
       await this.cleanupAcceptedOperations([id], false);
@@ -640,11 +642,11 @@ export class OperationQueue {
         for (const failedId of ids) {
           await this.storage!.markPendingOperationFailed(failedId, detail.message, detail);
         }
-        logger.error(`Bulk ${type} failed (dead-lettered ${ids.length})`, error);
+        logger.error(`Bulk ${type} failed (dead-lettered ${ids.length})`, errorDiagnostic(error));
         throw error;
       }
       await this.cleanupAcceptedOperations(ids, true);
-      logger.info(`Bulk ${type} on ${uids.length} UIDs in ${folderPath}: success`);
+      logger.info(`Bulk ${type} on ${uids.length} UIDs in ${folderLogLabel(folderPath)}: success`);
       return 'success';
     }
 
@@ -747,7 +749,7 @@ export class OperationQueue {
           // op, or a just-read email loses its \Seen and springs back to unread
           // when syncFlags reconciles. Re-queue for the next cycle instead.
           const transient = isConnectionError(error) || isRateLimited(error) || isQuotaError(error);
-          logger.warn(`Batch op ${batch.type} (${batch.ops.length} uid(s)) failed${transient ? ' [transient — will retry]' : ''}: ${msg}`);
+          logger.warn(`Batch op ${batch.type} (${batch.ops.length} uid(s)) failed${transient ? ' [transient — will retry]' : ''}: ${failureCause(error)}`);
 
           for (const op of batch.ops) {
             if (transient) {
@@ -765,7 +767,7 @@ export class OperationQueue {
                 await this.storage!.updatePendingOperationRetry(op.id, op.retryCount);
               } catch { /* ignore */ }
             } else {
-              logger.warn(`Dead-lettering operation ${op.type} for UID ${op.uid} after ${this.config.maxRetries} retries: ${msg}`);
+              logger.warn(`Dead-lettering operation ${op.type} for UID ${op.uid} after ${this.config.maxRetries} retries: ${failureCause(error)}`);
               try {
                 await this.storage!.markPendingOperationFailed(op.id, msg);
               } catch { /* ignore */ }
@@ -880,7 +882,7 @@ export class OperationQueue {
         // Explicit IMAP-command log so the mail server / IMAP team can confirm we
         // ALWAYS issue a STORE for reads. Single read = INFO (visible by default);
         // bulk = DEBUG (a select-all mark-read would otherwise flood INFO).
-        const seenDetail = `folder="${folderPath}" ${uids.length === 1 ? `UID ${uids[0]}` : `${uids.length} UIDs [${uids.slice(0, 20).join(',')}${uids.length > 20 ? ',…' : ''}]`}`;
+        const seenDetail = `folder="${folderLogLabel(folderPath)}" ${uids.length === 1 ? `UID ${uids[0]}` : `${uids.length} UIDs [${uids.slice(0, 20).join(',')}${uids.length > 20 ? ',…' : ''}]`}`;
         if (uids.length > 1) logger.debug(`IMAP STORE +FLAGS (\\Seen) — bulk mark-read ${seenDetail}`);
         else logger.info(`IMAP STORE +FLAGS (\\Seen) — mark-read ${seenDetail}`);
         await withFolderSelected(this.client!, folderPath, () => this.client!.addFlags(uids, ['\\Seen']));
@@ -1127,7 +1129,7 @@ export class OperationQueue {
     try {
       const destFolder = await this.storage.getFolderByPath(destPath);
       if (!destFolder) {
-        logger.warn(`remapMovedUids: destination folder not found for "${destPath}"; skipping uid writeback`);
+        logger.warn(`remapMovedUids: destination folder not found for "${folderLogLabel(destPath)}"; skipping uid writeback`);
         return;
       }
 
@@ -1143,7 +1145,7 @@ export class OperationQueue {
       // destination folder. We're here right after a successful move, so the
       // client is connected; guard anyway to avoid throwing if it dropped.
       if (!this.isConnected()) {
-        logger.warn(`remapMovedUids: no uidMap and client not connected for "${destPath}"; local uids left stale (will self-heal on next full sync)`);
+        logger.warn(`remapMovedUids: no uidMap and client not connected for "${folderLogLabel(destPath)}"; local uids left stale (will self-heal on next full sync)`);
         return;
       }
       for (const srcUid of sourceUids) {
@@ -1167,7 +1169,7 @@ export class OperationQueue {
       }
     } catch (error) {
       // The move itself succeeded; never fail it because the uid writeback did.
-      logger.warn(`remapMovedUids: failed to persist destination uids for "${destPath}"`, error);
+      logger.warn(`remapMovedUids: failed to persist destination uids for "${folderLogLabel(destPath)}"`, errorDiagnostic(error));
     }
   }
 

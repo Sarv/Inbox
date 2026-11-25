@@ -1,4 +1,5 @@
 import type { SMTPConfig } from '@sarvinbox/core';
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { createLogger } from '@sarvinbox/core/logger';
 import { createSingleFlight } from '@sarvinbox/core/single-flight';
 
@@ -355,7 +356,7 @@ const connectionSlice = (
 
     const pending = connectInFlight.pending(acctId);
     if (pending) {
-      console.log(`[Store] connect() already in flight for ${acctId} — joining it`);
+      console.log(`[Store] connect() already in flight for ${accountLogLabel(acctId)} — joining it`);
       return pending;
     }
 

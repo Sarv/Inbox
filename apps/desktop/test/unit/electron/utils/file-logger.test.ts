@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, sep } from 'path';
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -333,6 +333,61 @@ describe('email addresses (CASA L-7)', () => {
 
     expect(stream().lines[0]).toContain('jane.doe@example.com');
     expect(stream().lines[1]).toContain('bob@corp.example.org');
+  });
+});
+
+describe('account ids and the home folder', () => {
+  const ACCOUNT_ID = 'acct-jane-doe-example-com--imap-example-com';
+
+  // Breaks if a RELEASE app.log spells out the owner's address through an
+  // account id (acct-<local part>-<domain>--<host>), which every per-account
+  // scheduler line used to carry, in the text or in a legacy DB-named logger.
+  it('replaces account ids with their label in a release, in main and renderer lines', async () => {
+    const { accountLogLabel } = await import('@sarvinbox/core');
+    const logger = await load();
+    logger.muteTerminalOutput();
+    logger.initFileLogger({ redactAddresses: true });
+    stream().lines.length = 0;
+
+    console.log(`[2026-06-15 12:00:00.000] [INFO] [backfill:sarvinbox-${ACCOUNT_ID}.db] skipping ${ACCOUNT_ID} — churning`);
+    logger.appendExternalLog('renderer', 'info', `split:${ACCOUNT_ID}`, `split acct=${ACCOUNT_ID} thread=t1`);
+
+    const written = stream().lines.join('');
+    expect(written).not.toContain('jane-doe');
+    expect(stream().lines[0]).toContain(`skipping ${accountLogLabel(ACCOUNT_ID)} — churning`);
+    expect(stream().lines[0]).toContain(`[backfill:sarvinbox-${accountLogLabel(ACCOUNT_ID)}.db]`);
+    expect(stream().lines[1]).toContain(`split acct=${accountLogLabel(ACCOUNT_ID)} thread=t1`);
+  });
+
+  // Breaks if the DEV log loses the account ids the developer debugs with.
+  it('keeps account ids in a dev run', async () => {
+    const logger = await load();
+    logger.muteTerminalOutput();
+    logger.initFileLogger();
+    stream().lines.length = 0;
+
+    console.log(`skipping ${ACCOUNT_ID}`);
+
+    expect(stream().lines[0]).toContain(ACCOUNT_ID);
+  });
+
+  // Breaks if an absolute path (an updater cache, a stack frame, a DB path)
+  // names the user through their home folder — in dev and release alike.
+  it('writes the home folder as ~ in every line, and the start line names no path', async () => {
+    const { homedir } = await import('os');
+    const home = homedir();
+    const logger = await load();
+    logger.muteTerminalOutput();
+    logger.initFileLogger();
+
+    expect(stream().lines.find((l) => l.includes('[file-logger]'))).toContain('writing local logs to <userData>/app.log');
+    stream().lines.length = 0;
+    console.log(`downloaded to ${join(home, 'Library', 'Caches', 'u.zip')}`);
+    logger.appendExternalLog('renderer', 'warn', '', `at ${join(home, 'x.js')}`);
+
+    expect(stream().lines.join('')).not.toContain(home);
+    expect(stream().lines[0]).toContain(`downloaded to ~${sep}${join('Library', 'Caches', 'u.zip')}`);
+    expect(stream().lines[1]).toContain(`at ~${sep}x.js`);
   });
 });
 

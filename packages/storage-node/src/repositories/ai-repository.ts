@@ -2,7 +2,7 @@
 // All category queries use instr(tags, '|slug|') — zero JOINs, no junction tables
 
 import type { EmailRecord } from '@sarvinbox/core';
-import { automaticCategorizationDeferred, GMAIL_NON_AUTHORITATIVE_CATEGORY_SLUGS, createLogger, existingCategoryClassification, independentImportance, isSpamProtectedEmail, parseCategorySelection } from '@sarvinbox/core';
+import { automaticCategorizationDeferred, categoryLogLabel, GMAIL_NON_AUTHORITATIVE_CATEGORY_SLUGS, createLogger, existingCategoryClassification, independentImportance, isSpamProtectedEmail, parseCategorySelection } from '@sarvinbox/core';
 
 import type {
   EmailAICategory,
@@ -444,7 +444,8 @@ export class AIRepository extends BaseRepository {
   ): Promise<EmailRecord[]> {
     const limit = options.limit || 50;
     const offset = options.offset || 0;
-    logger.info(`[AIRepo] getEmailsByDynamicCategory(category=${categorySlug}, limit=${limit}, offset=${offset}, folderId=${options.folderId || 'all'})`);
+    // A slug can be made from a name the user typed: logged as its label.
+    logger.info(`[AIRepo] getEmailsByDynamicCategory(category=${categoryLogLabel(categorySlug, categorySlug === 'uncategorized')}, limit=${limit}, offset=${offset}, folderId=${options.folderId || 'all'})`);
 
     if (categorySlug === 'uncategorized') {
       // Category membership is independent of processing state: never-attempted,

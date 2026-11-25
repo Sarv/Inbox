@@ -21,7 +21,7 @@
  *   - Idle tick:   30 min once every folder's backfill is complete
  */
 
-import { buildStandardFolderAliasMap, createLogger, getEventBus, isTrashFolder, isSpamFolder, isAllMailSuperset, LARGE_MAILBOX_THRESHOLD } from '@sarvinbox/core';
+import { failureCause, folderLogLabel, accountLogLabel, buildStandardFolderAliasMap, createLogger, getEventBus, isTrashFolder, isSpamFolder, isAllMailSuperset, LARGE_MAILBOX_THRESHOLD } from '@sarvinbox/core';
 
 import { getStorage, getSyncEngine, getAllAccountRuntimes, getCurrentAccountId, sendToWindow } from '../shared';
 
@@ -352,10 +352,10 @@ async function maybeReconcileDeletions(storage: any, engine: any, folder: any): 
   try {
     const r = await engine.reconcileFolderDeletionsFull(folder.path);
     if (r && r.deleted > 0) {
-      logger.info(`[Backfill] Deletion reconcile ${folder.path}: ${r.deleted} removed, ${r.updated} flags updated`);
+      logger.info(`[Backfill] Deletion reconcile ${folderLogLabel(folder.path)}: ${r.deleted} removed, ${r.updated} flags updated`);
     }
   } catch (e) {
-    logger.warn(`[Backfill] Deletion reconcile ${folder.path} failed (isolated): ${(e as Error).message}`);
+    logger.warn(`[Backfill] Deletion reconcile ${folderLogLabel(folder.path)} failed (isolated): ${failureCause(e)}`);
   }
 }
 
@@ -395,7 +395,7 @@ async function runTick(): Promise<void> {
         // connection self-heals and the next tick picks it up.
         if (isConnectionRecentlyUnstable(t.engine)) {
           drained = false; // still has work; just deferred until it settles
-          logger.info(`[Backfill] skipping ${t.accountId} — connection churning, letting it settle`);
+          logger.info(`[Backfill] skipping ${accountLogLabel(t.accountId)} — connection churning, letting it settle`);
           continue;
         }
         // One-time bulk backfill (idempotent, self-throttled, fire-and-forget) so

@@ -15,9 +15,8 @@
 import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
-import { accountIdFor, oauthImapPreset, createLogger, type OAuthProviderId } from '@sarvinbox/core';
+import { accountLogLabel, accountIdFor, oauthImapPreset, createLogger, type OAuthProviderId } from '@sarvinbox/core';
 import { app } from 'electron';
-
 
 import { getAccountIdForStorage } from '../shared';
 
@@ -313,7 +312,7 @@ export async function seedAccountRegistryFromDurableStores(): Promise<void> {
             smtpConfigured: false,
           });
           existing.add(id);
-          logger.info('[Registry] seeded account from imap-account store:', id);
+          logger.info('[Registry] seeded account from imap-account store:', accountLogLabel(id));
         }
       }
     } catch (e) {
@@ -344,7 +343,7 @@ export async function seedAccountRegistryFromDurableStores(): Promise<void> {
           smtpConfigured: false,
         });
         existing.add(id);
-        logger.info(`[Registry] seeded OAuth account from oauth store: ${id} (${oa.provider})`);
+        logger.info(`[Registry] seeded OAuth account from oauth store: ${accountLogLabel(id)} (${oa.provider})`);
       }
     } catch (e) {
       logger.warn('[Registry] oauth store seed skipped:', (e as Error)?.message);

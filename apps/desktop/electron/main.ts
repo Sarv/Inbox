@@ -22,7 +22,7 @@ import netModule from 'net';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 
-import { SyncEngine, ExtensionManager, createLogger, errorDiagnostic, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
+import { accountLogLabel, SyncEngine, ExtensionManager, createLogger, errorDiagnostic, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
 import { app, BrowserWindow, Menu, dialog, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
 
@@ -163,10 +163,12 @@ import { devServerUrlFor, isDevBuild, isReleaseBundle } from './utils/dev-mode';
 import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
 import { installIpcSenderGuard } from './utils/ipc-sender-guard';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
+import { logPath } from './utils/log-path';
 import { mainWindowWebPreferences } from './utils/main-window-preferences';
 import { installNavigationGuards } from './utils/navigation-guards';
 import { installPermissionPolicy } from './utils/permission-policy';
 import { restoreAndFocusWindow } from './utils/window-focus';
+import { appJsFlags } from './v8-flags';
 
 // App identity MUST be set before ANYTHING reads app.getPath('userData') —
 // initSentryMain(), the file logger, and the DB key store all derive their paths
@@ -423,7 +425,8 @@ if (process.platform === 'darwin') {
 // Disable security warnings in development
 process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
 
-// Increase Node.js memory limit to 2GB.
+// V8's heap limit, 2 GB, for main and (the switch propagates) every renderer,
+// the extension sandboxes included: see v8-flags.ts.
 // Opt-in diagnostic: set SARV_PROFILE=1 (dev only) to also turn on V8's tick
 // profiler (--prof). Use it to find a synchronous main-thread CPU hog (a
 // renderer freeze / beachball): the switch propagates to renderer processes
@@ -434,7 +437,7 @@ const V8_PROFILE =
   isDev && process.env['SARV_PROFILE']
     ? ` --prof --logfile=${join(app.getPath('userData'), 'v8prof-%p.log')}`
     : '';
-app.commandLine.appendSwitch('js-flags', `--max-old-space-size=2048${V8_PROFILE}`);
+app.commandLine.appendSwitch('js-flags', appJsFlags(V8_PROFILE));
 
 // Suppress EGL/GPU driver error messages
 app.commandLine.appendSwitch('disable-gpu-driver-bug-workarounds');
@@ -643,7 +646,7 @@ async function initializeStorage(): Promise<void> {
     send: sendToWindow,
     accountId: () => getAccountIdForStorage(storage),
   });
-  logger.info('[Main] Storage initialized:', dbPath);
+  logger.info('[Main] Storage initialized:', logPath(dbPath));
 }
 
 /**
@@ -759,14 +762,14 @@ async function initializeAccountRegistry(): Promise<void> {
     // mailbox for an id whose data isn't on disk.
     const isPrimary = loadPrimaryAccountId() === activeId && legacyDbExists();
     if (!isPrimary && !accountDbExists(activeId)) {
-      logger.info('[Main] Persisted active account has no DB yet — deferring to renderer:', activeId);
+      logger.info('[Main] Persisted active account has no DB yet — deferring to renderer:', accountLogLabel(activeId));
       return;
     }
 
     setCurrentAccount(activeId);
     if (!hasAccountRuntime(activeId)) await ensureAccountRuntime(activeId);
     rebindOutboxStorage();
-    logger.info('[Main] Auto-activated persisted account:', activeId);
+    logger.info('[Main] Auto-activated persisted account:', accountLogLabel(activeId));
   } catch (e) {
     logger.warn('[Main] Auto-activate persisted account failed:', (e as Error)?.message);
   }

@@ -39,6 +39,7 @@ import {
   MAX_DOWNLOAD_BYTES,
   buildCatalog,
   createLogger,
+  errorDiagnostic,
   isNewerCompatibleRelease,
   isTrustedRegistryUrl,
   mergeRegistries,
@@ -57,6 +58,7 @@ import { app } from 'electron';
 import * as tar from 'tar';
 
 import { getExtensionManager } from '../shared';
+import { logPath } from '../utils/log-path';
 
 import { isAllowedArchiveEntry } from './extension-archive-rules.mjs';
 import { chromiumFetch } from './net-fetch';
@@ -253,7 +255,7 @@ export function getExtensionsConfig(): ParsedExtensionsConfig {
   try {
     raw = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
   } catch (error) {
-    logger.warn(`Could not read ${configPath()}; using defaults:`, error);
+    logger.warn(`Could not read ${logPath(configPath())}; using defaults:`, errorDiagnostic(error));
   }
   config = parseExtensionsConfig(raw);
   for (const warning of config.warnings) logger.warn(`extensions.config.json: ${warning}`);

@@ -23,10 +23,12 @@
  * item, for a switch flipped mid-drain. Refs are deduped (per account
  * and thread) into one queue, capped, and drained serially.
  */
+import { failureCause } from '@sarvinbox/core/error-diagnostic';
 import {
   firstSplitStateFor,
   type FirstSplitGetResult,
 } from '@sarvinbox/core/first-split';
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { createLogger } from '@sarvinbox/core/logger';
 
 import { aiEligibilityFor, firstEmailFacts } from '../../components/email-detail/ai-view-compose';
@@ -103,7 +105,7 @@ export async function processCandidate(ref: FirstSplitRef, deps: FirstSplitJobDe
   const bridge = deps.bridge ?? defaultFirstSplitBridge;
   const answer = await bridge.get(ref.accountId, ref.threadId, { withSource: true });
   if (!answer.success || !answer.data) {
-    log.trace(`thread acct=${ref.accountId} thread=${ref.threadId} get failed`);
+    log.trace(`thread acct=${accountLogLabel(ref.accountId)} thread=${ref.threadId} get failed`);
     return 'error';
   }
   const got: FirstSplitGetResult = answer.data;
@@ -172,14 +174,14 @@ export function createFirstSplitJob(deps: FirstSplitJobDeps = {}): FirstSplitJob
       try {
         result = await processCandidate(ref, deps);
       } catch (error) {
-        log.trace(`thread acct=${ref.accountId} thread=${ref.threadId} threw: ${(error as Error)?.message ?? error}`);
+        log.trace(`thread acct=${accountLogLabel(ref.accountId)} thread=${ref.threadId} threw: ${failureCause(error)}`);
         result = 'error';
       } finally {
         known.delete(`${ref.accountId}|${ref.threadId}`);
       }
       tally[result] += 1;
       processed += 1;
-      log.trace(`thread acct=${ref.accountId} thread=${ref.threadId} -> ${result}`);
+      log.trace(`thread acct=${accountLogLabel(ref.accountId)} thread=${ref.threadId} -> ${result}`);
     }
     // Only drained with at least one ref, so at least one count is non-zero.
     const counts = (Object.keys(tally) as JobItemResult[])

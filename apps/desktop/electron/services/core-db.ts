@@ -30,6 +30,7 @@ import { applyDbKey } from '@sarvinbox/storage-node/db-encryption';
 import Database from 'better-sqlite3';
 import { app } from 'electron';
 
+import { logPath } from '../utils/log-path';
 
 import { getDbEncryptionKey } from './db-key-store';
 
@@ -83,7 +84,7 @@ export function getCoreDb(): Database.Database {
     );
   `);
   db = handle;
-  logger.info('[CoreDB] opened', dbPath);
+  logger.info('[CoreDB] opened', logPath(dbPath));
   return db;
 }
 

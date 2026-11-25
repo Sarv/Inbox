@@ -390,6 +390,22 @@ describe('loopback callback listener', () => {
     expect(h.saved).toEqual([{ provider: 'sarv', email: 'user@sarv.com' }]);
   });
 
+  // Regression: the user-info request carries the new access token, and a
+  // redirect from the provider's endpoint would have sent it on to wherever
+  // the Location pointed. It must refuse redirects (Node: redirect: 'error').
+  it('fetches the signed-in user\'s profile without following redirects', async () => {
+    stubUserInfo('user@sarv.com');
+    const flow = start();
+    const { redirectUri, state } = await nextAuthUrl();
+
+    await get(`${redirectUri}?code=auth-code&state=${state}`);
+    await flow;
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ redirect: 'error' });
+  });
+
   // CSRF: a callback for a state we never issued completes nothing, and must
   // not settle (or close the listener under) the sign-in that is really waiting.
   it('completes nothing for a state it never issued, and leaves the real sign-in waiting', async () => {

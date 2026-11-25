@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   blobs: new Map<string, Buffer>(),
   runtimes: [] as Array<[string, { storage: unknown; syncEngine: null; smtpClient: null }]>,
   sent: [] as Array<{ channel: string; payload: unknown }>,
+  setBlobError: null as Error | null,
 }));
 
 vi.mock('../../../../electron/shared', () => ({
@@ -17,7 +18,10 @@ vi.mock('../../../../electron/shared', () => ({
 vi.mock('../../../../electron/services/core-db', () => ({
   getCoreDb: () => { throw new Error('the core DB is not opened in tests'); },
   getBlob: (k: string) => h.blobs.get(k) ?? null,
-  setBlob: (k: string, v: Buffer) => { h.blobs.set(k, v); },
+  setBlob: (k: string, v: Buffer) => {
+    if (h.setBlobError) throw h.setBlobError;
+    h.blobs.set(k, v);
+  },
 }));
 vi.mock('../../../../electron/services/net-fetch', () => ({ chromiumFetch: vi.fn() }));
 // Only the startup probe is faked, so the scheduler's report can be watched;
@@ -418,6 +422,36 @@ describe('sender identity — what reaches the log', () => {
 
     expect(logs.containing('sentinel-')).toEqual([]);
     expect(logs.containing('SENTINEL')).toEqual([]);
+  });
+
+  // Breaks: '[SenderIdentity] could not list sender domains: <message>' and
+  // 'tick failed: <message>' wrote the error text, which names a sender's host
+  // (a refused destination's message does) — now the failure's kind only.
+  it('logs a failed account and a failed tick by their kind, naming no host', async () => {
+    const { svc } = harness();
+    const refused = Object.assign(new Error('refused https://sentinel-host.example:8443/logo.svg (not a public address)'), { code: 'EREFUSED' });
+    h.runtimes = [
+      ['acct-1', { storage: { getRecentSenderDomains: async () => { throw refused; } }, syncEngine: null, smtpClient: null }],
+    ];
+    vi.spyOn(svc, 'refreshStale').mockRejectedValueOnce(new Error('lookup of sentinel-shop.example failed'));
+
+    expect(await senderIdentityTick(svc)).toBe(0);
+
+    expect(logs.containing('sentinel-')).toEqual([]);
+    expect(logs.containing('[SenderIdentity] could not list sender domains: EREFUSED')).toHaveLength(1);
+    expect(logs.containing('[SenderIdentity] tick failed: Error')).toHaveLength(1);
+  });
+
+  // Breaks: a policy that could not be saved logged the store's error text.
+  it('logs an unsaved policy by the failure kind only', () => {
+    h.setBlobError = new Error('SQLITE_FULL: database or disk is full writing sentinel-key');
+    try {
+      setSenderIdentityPolicy({ logos: true, favicons: false, gravatar: false });
+    } finally {
+      h.setBlobError = null;
+    }
+    expect(logs.containing('sentinel-')).toEqual([]);
+    expect(logs.containing('[SenderIdentity] policy not persisted: Error')).toHaveLength(1);
   });
 });
 

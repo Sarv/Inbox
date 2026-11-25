@@ -8,11 +8,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * provisioning PATCH storm) and names match case-insensitively.
  */
 
-vi.mock('@sarvinbox/core', () => ({
-  createLogger: () => ({
-    info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
-  }),
-}));
+const logLines = vi.hoisted(() => [] as string[]);
+vi.mock('@sarvinbox/core', async () => {
+  const record = (...args: unknown[]) => { logLines.push(args.map(String).join(' ')); };
+  return {
+    // The real log helpers (see the helper): product log lines go through them.
+    ...(await import('../../../helpers/core-log-helpers')),
+    createLogger: () => ({ info: record, warn: record, error: record, debug: record, trace: record }),
+  };
+});
 
 import {
   deleteGmailLabelsUnder,
@@ -42,6 +46,7 @@ const jsonResponse = (body: unknown, status = 200): Response =>
   }) as unknown as Response;
 
 beforeEach(() => {
+  logLines.length = 0;
   calls = [];
   labels = [];
   failures = [];
@@ -263,5 +268,27 @@ describe('deleteGmailLabelsUnder', () => {
 
     failures = [{ match: (c) => c.method === 'GET', throws: true }];
     await expect(deleteGmailLabelsUnder('tok', 'P')).resolves.toBe(0);
+  });
+});
+
+describe('what reaches the log', () => {
+  const NAME = 'Sarv Inbox/Acme Sentinel Invoices';
+
+  // Breaks: '[GmailLabels] created "<name>"' and every failure line wrote the
+  // label's name (a category or label the user named), and a failure wrote
+  // Gmail's error body, which can quote it again.
+  it('names a label by its label code and a failure by its kind', async () => {
+    const { labelLogLabel } = await import('../../../helpers/core-log-helpers');
+    failures = [{ match: (c) => c.method === 'POST' && !!c.body?.color, status: 400, text: `Invalid color for ${NAME}` }];
+
+    await expect(ensureGmailLabelColor('tok', NAME, 'blue')).resolves.toBe(true);
+    failures = [{ match: () => true, throws: true }];
+    await renameGmailLabel('tok', NAME, `${NAME} 2`);
+    await deleteGmailLabelsUnder('tok', NAME);
+
+    expect(logLines.filter((l) => l.includes('Sentinel'))).toEqual([]);
+    expect(logLines).toContain(`[GmailLabels] create ${labelLogLabel(NAME)} with color failed: Error`);
+    expect(logLines).toContain(`[GmailLabels] created ${labelLogLabel(NAME)} (plain — color rejected)`);
+    expect(logLines).toContain('[GmailLabels] rename best-effort failed: Error');
   });
 });

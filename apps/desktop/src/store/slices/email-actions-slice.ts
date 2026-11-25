@@ -5,6 +5,7 @@
 // declared in vite.config.ts, vitest.config.ts and tsconfig.json.
 import { conversationFoldersOf, isDraftRow } from '@sarvinbox/core/conversation-membership';
 import { classifyFolder, isStarredFolder } from '@sarvinbox/core/folder-mapping';
+import { accountLogLabel } from '@sarvinbox/core/log-labels';
 import { createLogger } from '@sarvinbox/core/logger';
 
 import { addTag, removeTag, hasTag } from '../../utils/tags';
@@ -430,7 +431,7 @@ async function dispatchBulkByAccount(grouped: Map<string | undefined, string[]>,
         queuedIds: ids.filter((id) => result.data!.queuedIds?.includes(id) && !failed.has(id)),
       };
     } catch (error) {
-      console.warn('[Store] bulkAction failed for account', acct ?? '(active)', error);
+      console.warn('[Store] bulkAction failed for account', accountLogLabel(acct, '(active)'), error);
       return { processedIds: [], failedIds: ids, queuedIds: [] };
     }
   }));

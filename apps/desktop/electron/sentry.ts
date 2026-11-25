@@ -33,7 +33,6 @@
  * repo-root .env. A Sentry DSN is public by design (safe to embed in a shipped
  * client). With no DSN configured, Sentry stays completely inert.
  */
-import { createHash } from 'crypto';
 import { rmSync } from 'fs';
 import { join } from 'path';
 
@@ -42,7 +41,7 @@ import { setSlowQueryReporter, type SlowQueryEvent } from '@sarvinbox/storage-no
 import * as Sentry from '@sentry/electron/main';
 import { app } from 'electron';
 
-import { readCrashReportChoice, writeCrashReportChoice, type CrashReportChoice } from './services/crash-report-pref';
+import { crashReportInstallId, readCrashReportChoice, writeCrashReportChoice, type CrashReportChoice } from './services/crash-report-pref';
 
 let sentryEnabled = false;
 /**
@@ -271,6 +270,11 @@ export function initSentryMain(): void {
 
   sentryEnabled = true;
 
+  // Which installation a report came from: a random id, never anything derived
+  // from the user's address (see crashReportInstallId). Nothing is sent
+  // without a yes, whatever is set here.
+  Sentry.setUser({ id: crashReportInstallId() });
+
   // Tag runtime versions/platform so we can slice issues by build & OS. The
   // OS/device/electron contexts are added automatically by @sentry/electron;
   // these are the app-specific bits worth filtering on.
@@ -313,27 +317,22 @@ export function initSentryMain(): void {
 }
 
 /**
- * Identify which client an event came from, and tag the mailbox it was talking
- * to. Called on every successful IMAP connect. No-op when Sentry is disabled.
+ * Tag the mailbox server an event's client was talking to. Called on every
+ * IMAP connect. No-op when Sentry is disabled.
  *
- * We DON'T send the raw email address (PII). Instead the user id is a stable,
- * one-way hash of the email — it still groups a given client's events together
- * for support, but the address itself never leaves the machine. Provider + host
- * are infrastructure identifiers (not personal) and are kept for triage.
+ * Takes no address: the report's user is the installation's random id, set
+ * once at init (see crashReportInstallId). It used to be a hash of the
+ * address, which a guess at the address confirms. Provider + host are
+ * infrastructure identifiers (not personal) and are kept for triage.
  */
 export function identifyClient(params: {
-  email?: string;
   provider?: string;
   host?: string;
   port?: number;
 }): void {
   if (!sentryEnabled) return;
-  const { email, provider, host, port } = params;
+  const { provider, host, port } = params;
 
-  if (email) {
-    const id = createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0, 16);
-    Sentry.setUser({ id });
-  }
   if (provider) Sentry.setTag('imap.provider', provider);
   if (host) Sentry.setTag('imap.host', host);
   Sentry.setContext('imap', {

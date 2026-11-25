@@ -67,6 +67,15 @@ lands in `app.log` consistently:
   field NAMES (`setFieldNamesForLog`), a URL's scheme (`urlSchemeForLog`) and
   `errorDiagnostic(error)` instead of the error, whose message can quote any of
   those. Prove it with a sentinel test (`captureLogs`).
+- **Names that belong to the user are labels in a log line.** An account id
+  spells out its owner's address (`acct-<local part>-<domain>--<host>`):
+  write `accountLogLabel(id)`. A folder, Gmail label, keyword or AI category
+  the user created is text they typed: `folderLogLabel(path)` (system folders
+  stay readable), `labelLogLabel(name)`, `categoryLogLabel(slug, isSystem)`.
+  An absolute path names the user through their home folder: `logPath(p)` in
+  main (`<userData>/…`, `~/…`), `pathForLog` / `basename` elsewhere. The file
+  logger rewrites the home folder as `~` and, in a release, account ids it
+  finds, and crash reports get the same — a backstop, not a licence.
 
 ## Native modules: better-sqlite3 has TWO ABIs — never flip it by hand
 
@@ -422,12 +431,36 @@ Established shared helpers (extend this list as you add more):
   user's approval (or within the "Approve for me" cap), each row at most once,
   protected rows only when ticked, Undo only for rows still as the set left them.
   A new agent write tool stages through it; never call a mail action from a tool.
+- `accountLogLabel(id, missing?)` / `folderLogLabel(path)` / `labelLogLabel(name)` /
+  `categoryLogLabel(slug, system)` / `redactAccountIds(text)` —
+  `packages/core/src/utils/log-labels.ts` (renderer: `@sarvinbox/core/log-labels`).
+  The stand-ins a log line uses for the account (`acct#1a2b3c4d`), a folder,
+  label or AI category the user named: a short stable hash, so lines still
+  match and grep. `redactAccountIds` is the backstop the release file logger
+  and the crash-report scrubber run over every line.
+- `pathForLog(path, { userData, home })` / `redactHomeDir(text, home)` —
+  `packages/core/src/utils/log-paths.ts` (Node only); in main, `logPath(path)` /
+  `withoutHomeDir(text)` — `apps/desktop/electron/utils/log-path.ts`, rooted at
+  this app's data folder and the user's home. A path for a log line without the
+  home folder (and the user's name in it).
+- `crashReportInstallId()` — `apps/desktop/electron/services/crash-report-pref.ts`.
+  The crash reports' user id: a random UUID kept in userData, never anything
+  derived from an address.
+- `apps/desktop/test/helpers/core-log-helpers.ts` — the REAL core log helpers
+  (`errorDiagnostic`, the log labels, `pathForLog`) for a desktop test that mocks
+  `@sarvinbox/core` partially. Spread it first in the mock factory; a mock
+  without them fails at the first log line the code under test writes.
 - `createAssistantHarness()` — `apps/desktop/test/helpers/assistant-harness.ts`.
   The real Inbox Agent end to end for tests (real databases, history store and
   provider call path; scripted network). Use it instead of hand-wiring
   `InboxAssistantServiceDeps` when a test asks the agent a question. The
   evaluation in `apps/desktop/test/eval/assistant/` is built on it; see
   [docs/TESTING.md](docs/TESTING.md), "Inbox Agent evaluation".
+- `appJsFlags(extra?)` / `V8_MAX_OLD_SPACE_MB` — `apps/desktop/electron/v8-flags.ts`.
+  The app's V8 flags. Chromium passes `--js-flags` to every renderer, the extension
+  sandboxes included, so this 2 GB heap cap is also how much an extension can
+  take. Use it wherever Electron is launched with `js-flags`, the sandbox-escape
+  harness included, so a test runs under the cap that ships.
 
 ## Prefer a mature library over hand-rolled / regex logic
 

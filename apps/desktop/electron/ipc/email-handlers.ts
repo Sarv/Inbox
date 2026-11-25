@@ -6,7 +6,7 @@
 
 import path from 'path';
 
-import { createDeferredFetchError, errorDiagnostic, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, isStarredFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
+import { folderLogLabel, createDeferredFetchError, errorDiagnostic, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, isStarredFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
 import { app, ipcMain, dialog, shell, type IpcMainInvokeEvent } from 'electron';
 import ICAL from 'ical.js';
 
@@ -341,7 +341,7 @@ async function placeEmailInFolder(
           if (uids.length > 0) {
             uid = uids[0];
           } else {
-            logger.warn(`[Main] Message-ID ${msgId} not found in ${sourceFolder.path}, skipping IMAP ${mode}`);
+            logger.warn(`[Main] Message-ID ${msgId} not found in ${folderLogLabel(sourceFolder.path)}, skipping IMAP ${mode}`);
             return;
           }
         } finally {
@@ -2089,7 +2089,7 @@ export function registerEmailHandlers(): void {
             const deletable = items.filter((i) => typeof i.uid === 'number' && i.uid > 0);
             failedIds.push(...items.filter((i) => !deletable.includes(i)).map((i) => i.id));
             if (deletable.length < items.length) {
-              logger.warn(`[bulkAction] ${folderPath}: ${items.length - deletable.length} uid-less row(s) left in place for delete (no server UID — avoids a local/server mismatch)`);
+              logger.warn(`[bulkAction] ${folderLogLabel(folderPath)}: ${items.length - deletable.length} uid-less row(s) left in place for delete (no server UID — avoids a local/server mismatch)`);
             }
             // Permanent expunge ONLY when the source folder truly IS Trash (exact
             // classification, never a `path.includes('trash')` substring that
@@ -2122,7 +2122,7 @@ export function registerEmailHandlers(): void {
               catch (error) { logger.error('[Main] Accepted bulk delete local cleanup failed:', error); }
             } else {
               if (isTrash && allowPermanent !== true) {
-                logger.warn(`[bulkAction] delete in ${folderPath}: permanent expunge NOT confirmed by renderer — moving to Trash instead (no silent data loss)`);
+                logger.warn(`[bulkAction] delete in ${folderLogLabel(folderPath)}: permanent expunge NOT confirmed by renderer — moving to Trash instead (no silent data loss)`);
               }
               // Find trash folder for local DB update (exact classification).
               const trashFolder = findFolderByType(allFolders as any, 'trash') as any;

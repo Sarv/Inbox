@@ -16,7 +16,11 @@ import { emailRecord } from '../../../helpers/email-fixtures';
  * app.log or the renderer relay, or a recoverable answer stops being used.
  */
 
-const h = vi.hoisted(() => ({ fetch: vi.fn(), send: vi.fn(), answer: '', saved: [] as unknown[], eligibleFails: null as Error | null }));
+const SYSTEM_DEFS = [{ slug: 'needs_response', name: 'Needs Response', prompt: 'a request', isSystem: true }];
+const h = vi.hoisted(() => ({
+  fetch: vi.fn(), send: vi.fn(), answer: '', saved: [] as unknown[], eligibleFails: null as Error | null,
+  defs: [] as Array<{ slug: string; name: string; prompt: string; isSystem: boolean }>,
+}));
 const email = () => emailRecord({
   id: 'm1', fromAddress: 'vendor@example.com', toAddress: 'buyer@sarv.com', subject: 'Quote', tags: '|INBOX|',
   rawBody: '<p>Prices attached.</p>',
@@ -28,7 +32,7 @@ vi.mock('../../../../electron/shared', () => ({
     getEligibleEmailsForAI: () => { if (h.eligibleFails) throw h.eligibleFails; return [email()]; },
     getFolders: async () => [{ path: 'INBOX' }],
     getFolder: async () => ({ path: 'INBOX' }),
-    getEnabledCategoryDefinitions: () => [{ slug: 'needs_response', name: 'Needs Response', prompt: 'a request' }],
+    getEnabledCategoryDefinitions: () => h.defs,
     getSenderContextBatch: () => ({}),
     getSenderRepetitionStats: () => ({ sameSubject: {}, totalEmails: 1 }),
     getThreadDepths: () => ({}),
@@ -54,6 +58,7 @@ beforeEach(() => {
   h.send.mockReset();
   h.saved = [];
   h.eligibleFails = null;
+  h.defs = [...SYSTEM_DEFS];
   logs = captureLogs({ setLogSink, setLogLevel, getLogLevel });
 });
 afterEach(() => { logs.stop(); });
@@ -148,6 +153,24 @@ describe('standalone categorizer — what reaches the log', () => {
 // prompt, which is the user's mail. Both the per-email line (bulk) and the
 // whole-run line (realtime) used to carry it: 300 characters of it, and the
 // whole error with its stack.
+describe('standalone categorizer — category names in the log', () => {
+  // Breaks: 'Saved N categorizations (<slug>:<n> …)' wrote a custom category's
+  // slug, which is made from the name the user typed ('acme-sentinel-invoices');
+  // or a built-in one turned into a code nobody can read.
+  it('writes a built-in category by its slug and the user\'s own by its label', async () => {
+    const { categoryLogLabel } = await import('@sarvinbox/core');
+    h.defs = [...SYSTEM_DEFS, { slug: 'acme-sentinel-invoices', name: 'Acme Sentinel Invoices', prompt: 'invoices from Acme', isSystem: false }];
+    h.answer = JSON.stringify([{ emailId: 'm1', categories: ['needs_response', 'acme-sentinel-invoices'], is_spam: false, confidence: 0.9, reasoning: 'ok' }]);
+
+    await run();
+
+    expect(h.saved).toHaveLength(1);
+    expect(logs.containing('acme-sentinel')).toEqual([]);
+    expect(relayed().filter((line) => line.includes('acme-sentinel'))).toEqual([]);
+    expect(logs.containing(`Saved 1 categorizations (needs_response:1 ${categoryLogLabel('acme-sentinel-invoices', false)}:1)`)).toHaveLength(1);
+  });
+});
+
 describe('standalone categorizer — a provider error in the log', () => {
   const refuse = () => h.fetch.mockImplementation(async () =>
     new Response(`{"error":{"message":"Invalid prompt near: ${SENTINEL} wrote about the payslip"}}`, { status: 400 }));

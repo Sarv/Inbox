@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-11-24
+## [1.5.0] - 2026-11-25
 
 ### Added
 - **Inbox Agent works through a request step by step.** It now decides for
@@ -107,6 +107,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this sender as read" no longer runs a phrase-matching command of its own. It
   goes to the agent like any other request, which finds the emails it means
   and prepares a card.
+
+### Fixed
+- **Keyboard shortcuts keep working after you click inside a message.**
+  Clicking a link in an email (or anywhere in its text) moved the keyboard into
+  the message, and every shortcut — next and previous mail, archive, delete,
+  search, Escape — stopped responding until you clicked somewhere outside it.
+  Shortcuts now work straight away, in the standard view and in chat view,
+  while copying text you selected in the message and typing into a field in it
+  work as before.
+- **Searching for a common word no longer freezes the app.** A search used to
+  read the full text of every email that matched before showing the first
+  page, so a word found in thousands of emails (such as "meeting") could stop
+  the whole app for half a minute, and an Inbox Agent question that ran many
+  searches could hang it for minutes. Search now picks the page of results
+  first and reads only those emails.
+- **A crashed extension comes back even when the computer is slow to
+  recover.** When an extension crashes, for example by running out of memory,
+  the app starts it again, up to three times. If the first of those starts was
+  slow because the computer was still freeing the memory the crash had used,
+  that one slow start ended the recovery: the extension stayed off until the
+  app was restarted. A start that is too slow now counts as one attempt and
+  the next one follows. You are told only once every attempt has failed.
+- **New mail no longer stops arriving in a folder after one failed sync.** If
+  fetching a folder's new mail failed once (a timeout, a dropped connection, a
+  busy server), the app still noted the folder as up to date, and the regular
+  background sync then skipped it as unchanged. The missed mail stayed on the
+  server until something else arrived in that folder or you refreshed it by
+  hand. A folder is now noted as up to date only once its new mail has really
+  been downloaded, so the next sync picks up what the failed one missed.
+
+### Security
+- **The XML reader used for office attachments is updated to 5.12.** It fixes a
+  low-severity slowdown on malformed tags
+  ([GHSA-474x-hrwr-fgx4](https://github.com/advisories/GHSA-474x-hrwr-fgx4)).
+  Sarv Inbox never used the affected feature, so earlier versions were not
+  exposed.
+- **The log file no longer names your accounts, folders or user folder.**
+  Every line about an account carried its internal id, which spells out the
+  email address, and lines about syncing named your folders, labels and AI
+  categories. These are now written as short codes (system folders such as
+  Inbox and Sent keep their names), file locations are written without your
+  home folder, and failures that could quote mail or a server's answer are
+  recorded by their kind only.
+- **Crash reports carry less about you.** A report no longer identifies you by
+  a shortened hash of your email address, which anyone guessing your address
+  could confirm; it uses a random code made on your computer instead. Web
+  requests in a report no longer keep their query string (which can hold keys
+  and search words), and sign-in codes, keys, passphrases and `Basic`
+  passwords are removed from reports and the log file wherever they appear.
+- **Sign-in tokens are never resent to a redirected address.** If an email
+  provider's token service answered a refresh with a redirect, the app would
+  have sent your refresh token again to wherever it pointed. It now refuses
+  the redirect and retries later, and the same goes for fetching your profile
+  after sign-in.
+
 
 ## [1.4.12] - 2026-11-24
 

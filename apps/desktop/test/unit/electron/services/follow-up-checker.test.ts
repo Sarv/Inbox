@@ -35,7 +35,9 @@ vi.mock('../../../../electron/shared', () => ({
 vi.mock('../../../../electron/services/notification-service', () => ({
   notifyFollowUpDue: (notice: Record<string, unknown>) => h.notified.push(notice),
 }));
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
+  // The real log helpers (see the helper): product log lines go through them.
+  ...(await import('../../../helpers/core-log-helpers')),
   createLogger: () => ({ info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }),
 }));
 

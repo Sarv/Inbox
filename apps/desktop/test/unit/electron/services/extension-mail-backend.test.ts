@@ -33,6 +33,8 @@ vi.mock('@sarvinbox/core', async () => {
     '../../../../../../packages/core/src/extensions/workflow-effects'
   );
   return {
+    // The real log helpers (see the helper): product log lines go through them.
+    ...(await import('../../../helpers/core-log-helpers')),
     planWorkflowEffects: effects.planWorkflowEffects,
     createLogger: () => ({
       info: (...args: unknown[]) => h.logs.push(args.join(' ')),
@@ -230,6 +232,19 @@ describe('applyLabels', () => {
     await expect(backend.applyLabels('tagger', 'e1', { add: ['starred'] })).rejects.toThrow(
       /may not apply 'starred'/
     );
+  });
+
+  // Regression: '<extension> changed <id>: +[<tags>]' wrote the tags an
+  // extension chose, which it names from the mail it read ('invoice-acme-q3').
+  it('logs the tags it changed as label codes, never their names', async () => {
+    const { labelLogLabel } = await import('../../../helpers/core-log-helpers');
+    const storage = makeStorage({ 'e1': makeEmail('e1') });
+    install(storage, ['e1'], ['email:label']);
+
+    await createExtensionMailBackend().applyLabels('tagger', 'e1', { add: ['acme-sentinel-invoice'] });
+
+    expect(h.logs.join('\n')).not.toContain('acme-sentinel');
+    expect(h.logs.join('\n')).toContain(`tagger changed e1: +[${labelLogLabel('acme-sentinel-invoice')}] -[]`);
   });
 
   // Regression: a server push that fails must not abandon the local change or

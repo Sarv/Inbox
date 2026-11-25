@@ -24,7 +24,7 @@ import type { WorkflowResult } from '../pipeline/types';
 import { EmailWorkflow, WorkflowContext, WorkflowPriority } from '../pipeline/types';
 import type { EmailRecord } from '../types/models';
 import { logger } from '../utils/logger';
-import { withTimeout } from '../utils/timeout';
+import { isTimeoutError, withTimeout } from '../utils/timeout';
 
 import {
   createExtensionContext,
@@ -494,7 +494,7 @@ export class ExtensionHost {
     const timer = setTimeout(() => {
       const state = this.restarts.get(extensionId);
       if (state) state.timer = null;
-      void this.activate(loaded, installed.grantedPermissions).catch((error) => {
+      void this.activate(loaded, installed.grantedPermissions, { afterCrash: true }).catch((error) => {
         logger.warn(`Restarting ${extensionId} failed:`, error);
       });
     }, delay);
@@ -592,9 +592,15 @@ export class ExtensionHost {
   /**
    * Activate a single extension
    */
+  /**
+   * @param options.afterCrash this start is one of the restarts planned after a crash
+   *   (see `planRestart`): a sandbox that is too slow to start then gets the next
+   *   attempt instead of ending the recovery.
+   */
   async activate(
     loaded: LoadedExtension,
-    grantedPermissions: ExtensionPermission[]
+    grantedPermissions: ExtensionPermission[],
+    options: { afterCrash?: boolean } = {}
   ): Promise<void> {
     const { manifest, entryPoint } = loaded;
 
@@ -720,6 +726,15 @@ export class ExtensionHost {
       const message = error instanceof Error ? error.message : String(error);
       info.state = ExtensionState.ERROR;
       this.registry.setRuntimeInfo(manifest.id, info);
+      // A restart after a crash whose sandbox did not come up in time is the machine,
+      // not the extension: an out-of-memory crash leaves the OS reclaiming what the
+      // renderer held, and the first start after it can overrun the load timeout. That
+      // is one attempt, not the end of the recovery. Planned BEFORE the report, so no
+      // card is shown while another attempt is due; once they run out, it is. A refusal
+      // or the extension's own code failing is not retried.
+      if (options.afterCrash && !sandboxStarted && isTimeoutError(error)) {
+        this.planRestart(manifest.id);
+      }
       if (!sandboxStarted) {
         // The host refused or could not start it, and says why.
         this.reportProblem(manifest.id, message);

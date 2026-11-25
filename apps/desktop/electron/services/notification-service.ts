@@ -132,7 +132,7 @@ export function notifyNewMail(m: NewMailNotice): void {
   };
   try {
     if (logger.isLevelEnabled('trace')) {
-      logger.trace(`[notifications] consider ${m.emailId} mode=${config.mode} cats=${m.categories ? `[${m.categories.join(',')}]` : 'none'} date=${m.date} from=${m.fromAddress}`);
+      logger.trace(`[notifications] consider ${m.emailId} mode=${config.mode} cats=${m.categories ? m.categories.length : 'none'} date=${m.date} from=${m.fromAddress}`);
     }
     if (config.mode === 'off') return drop('mode=off');
     if (notified.has(m.emailId)) return drop('already notified');

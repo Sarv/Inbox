@@ -11,6 +11,7 @@ import {
   STANDARD_DRAFT_FOLDERS,
   conversationFoldersOf,
   createLogger,
+  errorDiagnostic,
   type ConversationFolders,
 } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
@@ -57,12 +58,12 @@ export function conversationFoldersIn(db: Database.Database): ConversationFolder
     rows = prepared(db, 'SELECT * FROM folders').all() as typeof rows;
   } catch (error) {
     if (NO_FOLDERS_TABLE.test(String((error as Error)?.message ?? error))) return conversationFoldersOf([]);
-    log.warn('conversationFoldersIn: folders table unreadable; refusing to guess the Drafts/Sent folders', error);
+    log.warn('conversationFoldersIn: folders table unreadable; refusing to guess the Drafts/Sent folders', errorDiagnostic(error));
     throw error;
   }
   if (rows.length > 0 && typeof rows[0].path !== 'string') {
     const error = new Error('conversationFoldersIn: folders rows carry no path');
-    log.warn('conversationFoldersIn: folders table unreadable; refusing to guess the Drafts/Sent folders', error);
+    log.warn('conversationFoldersIn: folders table unreadable; refusing to guess the Drafts/Sent folders', errorDiagnostic(error));
     throw error;
   }
   return conversationFoldersOf(rows.map((row) => ({

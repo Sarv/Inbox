@@ -5,6 +5,9 @@
  */
 
 import {
+  failureCause,
+  folderLogLabel,
+  accountLogLabel,
   conversationSenders,
   createLogger,
   errorDiagnostic,
@@ -99,7 +102,7 @@ export async function clearFirstSplitsInEveryAccount(): Promise<FirstSplitClearA
   const failedAccounts: string[] = [];
   const fail = (accountId: string, error: unknown): void => {
     failedAccounts.push(accountId);
-    logger.warn(`firstSplit:clearAll failed for account ${accountId}: ${(error as Error)?.message ?? error}`);
+    logger.warn(`firstSplit:clearAll failed for account ${accountLogLabel(accountId)}: ${failureCause(error)}`);
   };
   const add = (counts: FirstSplitClearCounts): void => {
     cleared += counts.removed;
@@ -189,7 +192,7 @@ export function registerAIHandlers(): void {
         const emails = await storage.getEmailsByDynamicCategory(category, { limit, offset, folderId });
         return { success: true, data: emails };
       } catch (error) {
-        logger.error('AI getByCategory error:', error);
+        logger.error('AI getByCategory error:', errorDiagnostic(error));
         return { success: false, error: (error as Error).message };
       }
     }
@@ -204,7 +207,7 @@ export function registerAIHandlers(): void {
       const counts = storage.getDynamicCategoryCounts(folderId, mode);
       return { success: true, data: counts };
     } catch (error) {
-      logger.error('AI getCategoryCounts error:', error);
+      logger.error('AI getCategoryCounts error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -218,7 +221,7 @@ export function registerAIHandlers(): void {
       const defs = storage.getCategoryDefinitions();
       return { success: true, data: defs };
     } catch (error) {
-      logger.error('AI getCategoryDefinitions error:', error);
+      logger.error('AI getCategoryDefinitions error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -246,7 +249,7 @@ export function registerAIHandlers(): void {
       }
       return { success: true, data: merged };
     } catch (error) {
-      logger.error('AI getEmailCategoriesBatch error:', error);
+      logger.error('AI getEmailCategoriesBatch error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -266,7 +269,7 @@ export function registerAIHandlers(): void {
       void onCategoryDefinitionUpserted(oldName, def?.name);
       return { success: true };
     } catch (error) {
-      logger.error('AI upsertCategoryDefinition error:', error);
+      logger.error('AI upsertCategoryDefinition error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -280,7 +283,7 @@ export function registerAIHandlers(): void {
       const deleted = storage.deleteCategoryDefinition(slug);
       return { success: true, data: { deleted } };
     } catch (error) {
-      logger.error('AI deleteCategoryDefinition error:', error);
+      logger.error('AI deleteCategoryDefinition error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -294,7 +297,7 @@ export function registerAIHandlers(): void {
       storage.toggleCategoryDefinition(slug, enabled);
       return { success: true };
     } catch (error) {
-      logger.error('AI toggleCategoryDefinition error:', error);
+      logger.error('AI toggleCategoryDefinition error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -308,7 +311,7 @@ export function registerAIHandlers(): void {
       const summary = await storage.getThreadSummary(threadId);
       return { success: true, data: summary };
     } catch (error) {
-      logger.error('AI getThreadSummary error:', error);
+      logger.error('AI getThreadSummary error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -322,7 +325,7 @@ export function registerAIHandlers(): void {
       await storage.upsertThreadSummary(summary);
       return { success: true };
     } catch (error) {
-      logger.error('AI saveThreadSummary error:', error);
+      logger.error('AI saveThreadSummary error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -335,7 +338,7 @@ export function registerAIHandlers(): void {
         const storage = await requireAccountStorage(accountId);
         return { success: true, data: readFirstSplit(storage, threadId, !!options?.withSource) };
       } catch (error) {
-        logger.warn(`firstSplit:get failed acct=${accountId} thread=${threadId}: ${(error as Error).message}`);
+        logger.warn(`firstSplit:get failed acct=${accountLogLabel(accountId)} thread=${threadId}: ${failureCause(error)}`);
         return { success: false, error: (error as Error).message };
       }
     },
@@ -347,11 +350,11 @@ export function registerAIHandlers(): void {
       const storage = await requireAccountStorage(accountId);
       const result = storage.saveFirstSplit(request);
       if (result.reason === 'invalid') {
-        logger.warn(`firstSplit:save refused an invalid payload acct=${accountId} thread=${request?.key?.threadId ?? '?'} status=${request?.status ?? '?'}`);
+        logger.warn(`firstSplit:save refused an invalid payload acct=${accountLogLabel(accountId)} thread=${request?.key?.threadId ?? '?'} status=${request?.status ?? '?'}`);
       }
       return { success: true, data: result };
     } catch (error) {
-      logger.warn(`firstSplit:save failed acct=${accountId} thread=${request?.key?.threadId ?? '?'}: ${(error as Error).message}`);
+      logger.warn(`firstSplit:save failed acct=${accountLogLabel(accountId)} thread=${request?.key?.threadId ?? '?'}: ${failureCause(error)}`);
       return { success: false, error: (error as Error).message };
     }
   });
@@ -365,9 +368,8 @@ export function registerAIHandlers(): void {
     } catch (error) {
       // Only the registry read can throw here: which accounts exist is unknown,
       // so nothing may be reported as cleared.
-      const message = (error as Error)?.message ?? String(error);
-      logger.warn(`firstSplit:clearAll could not read the account list: ${message}`);
-      return { success: false, error: `Could not read the account list: ${message}` };
+      logger.warn(`firstSplit:clearAll could not read the account list: ${failureCause(error)}`);
+      return { success: false, error: `Could not read the account list: ${(error as Error)?.message ?? String(error)}` };
     }
   });
 
@@ -380,7 +382,7 @@ export function registerAIHandlers(): void {
       await storage.upsertEmailAICategory(category);
       return { success: true };
     } catch (error) {
-      logger.error('AI saveCategory error:', error);
+      logger.error('AI saveCategory error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -394,7 +396,7 @@ export function registerAIHandlers(): void {
       await storage.removeEmailAICategory(emailId);
       return { success: true };
     } catch (error) {
-      logger.error('AI removeCategory error:', error);
+      logger.error('AI removeCategory error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -408,7 +410,7 @@ export function registerAIHandlers(): void {
       const emails = await storage.getEmailsWithoutAICategory(limit);
       return { success: true, data: emails };
     } catch (error) {
-      logger.error('AI getUnprocessedEmails error:', error);
+      logger.error('AI getUnprocessedEmails error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -422,7 +424,7 @@ export function registerAIHandlers(): void {
       const saved = storage.upsertCategoryBatch(categories);
       return { success: true, data: { saved } };
     } catch (error) {
-      logger.error('AI saveCategoriesBatch error:', error);
+      logger.error('AI saveCategoriesBatch error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -436,7 +438,7 @@ export function registerAIHandlers(): void {
       const count = await storage.getUnprocessedEmailCount(limit, skipRead);
       return { success: true, data: count };
     } catch (error) {
-      logger.error('AI getUnprocessedEmailCount error:', error);
+      logger.error('AI getUnprocessedEmailCount error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -484,7 +486,7 @@ export function registerAIHandlers(): void {
     try {
       return { success: true, data: { cap: setAutoBacklogCap(cap) } };
     } catch (error) {
-      logger.error('AI setBacklogCap error:', error);
+      logger.error('AI setBacklogCap error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -531,7 +533,7 @@ export function registerAIHandlers(): void {
       const repo = (storage as any).getRepositories?.()?.prompts;
       return { success: true, data: repo?.list?.() || [] };
     } catch (error) {
-      logger.error('AI listPromptTemplates error:', error);
+      logger.error('AI listPromptTemplates error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -546,7 +548,7 @@ export function registerAIHandlers(): void {
       const updated = repo?.update?.(id, content) || false;
       return { success: updated };
     } catch (error) {
-      logger.error('AI updatePromptTemplate error:', error);
+      logger.error('AI updatePromptTemplate error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -558,7 +560,7 @@ export function registerAIHandlers(): void {
       const reset = repo?.reset?.(id) || false;
       return { success: reset };
     } catch (error) {
-      logger.error('AI resetPromptTemplate error:', error);
+      logger.error('AI resetPromptTemplate error:', errorDiagnostic(error));
       return { success: false, error: (error as Error).message };
     }
   });
@@ -645,7 +647,7 @@ export function registerAIHandlers(): void {
           sortOrder: 'desc',
         });
 
-        logger.info(`[AI Search] Found ${emails.length} results (folder=${folderPath || 'all'}, aiCategory=${searchQuery.aiCategory ? 'set' : 'none'})`);
+        logger.info(`[AI Search] Found ${emails.length} results (folder=${folderPath ? folderLogLabel(folderPath) : 'all'}, aiCategory=${searchQuery.aiCategory ? 'set' : 'none'})`);
         return { success: true, data: emails };
       } catch (error) {
         // A full-text search error names the query's tokens: class and code only.

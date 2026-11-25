@@ -33,6 +33,7 @@ import { ExtensionManager } from '../../../src/extensions/extension-manager';
 import type { ExtensionRegistry } from '../../../src/extensions/extension-registry';
 import {
   DEACTIVATE_TIMEOUT_MS,
+  DEFAULT_INVOKE_TIMEOUT_MS,
   ExtensionBridge,
   HOST_CALL_SLICE_MS,
   MAX_DESCRIPTION_LENGTH,
@@ -59,6 +60,7 @@ import type { WorkflowContext } from '../../../src/pipeline/types';
 import { captureLogs } from '../../../src/test-support/log-capture';
 import type { EmailRecord } from '../../../src/types/models';
 import { getLogLevel, setLogLevel, setLogSink } from '../../../src/utils/logger';
+import { TimeoutError } from '../../../src/utils/timeout';
 
 let workDir: string;
 
@@ -1582,6 +1584,46 @@ function restartableHost(modules: Record<string, SandboxExtensionModule>, regist
   return { host, closes, started };
 }
 
+/**
+ * A host whose Nth sandbox start does what `starts[N]` says: 'ok' starts it, 'slow' fails
+ * as a sandbox that did not load in time does (a TimeoutError), 'refused' fails as a host
+ * refusal does, 'hangs' starts the sandbox but the extension's own activate never returns.
+ * Past the end of the list every start is 'ok'.
+ */
+function scriptedStartHost(
+  starts: ('ok' | 'slow' | 'refused' | 'hangs')[],
+  registry: ReturnType<typeof registryWith>,
+  ui?: ExtensionUIBackend
+) {
+  const closes = new Map<string, (reason?: string, details?: { transient: boolean }) => void>();
+  const started: string[] = [];
+  const host = new ExtensionHost({
+    registry,
+    eventBus: createEventBus(),
+    storageBackend: memoryStorage(),
+    settingsBackend: memorySettings(),
+    uiBackend: ui,
+    extensionStoragePath: join(workDir, 'storage'),
+    createChannel: (target) => {
+      const plan = starts[started.length] ?? 'ok';
+      started.push(target.extensionId);
+      if (plan === 'slow') return Promise.reject(new TimeoutError('The extension sandbox did not load'));
+      if (plan === 'refused') return Promise.reject(new Error('Extensions are off'));
+      const pair = createInProcessChannelPair();
+      startExtensionSandbox(pair.sandbox, () => (plan === 'hangs' ? { activate: () => new Promise<void>(() => {}) } : { activate() {} }));
+      return {
+        post: (message: unknown) => pair.host.post(message),
+        onMessage: (handler: (message: unknown) => void) => pair.host.onMessage(handler),
+        onClose: (handler: (reason?: string, details?: { transient: boolean }) => void) => {
+          closes.set(target.extensionId, handler);
+        },
+        close: () => pair.host.close(),
+      };
+    },
+  });
+  return { host, closes, started };
+}
+
 describe('after a sandbox dies', () => {
   const { 0: first, 1: second, 2: third } = SANDBOX_RESTART_DELAYS_MS;
   const fake = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -1699,6 +1741,111 @@ describe('after a sandbox dies', () => {
     await vi.advanceTimersByTimeAsync(10 * 60_000);
 
     expect(attempts).toBe(1);
+    vi.useRealTimers();
+  });
+
+  // Breaks: an out-of-memory crash leaves the OS reclaiming what the renderer held, and
+  // the first restart's sandbox overruns its load timeout. That one slow start ended the
+  // recovery: the extension stayed off for the session although attempts were left.
+  it('tries again when a restart after a crash is too slow to start, and says nothing while it recovers', async () => {
+    fake();
+    const loaded = extension('a');
+    const reportProblem = vi.fn();
+    const registry = registryWith({ a: { loaded } });
+    const { host, closes, started } = scriptedStartHost(['ok', 'slow'], registry, { notify: vi.fn(), dismiss: vi.fn(), reportProblem });
+    await host.activate(loaded, []);
+
+    closes.get('a')?.('This extension ran out of memory and was stopped.', { transient: true });
+    await vi.advanceTimersByTimeAsync(first + 1);
+    await vi.waitFor(() => expect(started).toHaveLength(2));
+    expect(host.isActive('a')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(second + 1);
+    await vi.waitFor(() => expect(host.isActive('a')).toBe(true));
+    expect(started).toEqual(['a', 'a', 'a']);
+    // Recovered on the next attempt: nothing worth a card.
+    expect(reportProblem).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    await host.dispose();
+  });
+
+  // Breaks: a sandbox that never starts in time is retried for ever, or gives up without
+  // a word. The slow starts use up the same bounded attempts as crashes, then one card.
+  it('gives up after the bounded attempts when every restart is too slow, and only then says so', async () => {
+    fake();
+    const loaded = extension('a');
+    const reportProblem = vi.fn();
+    const registry = registryWith({ a: { loaded } });
+    const { host, closes, started } = scriptedStartHost(['ok', 'slow', 'slow', 'slow'], registry, { notify: vi.fn(), dismiss: vi.fn(), reportProblem });
+    await host.activate(loaded, []);
+
+    closes.get('a')?.('This extension ran out of memory and was stopped.', { transient: true });
+    for (const delay of [first, second]) {
+      await vi.advanceTimersByTimeAsync(delay + 1);
+      expect(reportProblem).not.toHaveBeenCalled();
+    }
+    await vi.advanceTimersByTimeAsync(third + 1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+    expect(started).toHaveLength(1 + SANDBOX_RESTART_DELAYS_MS.length);
+    expect(host.isActive('a')).toBe(false);
+    expect(reportProblem).toHaveBeenCalledTimes(1);
+    expect(reportProblem.mock.calls[0][1].body).toContain('did not load');
+    vi.useRealTimers();
+  });
+
+  // Breaks: a restart the host refused is retried. A refusal is a fact about this
+  // computer, not a slow moment: it would be refused the same way each time.
+  it('does not retry a restart after a crash that the host refused', async () => {
+    fake();
+    const loaded = extension('a');
+    const reportProblem = vi.fn();
+    const registry = registryWith({ a: { loaded } });
+    const { host, closes, started } = scriptedStartHost(['ok', 'refused'], registry, { notify: vi.fn(), dismiss: vi.fn(), reportProblem });
+    await host.activate(loaded, []);
+
+    closes.get('a')?.('This extension crashed and was stopped.', { transient: true });
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+    expect(started).toEqual(['a', 'a']);
+    expect(reportProblem).toHaveBeenCalledTimes(1);
+    expect(reportProblem.mock.calls[0][1].body).toContain('Extensions are off');
+    vi.useRealTimers();
+  });
+
+  // Breaks: an extension whose own activate() never returns is started again and again.
+  // Its sandbox came up, so the machine was not the problem: its code was.
+  it('does not retry a restart whose extension code timed out starting', async () => {
+    fake();
+    const loaded = extension('a');
+    const reportProblem = vi.fn();
+    const registry = registryWith({ a: { loaded } });
+    const { host, closes, started } = scriptedStartHost(['ok', 'hangs'], registry, { notify: vi.fn(), dismiss: vi.fn(), reportProblem });
+    await host.activate(loaded, []);
+
+    closes.get('a')?.('This extension crashed and was stopped.', { transient: true });
+    await vi.advanceTimersByTimeAsync(first + DEFAULT_INVOKE_TIMEOUT_MS + 1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+    expect(started).toEqual(['a', 'a']);
+    expect(host.isActive('a')).toBe(false);
+    expect(reportProblem).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  // Breaks: a first start (or the user's own restart) that times out starts a retry loop
+  // nobody asked for. Only the restarts planned after a crash try again.
+  it('does not retry a first start that was too slow', async () => {
+    fake();
+    const loaded = extension('a');
+    const registry = registryWith({ a: { loaded } });
+    const { host, started } = scriptedStartHost(['slow'], registry);
+
+    await expect(host.activate(loaded, [])).rejects.toThrow('did not load');
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+    expect(started).toEqual(['a']);
+    expect(host.isActive('a')).toBe(false);
     vi.useRealTimers();
   });
 

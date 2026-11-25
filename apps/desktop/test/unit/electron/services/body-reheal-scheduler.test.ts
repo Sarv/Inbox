@@ -1,4 +1,4 @@
-import { createDeferredFetchError, FIRST_SPLIT_VERSION } from '@sarvinbox/core';
+import { accountLogLabel, createDeferredFetchError, FIRST_SPLIT_VERSION } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -583,7 +583,7 @@ describe('the drain', () => {
     svc.startBodyRehealScheduler();
     await advance(FIRST_TICK_MS);
     expect(acct.fetched).toEqual(['e1', 'e2']);
-    expect(h.logs.filter((line) => line.startsWith('Body re-heal acct-a:'))).toEqual([
+    expect(h.logs.filter((line) => line.startsWith(`Body re-heal ${accountLogLabel('acct-a')}:`))).toEqual([
       expect.stringContaining('repaired 2, failed 0'),
     ]);
     svc.stopBodyRehealScheduler();
@@ -599,7 +599,7 @@ describe('the drain', () => {
     await advance(FIRST_TICK_MS);
     expect(acct.fetched).toEqual(['e1', 'e2']);
     expect(acct.deletedSplits).toEqual([]);
-    expect(h.logs.filter((line) => line.startsWith('Body re-heal acct-a:'))).toEqual([
+    expect(h.logs.filter((line) => line.startsWith(`Body re-heal ${accountLogLabel('acct-a')}:`))).toEqual([
       expect.stringContaining('repaired 2, failed 0'),
     ]);
     svc.stopBodyRehealScheduler();

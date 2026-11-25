@@ -1,5 +1,5 @@
 import { authenticationFailed } from '@sarv-in/mailguard';
-import { classifyFolder, createLogger, getEventBus, hasTag, sanitizeIcsText, type EmailRecord } from '@sarvinbox/core';
+import { accountLogLabel, classifyFolder, createLogger, getEventBus, hasTag, sanitizeIcsText, type EmailRecord } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
 import { findStorageForEmail, getAccountIdForStorage, getAllAccountRuntimes, getMainWindow, getSyncEngineFor } from '../shared';
@@ -94,7 +94,7 @@ export class CalendarMailSync {
           const state = error instanceof BlockedCalendarMail ? 'blocked' : error instanceof InvalidCalendarMail ? 'ignored' : 'pending';
           this.database().prepare('UPDATE local_calendar_mail_work SET state=?,attempts=attempts+1,next_attempt=? WHERE account_id=? AND email_id=?')
             .run(state, this.clock() + Math.min(30 * 60_000, 30_000 * 2 ** Math.min(row.attempts, 6)), row.accountId, row.emailId);
-          log.debug('Calendar invitation deferred or ignored', row.accountId, row.emailId, error instanceof Error ? error.message : 'Unavailable');
+          log.debug('Calendar invitation deferred or ignored', accountLogLabel(row.accountId), row.emailId, error instanceof Error ? error.message : 'Unavailable');
         }
       }
     } finally { this.draining = false; }
