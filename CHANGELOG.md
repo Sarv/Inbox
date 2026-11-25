@@ -114,6 +114,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Shortcuts now work straight away, in the standard view and in chat view,
   while copying text you selected in the message and typing into a field in it
   work as before.
+- **Searching for a common word no longer freezes the app.** A search used to
+  read the full text of every email that matched before showing the first
+  page, so a word found in thousands of emails (such as "meeting") could stop
+  the whole app for half a minute, and an Inbox Agent question that ran many
+  searches could hang it for minutes. Search now picks the page of results
+  first and reads only those emails.
 
 ## [1.4.12] - 2026-11-24
 

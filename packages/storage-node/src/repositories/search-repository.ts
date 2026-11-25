@@ -22,6 +22,20 @@ const SEARCH_SORT_COLUMNS = new Set([
 const SEARCH_THREAD_KEY = `COALESCE(NULLIF(emails.thread_id, ''), emails.id)`;
 
 /**
+ * How a search index row reaches its email: by rowid, which the index holds
+ * equal to the `emails` rowid it mirrors (the ROWID CONTRACT in fts-schema.ts).
+ *
+ * Never through the stored `email_id` column. fts5 cannot hand out a stored
+ * column without loading that row's whole stored text — subject, addresses and
+ * the full body, decrypted page by page — so a join on it read the complete
+ * text of EVERY match just to learn its id. Reading the rowid reads nothing.
+ */
+const FTS_JOIN = 'emails.rowid = emails_fts.rowid';
+
+// bm25 weights: email_id(0) > subject(10) > from_address(5) > from_name(3) > to(3) > cc(2) > attachments(2) > body(1)
+const FTS_RELEVANCE = 'bm25(emails_fts, 0, 10, 5, 3, 3, 2, 2, 1)';
+
+/**
  * Repository for FTS5-powered search
  */
 export class SearchRepository extends BaseRepository {
@@ -149,38 +163,55 @@ export class SearchRepository extends BaseRepository {
   search(query: SearchQuery): EmailRecord[] {
     if (query.collapseThreads) return this.searchThreads(query);
     const textQuery = query.query?.trim();
-    const useFTS = textQuery && textQuery.length > 0;
-
-    let sql: string;
-    const params: any[] = [];
-
-    if (useFTS) {
-      const ftsQuery = this.escapeFTSQuery(textQuery);
-
-      if (!ftsQuery) {
-        // FTS query was empty after escaping, fall back to LIKE
-        return this.searchWithLike(query);
-      }
-
-      // bm25 weights: email_id(0) > subject(10) > from_address(5) > from_name(3) > to(3) > cc(2) > attachments(2) > body(1)
-      sql = `
-        SELECT ${this.emailSelect('emails', query.headersOnly)}, ${this.threadMeta()},
-               bm25(emails_fts, 0, 10, 5, 3, 3, 2, 2, 1) as relevance_score
-        FROM emails_fts
-        JOIN emails ON emails.id = emails_fts.email_id
-        WHERE emails_fts MATCH ?
-      `;
-      params.push(ftsQuery);
-    } else {
-      sql = `SELECT ${this.emailSelect('emails', query.headersOnly)}, ${this.threadMeta()} FROM emails WHERE 1=1`;
+    const ftsQuery = textQuery ? this.escapeFTSQuery(textQuery) : '';
+    // FTS query was empty after escaping, fall back to LIKE
+    if (textQuery && !ftsQuery) return this.searchWithLike(query);
+    try {
+      return this.searchPage(query, { ftsQuery });
+    } catch (error) {
+      logger.error('[SearchRepo] FTS search failed, falling back to LIKE:', error);
+      return this.searchWithLike(query);
     }
+  }
 
+  /**
+   * One page of matching messages, chosen BEFORE any of them is read in full.
+   *
+   * The page is picked from narrow rows (rowid, date, sort key, score) and only
+   * its members are then hydrated (bodies, calendar data, thread metadata).
+   * Selecting the whole record and letting `ORDER BY … LIMIT` trim it instead
+   * made SQLite build every column of EVERY match before sorting: a body read
+   * through `email_bodies`, and in the FTS path also each match's stored copy of
+   * its own text, decrypted page by page. A common word ("meeting") matches
+   * thousands of messages, so one 61-row search of a real mailbox froze the main
+   * process for 25 seconds (2026-11-24, an Inbox Agent question that ran 48
+   * such searches). Choosing the page first reads the bodies of 61, not 6,000.
+   */
+  private searchPage(query: SearchQuery, match: { ftsQuery?: string; likeOnly?: boolean }): EmailRecord[] {
+    const params: unknown[] = [];
+    const useFTS = !!match.ftsQuery;
+    let from = 'FROM emails WHERE 1=1';
+    if (useFTS) {
+      from = `FROM emails_fts JOIN emails ON ${FTS_JOIN} WHERE emails_fts MATCH ?`;
+      params.push(match.ftsQuery);
+    }
     // All folder/category/field/date/size filters (shared with count()).
-    sql += this.appendFilters(query, params);
+    from += this.appendFilters(query, params, { likeOnly: match.likeOnly });
+    const text = query.query?.trim();
+    if (match.likeOnly && text) {
+      // Free-text search over the same fields FTS indexes (subject, body, sender,
+      // cc, attachment names) so a fallback result set looks like an FTS one.
+      from += ` AND (emails.subject LIKE ? ESCAPE '\\' OR ${cleanBodyExpression()} LIKE ? ESCAPE '\\' OR emails.from_name LIKE ? ESCAPE '\\'`
+        + ` OR emails.from_address LIKE ? ESCAPE '\\' OR emails.cc_address LIKE ? ESCAPE '\\' OR emails.attachment_names LIKE ? ESCAPE '\\')`;
+      const like = this.likeContains(text);
+      params.push(like, like, like, like, like, like);
+    }
 
     // Sorting
     const sortBy = query.sortBy || 'date';
-    if (useFTS && (sortBy === 'relevance' || sortBy === 'date')) {
+    let key: string;
+    let direction: 'ASC' | 'DESC';
+    if (useFTS && sortBy === 'relevance') {
       // For relevance sort, blend the field-weighted bm25 score with lightweight
       // importance signals — a local-client take on Gmail's LTR re-rank
       // (Score = relevance + importance − time-decay), minus the neural net.
@@ -188,41 +219,45 @@ export class SearchRepository extends BaseRepository {
       // starred/important/unread matches UP without ever overriding a much stronger
       // keyword match. Recency is only a TIE-BREAKER (never demotes a better match,
       // so a "W2 2023"-style navigational search still surfaces the old mail).
-      if (sortBy === 'relevance') {
-        sql += `
-        ORDER BY (
-          relevance_score
+      key = `${FTS_RELEVANCE}
           - (CASE WHEN instr(emails.tags, '|starred|')   > 0 THEN 4.0 ELSE 0 END)
           - (CASE WHEN instr(emails.tags, '|important|') > 0 THEN 2.0 ELSE 0 END)
-          - (CASE WHEN instr(emails.tags, '|read|')      = 0 THEN 1.0 ELSE 0 END)
-        ) ASC, emails.date DESC`;
-      } else {
-        sql += ` ORDER BY emails.date DESC`;
-      }
+          - (CASE WHEN instr(emails.tags, '|read|')      = 0 THEN 1.0 ELSE 0 END)`;
+      direction = 'ASC';
+    } else if (useFTS && sortBy === 'date') {
+      key = 'emails.date';
+      direction = 'DESC';
     } else {
-      const { column, direction } = this.safeOrderBy(sortBy, query.sortOrder, SEARCH_SORT_COLUMNS, 'date');
-      sql += ` ORDER BY emails.${column} ${direction}`;
+      const safe = this.safeOrderBy(sortBy, query.sortOrder, SEARCH_SORT_COLUMNS, 'date');
+      key = `emails.${safe.column}`;
+      direction = safe.direction;
     }
+    // Ties break on recency, then on rowid, so the page boundary is the same
+    // row every time and the hydrating query can restore the exact order. On a
+    // date sort, (date, rowid) is the order of the date index itself.
+    const order = (prefix: string) => key === 'emails.date'
+      ? `${prefix}search_key ${direction}, ${prefix}search_rowid ${direction}`
+      : `${prefix}search_key ${direction}, ${prefix}search_date DESC, ${prefix}search_rowid DESC`;
 
+    let page = `SELECT emails.rowid AS search_rowid, emails.date AS search_date, ${key} AS search_key`
+      + `${useFTS ? `, ${FTS_RELEVANCE} AS relevance_score` : ''} ${from} ORDER BY ${order('')}`;
     // OFFSET without LIMIT is a SQLite syntax error, so an offset-only query threw
     // instead of paging. -1 is SQLite's "no limit".
     if (query.limit || query.offset) {
-      sql += ` LIMIT ?`;
+      page += ` LIMIT ?`;
       params.push(query.limit ?? -1);
     }
-
     if (query.offset) {
-      sql += ` OFFSET ?`;
+      page += ` OFFSET ?`;
       params.push(query.offset);
     }
 
-    try {
-      const rows = this.db.prepare(sql).all(...params) as any[];
-      return rows.map(row => this.rowToRecord(row));
-    } catch (error) {
-      logger.error('[SearchRepo] FTS search failed, falling back to LIKE:', error);
-      return this.searchWithLike(query);
-    }
+    const sql = `WITH search_hits AS MATERIALIZED (${page})
+      SELECT ${this.emailSelect('emails', query.headersOnly)}, ${this.threadMeta()}${useFTS ? ', search_hits.relevance_score' : ''}
+      FROM search_hits JOIN emails ON emails.rowid = search_hits.search_rowid
+      ORDER BY ${order('search_hits.')}`;
+    const rows = this.db.prepare(sql).all(...params) as unknown[];
+    return rows.map(row => this.rowToRecord(row));
   }
 
   /** Select a page of matching conversation keys before hydrating its members.
@@ -237,7 +272,7 @@ export class SearchRepository extends BaseRepository {
     const { column, direction } = this.safeOrderBy(query.sortBy, query.sortOrder, SEARCH_SORT_COLUMNS, 'date');
     let from = 'FROM emails WHERE 1=1';
     if (useFTS) {
-      from = 'FROM emails_fts JOIN emails ON emails.id = emails_fts.email_id WHERE emails_fts MATCH ?';
+      from = `FROM emails_fts JOIN emails ON ${FTS_JOIN} WHERE emails_fts MATCH ?`;
       params.push(ftsQuery);
     }
     from += this.appendFilters(query, params, { likeOnly });
@@ -248,7 +283,7 @@ export class SearchRepository extends BaseRepository {
       params.push(match, match, match, match, match, match);
     }
 
-    const relevance = useFTS ? 'bm25(emails_fts, 0, 10, 5, 3, 3, 2, 2, 1)' : '0';
+    const relevance = useFTS ? FTS_RELEVANCE : '0';
     const relevanceSort = useFTS && query.sortBy === 'relevance';
     const rank = relevanceSort ? `${relevance}
       - (CASE WHEN instr(emails.tags, '|starred|') > 0 THEN 4.0 ELSE 0 END)
@@ -469,8 +504,10 @@ export class SearchRepository extends BaseRepository {
       } else {
         const negFts = this.escapeFTSQuery(query.doesntHave);
         if (negFts) {
-          sql += ` AND emails.id NOT IN (
-            SELECT email_id FROM emails_fts WHERE emails_fts MATCH ?
+          // By rowid, as FTS_JOIN explains: naming the stored email_id here
+          // read the whole text of every message carrying the excluded word.
+          sql += ` AND emails.rowid NOT IN (
+            SELECT rowid FROM emails_fts WHERE emails_fts MATCH ?
           )`;
           params.push(negFts);
         }
@@ -513,7 +550,7 @@ export class SearchRepository extends BaseRepository {
     if (useFTS) {
       const ftsQuery = this.escapeFTSQuery(textQuery!);
       if (!ftsQuery) return this.countLike(query);
-      sql = `SELECT ${counted} as cnt FROM emails_fts JOIN emails ON emails.id = emails_fts.email_id WHERE emails_fts MATCH ?`;
+      sql = `SELECT ${counted} as cnt FROM emails_fts JOIN emails ON ${FTS_JOIN} WHERE emails_fts MATCH ?`;
       params.push(ftsQuery);
     } else {
       sql = `SELECT ${counted} as cnt FROM emails WHERE 1=1`;
@@ -544,37 +581,7 @@ export class SearchRepository extends BaseRepository {
    */
   private searchWithLike(query: SearchQuery): EmailRecord[] {
     if (query.collapseThreads) return this.searchThreads(query, true);
-    let sql = `SELECT ${this.emailSelect('emails', query.headersOnly)}, ${this.threadMeta()} FROM emails WHERE 1=1`;
-    const params: any[] = [];
-
-    sql += this.appendFilters(query, params, { likeOnly: true });
-
-    // Free-text search over the same fields FTS indexes (subject, body, sender,
-    // cc, attachment names) so a fallback result set looks like an FTS one.
-    if (query.query?.trim()) {
-      sql += ` AND (emails.subject LIKE ? ESCAPE '\\' OR ${cleanBodyExpression()} LIKE ? ESCAPE '\\' OR emails.from_name LIKE ? ESCAPE '\\'`
-        + ` OR emails.from_address LIKE ? ESCAPE '\\' OR emails.cc_address LIKE ? ESCAPE '\\' OR emails.attachment_names LIKE ? ESCAPE '\\')`;
-      const q = this.likeContains(query.query.trim());
-      params.push(q, q, q, q, q, q);
-    }
-
-    const { column, direction } = this.safeOrderBy(query.sortBy, query.sortOrder, SEARCH_SORT_COLUMNS, 'date');
-    sql += ` ORDER BY emails.${column} ${direction}`;
-
-    // OFFSET without LIMIT is a SQLite syntax error, so an offset-only query threw
-    // instead of paging. -1 is SQLite's "no limit".
-    if (query.limit || query.offset) {
-      sql += ` LIMIT ?`;
-      params.push(query.limit ?? -1);
-    }
-
-    if (query.offset) {
-      sql += ` OFFSET ?`;
-      params.push(query.offset);
-    }
-
-    const rows = this.db.prepare(sql).all(...params) as any[];
-    return rows.map(row => this.rowToRecord(row));
+    return this.searchPage(query, { likeOnly: true });
   }
 
   /**
