@@ -1,5 +1,7 @@
 // Core data models for Sarv Inbox
 
+import type { AiAction } from '../utils/ai-actions';
+
 /**
  * Email record stored in database
  */
@@ -124,6 +126,8 @@ export interface EmailRecord {
   aiProcessedAt?: number | null;
   aiConfidence?: number;
   aiReasoning?: string | null;
+  /** What the AI did to this email (emails.ai_actions), oldest first. See utils/ai-actions.ts. */
+  aiActions?: AiAction[];
 
   // Agent priority score (0-100, from BehaviorIntelligence)
   priorityScore?: number;

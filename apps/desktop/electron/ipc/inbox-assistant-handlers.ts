@@ -6,6 +6,7 @@ import { ipcMain, type IpcMainInvokeEvent } from 'electron';
 import type { InboxAssistantActivity, InboxAssistantAIUsage } from '../../src/types/inbox-assistant';
 import { requireAccountStorage, resolveNamedOrActiveAccountTarget } from '../services/account-target';
 import { readRegistryAccounts, resolveAccountIdentity } from '../services/accounts-registry';
+import { forgetAiActions, recordAiActions } from '../services/ai-action-record';
 import { readAssistantAttachment } from '../services/assistant-attachment-reader';
 import { changeAssistantReadFlags, changeAssistantStarFlags } from '../services/assistant-mail-actions';
 import { changeAssistantMailLocation } from '../services/assistant-mail-moves';
@@ -194,6 +195,13 @@ const service = new InboxAssistantService({
     revertSpamVerdict: async (accountId, rows) => {
       const target = await agentTarget(accountId);
       return revertAgentSpamVerdicts(target, verdictDepsOf(target.storage, target.engine), rows);
+    },
+    // The list's AI icon (emails.ai_actions): approved or automatic, and gone again on Undo.
+    recordAiActions: async (accountId, emailIds, kind, auto) => {
+      recordAiActions((await namedAccountTarget(accountId)).storage, emailIds, kind, { auto, accountId });
+    },
+    forgetAiActions: async (accountId, emailIds, kind) => {
+      forgetAiActions((await namedAccountTarget(accountId)).storage, emailIds, kind, { accountId });
     },
   },
 });

@@ -1,10 +1,10 @@
-import { Download, Loader2, Paperclip } from 'lucide-react';
+import { Download, Paperclip } from 'lucide-react';
 import { useState } from 'react';
 
 import { getFileIcon, getFileType } from '../email-detail/utils';
 import { Tooltip } from '../Tooltip';
 
-import { AttachmentDownloadStatus } from './AttachmentDownloadStatus';
+import { AttachmentDownloadStatus, AttachmentStopButton } from './AttachmentDownloadStatus';
 import { AttachmentViewer, type ViewerAttachment } from './AttachmentViewer';
 import { useAttachmentActions } from './useAttachmentActions';
 
@@ -93,6 +93,8 @@ export function AttachmentChips({
       <div className={style.wrap}>
         {attachments.map((attachment, index) => {
           const busy = isBusy(emailId, attachment.name, accountId);
+          const status = getStatus(emailId, attachment.name, accountId);
+          const cancel = () => { void cancelDownload(emailId, attachment.name, accountId); };
           return (
             <div
               key={`${attachment.name}:${index}`}
@@ -120,7 +122,7 @@ export function AttachmentChips({
                 className={`rounded-lg bg-muted/50 transition-colors group-hover:bg-background ${style.iconBox}`}
               >
                 {busy ? (
-                  <Loader2 className={`${style.spinner} animate-spin text-primary`} />
+                  <AttachmentStopButton status={status} filename={attachment.name} onCancel={cancel} iconClassName={`${style.spinner} text-primary`} className="text-primary" />
                 ) : (
                   getFileIcon(attachment.name)
                 )}
@@ -132,7 +134,7 @@ export function AttachmentChips({
                 <div className="text-[10px] text-muted-foreground mt-0.5">
                   {!busy && getFileType(attachment.name)}
                 </div>
-                <AttachmentDownloadStatus status={getStatus(emailId, attachment.name, accountId)} filename={attachment.name} onCancel={() => { void cancelDownload(emailId, attachment.name, accountId); }} />
+                <AttachmentDownloadStatus status={status} filename={attachment.name} onCancel={cancel} inlineProgress={false} />
               </div>
             </div>
           );

@@ -388,6 +388,14 @@ Established shared helpers (extend this list as you add more):
   an extension archive (allowlisted paths, plain files and the expected folders,
   never links). The installer and the build-time seed both unpack with it.
 
+- `recordAiActions(storage, ids, kind, { auto })` / `forgetAiActions(storage, ids, kind)` —
+  `apps/desktop/electron/services/ai-action-record.ts`, over `parseAiActions` /
+  `appendAiAction` / `describeAiAction` in `packages/core/src/utils/ai-actions.ts`
+  (renderer: `@sarvinbox/core/ai-actions`). The one way to say what the AI did
+  to an email (`emails.ai_actions`, the list's AI mark): stamps the row, tells the
+  open list, never throws. Background actions are stamped by `logUserAction`
+  (source `agent_auto`); Inbox Agent change sets stamp where they apply and undo.
+  Any new AI path that changes mail calls it, and takes it back on Undo.
 - `errorDiagnostic(error)` — `packages/core/src/utils/error-diagnostic.ts`. What a
   caught failure WAS (`{ name, code?, status? }`) and nothing of what it was
   working on. Use it at any `catch` whose record outlives the request (a saved

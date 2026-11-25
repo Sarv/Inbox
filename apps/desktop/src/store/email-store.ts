@@ -3,7 +3,7 @@
 
 import { create } from 'zustand';
 
-import { loadSavedViewMode, loadInboxSettings, saveViewMode, setupAICategorizationListeners, setupPersistedTagListener } from './helpers';
+import { loadSavedViewMode, loadInboxSettings, saveViewMode, setupAICategorizationListeners, setupAiActionsListener, setupPersistedTagListener } from './helpers';
 import { createComposeSlice } from './slices/compose-slice';
 import { createConnectionSlice } from './slices/connection-slice';
 import { createEmailActionsSlice } from './slices/email-actions-slice';
@@ -78,6 +78,7 @@ setupAICategorizationListeners(useEmailStore);
 
 // Adopt tag changes main made on its own (extensions acting on a card click).
 setupPersistedTagListener(useEmailStore);
+setupAiActionsListener(useEmailStore);
 
 // Re-export types for backward compatibility
 export type { ComposeMode, ComposeState, ConnectionStatus, ViewMode, AIProcessingProgress } from './types';

@@ -7,6 +7,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 
 import { Tooltip } from '../Tooltip';
 
+import { AiActionCounts } from './AiActionCounts';
+
 // ========== IPC shapes (mirror agent-handlers.ts return statements) ==========
 
 interface IpcResult<T> { success: boolean; data?: T; error?: string }
@@ -168,9 +170,11 @@ export function AgentDashboard({ onNavigateToEmail, onNavigateToContacts, onRefr
   const [loadError, setLoadError] = useState(false);
   const [agentMode, setAgentMode] = useState<'off' | 'suggest' | 'auto'>(readAgentMode);
   const mountedRef = useRef(true);
+  const [countsKey, setCountsKey] = useState(0);
 
   const load = useCallback(async (initial: boolean) => {
     if (initial) setLoading(true); else setRefreshing(true);
+    setCountsKey(key => key + 1);
     setAgentMode(readAgentMode());
     const api = agentIpc();
     try {
@@ -273,6 +277,9 @@ export function AgentDashboard({ onNavigateToEmail, onNavigateToContacts, onRefr
         refreshing={refreshing || loading}
         onRefresh={() => { void load(false); onRefresh?.(); }}
       />
+      {/* Outside the agent's own states: the Inbox Agent changes mail too,
+          whether or not the background agent is on. */}
+      <AiActionCounts refreshKey={countsKey} />
       {loading ? <DashboardSkeleton />
         : loadError ? <ErrorState onRetry={() => load(true)} />
         : isFirstRun ? <FirstRunState agentMode={agentMode} />
