@@ -7,22 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **See what the AI did to each email.** An email the AI changed (marked read
-  or unread, starred, archived, moved, labelled, snoozed, reported as spam, or
-  replied to with a draft or a sent reply) now shows a small AI mark before its
-  time in the list. Point at it to see what the AI did, when, and whether it
-  happened automatically or you approved it. Undo takes the mark away again.
-  AI → Dashboard has a new "What the AI did" panel that counts these actions by
-  kind, and how many emails the AI has sorted into categories. Sorting alone
-  gets no mark, since the AI sorts nearly every email.
-
-### Changed
-- **Stop an attachment download from the attachment itself.** While an
-  attachment downloads or is scanned, its chip in the message shows a spinner
-  with a stop button in place of a progress line under it. The downloads panel
-  still shows the full progress.
-
 ## [1.5.0] - 2026-11-25
 
 ### Added
@@ -95,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Changing a whole conversation leaves your own mail alone.** When the agent
   changes every email in a conversation, it never touches your drafts, and a
   move to a folder leaves your own sent replies in Sent.
+- **See what the AI did to each email.** An email the AI changed (marked read
+  or unread, starred, archived, moved, labelled, snoozed, reported as spam, or
+  replied to with a draft or a sent reply) now shows a small AI mark before its
+  time in the list. Point at it to see what the AI did, when, and whether it
+  happened automatically or you approved it. Undo takes the mark away again.
+  AI → Dashboard has a new "What the AI did" panel that counts these actions by
+  kind, and how many emails the AI has sorted into categories. Sorting alone
+  gets no mark, since the AI sorts nearly every email.
 
 ### Changed
 - **Inbox Agent asks again before changing mail in conversations where
@@ -110,6 +102,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   always ask, and it never sends mail or deletes it permanently. The mode
   cannot be changed while the agent is working on a request: stop the request
   first.
+- **Stop an attachment download from the attachment itself.** While an
+  attachment downloads or is scanned, its chip in the message shows a spinner
+  with a stop button in place of a progress line under it. The downloads panel
+  still shows the full progress.
 
 ### Removed
 - **The unread and uncategorized mail review cards.** This includes **Mark
