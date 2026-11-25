@@ -123,6 +123,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   searches could hang it for minutes. Search now picks the page of results
   first and reads only those emails.
 
+### Security
+- **The XML reader used for office attachments is updated to 5.12.** It fixes a
+  low-severity slowdown on malformed tags
+  ([GHSA-474x-hrwr-fgx4](https://github.com/advisories/GHSA-474x-hrwr-fgx4)).
+  Sarv Inbox never used the affected feature, so earlier versions were not
+  exposed.
+
 ## [1.4.12] - 2026-11-24
 
 ### Fixed
